@@ -343,6 +343,50 @@ static HBITMAP dib_to_bitmap(const uint8_t *data, uint32_t len)
     bits = data + hdrsize + palbytes;
     if ((uint32_t)(bits - data) > len) { free(bi); return NULL; }
 
+    /* A 1bpp resource has to become a MONOCHROME bitmap, not a colour one that
+       merely holds black and white pixels, because the two behave differently
+       the moment they are blitted.  Copying a monochrome source to a colour
+       destination is a conversion: 0 bits take the destination's text colour
+       and 1 bits its background colour.  That is how a program of this vintage
+       tints one sprite per player, and Stars! does exactly that - SetTextColor,
+       SetBkColor, then the classic pair of blits, SRCAND with the mask and
+       SRCPAINT with the image.
+
+       CreateDIBitmap against a screen DC hands back a 32bpp bitmap whatever the
+       DIB's depth, so the conversion never happens and the black and white get
+       copied literally: the star map's fleet markers come out as white
+       triangles in black squares instead of the owner's colour.
+
+       The bits are repacked rather than handed straight over, because the two
+       layouts disagree twice: a DIB's rows run bottom-up and are DWORD-aligned,
+       a monochrome DDB's run top-down and are WORD-aligned. */
+    if (bih.biBitCount == 1 && bih.biPlanes == 1) {
+        int w = (int)bih.biWidth;
+        int rows = bih.biHeight < 0 ? -(int)bih.biHeight : (int)bih.biHeight;
+        int topdown = bih.biHeight < 0;
+        size_t src_stride = (((size_t)w + 31) / 32) * 4;
+        size_t dst_stride = (((size_t)w + 15) / 16) * 2;
+        uint8_t *mono;
+        int y;
+
+        if (w <= 0 || rows <= 0) { free(bi); return NULL; }
+        if ((size_t)(bits - data) + src_stride * (size_t)rows > len) {
+            free(bi);
+            return NULL;
+        }
+        mono = calloc((size_t)rows, dst_stride);
+        if (!mono) { free(bi); return NULL; }
+        for (y = 0; y < rows; y++) {
+            const uint8_t *s = bits +
+                (size_t)(topdown ? y : rows - 1 - y) * src_stride;
+            memcpy(mono + (size_t)y * dst_stride, s, dst_stride);
+        }
+        bm = CreateBitmap(w, rows, 1, 1, mono);
+        free(mono);
+        free(bi);
+        return bm;
+    }
+
     dc = GetDC(NULL);
     bm = CreateDIBitmap(dc, &bi->bmiHeader, CBM_INIT, bits, bi, DIB_RGB_COLORS);
     ReleaseDC(NULL, dc);
