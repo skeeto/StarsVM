@@ -8,6 +8,7 @@
 #include "handle.h"
 #include "task.h"
 #include "sel.h"
+#include "gmem.h"
 #include "log.h"
 
 #include <stdio.h>
@@ -108,20 +109,6 @@ static uint32_t m_mciSendCommand(Cpu *c, Args *a)
 #define OFN16_nFileExtension 0x36
 #define OFN16_lpstrDefExt    0x38
 
-static char *gstr(uint32_t segptr, char *buf, size_t n)
-{
-    uint16_t sel = SEGPTR_SEL(segptr), off = SEGPTR_OFF(segptr);
-    size_t i = 0;
-    if (!segptr) { buf[0] = 0; return buf; }
-    while (i + 1 < n) {
-        uint8_t ch = sel_rd8(sel, (uint16_t)(off + i));
-        if (!ch) break;
-        buf[i++] = (char)ch;
-    }
-    buf[i] = 0;
-    return buf;
-}
-
 /* A filter is a run of NUL-terminated strings ending in an extra NUL, so it
    cannot be copied with a plain string copy. */
 static char *gfilter(uint32_t segptr, char *buf, size_t n)
@@ -158,12 +145,12 @@ static uint32_t commdlg_file(Cpu *c, Args *a, int save)
     filep  = sel_rd32(sel, (uint16_t)(off + OFN16_lpstrFile));
     titlep = sel_rd32(sel, (uint16_t)(off + OFN16_lpstrFileTitle));
 
-    gstr(filep, file, sizeof file);
+    g_str(filep, file, sizeof file);
     gfilter(sel_rd32(sel, (uint16_t)(off + OFN16_lpstrFilter)),
             filter, sizeof filter);
-    gstr(sel_rd32(sel, (uint16_t)(off + OFN16_lpstrInitialDir)), dir, sizeof dir);
-    gstr(sel_rd32(sel, (uint16_t)(off + OFN16_lpstrTitle)), title, sizeof title);
-    gstr(sel_rd32(sel, (uint16_t)(off + OFN16_lpstrDefExt)), deftext, sizeof deftext);
+    g_str(sel_rd32(sel, (uint16_t)(off + OFN16_lpstrInitialDir)), dir, sizeof dir);
+    g_str(sel_rd32(sel, (uint16_t)(off + OFN16_lpstrTitle)), title, sizeof title);
+    g_str(sel_rd32(sel, (uint16_t)(off + OFN16_lpstrDefExt)), deftext, sizeof deftext);
 
     /* The Win95-era struct size gets the classic dialog rather than the shell
        one, which is what a program of this vintage expects to be talking to. */

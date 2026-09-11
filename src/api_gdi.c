@@ -18,26 +18,13 @@
 #include "handle.h"
 #include "task.h"
 #include "sel.h"
+#include "gmem.h"
 #include "log.h"
 
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <windows.h>
-
-static char *gstr(uint32_t segptr, char *buf, size_t n)
-{
-    uint16_t sel = SEGPTR_SEL(segptr), off = SEGPTR_OFF(segptr);
-    size_t i = 0;
-    if (!segptr) { buf[0] = 0; return buf; }
-    while (i + 1 < n) {
-        uint8_t ch = sel_rd8(sel, (uint16_t)(off + i));
-        if (!ch) break;
-        buf[i++] = (char)ch;
-    }
-    buf[i] = 0;
-    return buf;
-}
 
 /* A GDI object handle of any kind. */
 static HGDIOBJ obj32(uint16_t h) { return (HGDIOBJ)h32(H_GDIOBJ, h); }
@@ -166,7 +153,7 @@ static uint32_t g_TextOut(Cpu *c, Args *a)
     uint32_t s = arg_long(a);
     int len = arg_sword(a);
     (void)c;
-    gstr(s, buf, sizeof buf);
+    g_str(s, buf, sizeof buf);
     if (len < 0 || (size_t)len > sizeof buf) len = (int)strlen(buf);
     return (uint32_t)TextOutA(dc, x, y, buf, len);
 }
@@ -186,7 +173,7 @@ static uint32_t g_ExtTextOut(Cpu *c, Args *a)
     BOOL ok;
 
     (void)c;
-    gstr(s, buf, sizeof buf);
+    g_str(s, buf, sizeof buf);
     if (len > sizeof buf - 1) len = sizeof buf - 1;
     if (rp) {
         uint16_t sel = SEGPTR_SEL(rp), off = SEGPTR_OFF(rp);
@@ -493,7 +480,7 @@ static uint32_t g_GetTextExtent(Cpu *c, Args *a)
     SIZE sz;
 
     (void)c;
-    gstr(s, buf, sizeof buf);
+    g_str(s, buf, sizeof buf);
     if (len < 0 || (size_t)len > sizeof buf) len = (int)strlen(buf);
     if (!GetTextExtentPoint32A(dc, buf, len, &sz)) return 0;
     return (uint32_t)MAKELONG(sz.cx, sz.cy);

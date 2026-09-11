@@ -16,6 +16,7 @@
 #include "thunk.h"
 #include "task.h"
 #include "sel.h"
+#include "gmem.h"
 #include "log.h"
 
 #include <stdio.h>
@@ -23,20 +24,6 @@
 #include <string.h>
 #include <wchar.h>
 #include <windows.h>
-
-static char *gstr(uint32_t segptr, char *buf, size_t n)
-{
-    uint16_t sel = SEGPTR_SEL(segptr), off = SEGPTR_OFF(segptr);
-    size_t i = 0;
-    if (!segptr) { buf[0] = 0; return buf; }
-    while (i + 1 < n) {
-        uint8_t ch = sel_rd8(sel, (uint16_t)(off + i));
-        if (!ch) break;
-        buf[i++] = (char)ch;
-    }
-    buf[i] = 0;
-    return buf;
-}
 
 static void pstr(uint32_t segptr, const char *s, unsigned max)
 {
@@ -269,10 +256,10 @@ static uint32_t p_GetPrivateProfileString(Cpu *c, Args *a)
     uint32_t filep = arg_long(a);
 
     (void)c;
-    gstr(secp, sec, sizeof sec);
-    gstr(keyp, key, sizeof key);
-    gstr(defp, def, sizeof def);
-    gstr(filep, file, sizeof file);
+    g_str(secp, sec, sizeof sec);
+    g_str(keyp, key, sizeof key);
+    g_str(defp, def, sizeof def);
+    g_str(filep, file, sizeof file);
     ini_path(file, path, sizeof path / sizeof *path);
 
     if (!ini_get(path, sec, key, value, sizeof value))
@@ -300,9 +287,9 @@ static uint32_t p_GetPrivateProfileInt(Cpu *c, Args *a)
     long v;
 
     (void)c;
-    gstr(secp, sec, sizeof sec);
-    gstr(keyp, key, sizeof key);
-    gstr(filep, file, sizeof file);
+    g_str(secp, sec, sizeof sec);
+    g_str(keyp, key, sizeof key);
+    g_str(filep, file, sizeof file);
     ini_path(file, path, sizeof path / sizeof *path);
 
     if (!ini_get(path, sec, key, value, sizeof value)) v = def;
@@ -323,10 +310,10 @@ static uint32_t p_WritePrivateProfileString(Cpu *c, Args *a)
     uint32_t filep = arg_long(a);
 
     (void)c;
-    gstr(secp, sec, sizeof sec);
-    gstr(keyp, key, sizeof key);
-    gstr(valp, val, sizeof val);
-    gstr(filep, file, sizeof file);
+    g_str(secp, sec, sizeof sec);
+    g_str(keyp, key, sizeof key);
+    g_str(valp, val, sizeof val);
+    g_str(filep, file, sizeof file);
     ini_path(file, path, sizeof path / sizeof *path);
 
     if (log_verbose)

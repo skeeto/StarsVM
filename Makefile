@@ -16,8 +16,12 @@ OBJDIR  := build
 TARGET  := Stars!VM.exe
 RES     := $(OBJDIR)/stars16.res.o
 
-SRC := $(wildcard $(SRCDIR)/*.c)
-OBJ := $(patsubst $(SRCDIR)/%.c,$(OBJDIR)/%.o,$(SRC))
+# A unity build: src/unity.c includes every other source, so the compiler sees
+# the whole program at once.  SRC is still every file, but only to make the one
+# object depend on all of them; unity.c itself is excluded so it cannot include
+# itself.
+SRC := $(filter-out $(SRCDIR)/unity.c,$(wildcard $(SRCDIR)/*.c))
+OBJ := $(OBJDIR)/unity.o
 DEP := $(OBJ:.o=.d)
 
 .PHONY: all clean imports fuzz
@@ -36,7 +40,7 @@ stars16_icon.rc:
 	-python tools/mkicon.py "Stars!.exe" stars16.ico $@ StarsIco
 	@test -f $@ || echo "/* no icon */" > $@
 
-$(OBJDIR)/%.o: $(SRCDIR)/%.c | $(OBJDIR)
+$(OBJDIR)/unity.o: $(SRCDIR)/unity.c $(SRC) | $(OBJDIR)
 	$(CC) $(CFLAGS) -c -o $@ $<
 
 $(OBJDIR):

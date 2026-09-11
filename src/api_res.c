@@ -36,7 +36,7 @@ static struct {
     uint32_t off, len;        /* file offset and byte length */
     uint16_t hglobal;         /* global block once loaded    */
     int      usage;
-} res[MAX_RES];
+} rsrc[MAX_RES];
 
 /* Resolve a guest resource type/name argument.  A Win16 MAKEINTRESOURCE is a
    far pointer with a zero selector, so the offset is the numeric id; anything
@@ -181,18 +181,18 @@ static uint32_t r_FindResource(Cpu *c, Args *a)
     }
     /* Reuse an existing entry for the same resource so handles compare equal. */
     for (i = 1; i < MAX_RES; i++)
-        if (res[i].used && res[i].type == type && res[i].name == name)
+        if (rsrc[i].used && rsrc[i].type == type && rsrc[i].name == name)
             return (uint32_t)i;
-    for (i = 1; i < MAX_RES; i++) if (!res[i].used) break;
+    for (i = 1; i < MAX_RES; i++) if (!rsrc[i].used) break;
     if (i == MAX_RES) { log_msg("FindResource: table full\n"); return 0; }
 
-    res[i].used = 1;
-    res[i].type = type;
-    res[i].name = name;
-    res[i].off  = nr.off;
-    res[i].len  = nr.len;
-    res[i].hglobal = 0;
-    res[i].usage = 0;
+    rsrc[i].used = 1;
+    rsrc[i].type = type;
+    rsrc[i].name = name;
+    rsrc[i].off  = nr.off;
+    rsrc[i].len  = nr.len;
+    rsrc[i].hglobal = 0;
+    rsrc[i].usage = 0;
     return (uint32_t)i;
 }
 
@@ -201,8 +201,8 @@ static uint32_t r_SizeofResource(Cpu *c, Args *a)
     uint16_t hinst = arg_word(a);
     uint16_t h = arg_word(a);
     (void)c; (void)hinst;
-    if (!h || h >= MAX_RES || !res[h].used) return 0;
-    return res[h].len;
+    if (!h || h >= MAX_RES || !rsrc[h].used) return 0;
+    return rsrc[h].len;
 }
 
 static uint32_t r_LoadResource(Cpu *c, Args *a)
@@ -212,21 +212,21 @@ static uint32_t r_LoadResource(Cpu *c, Args *a)
     NeModule *m = task.mod;
 
     (void)c; (void)hinst;
-    if (!h || h >= MAX_RES || !res[h].used) return 0;
-    if (res[h].hglobal) { res[h].usage++; return res[h].hglobal; }
+    if (!h || h >= MAX_RES || !rsrc[h].used) return 0;
+    if (rsrc[h].hglobal) { rsrc[h].usage++; return rsrc[h].hglobal; }
 
-    res[h].hglobal = gmem_alloc(MEM_MOVEABLE, res[h].len);
-    if (!res[h].hglobal) return 0;
-    if (res[h].off + res[h].len > m->imglen) {
+    rsrc[h].hglobal = gmem_alloc(MEM_MOVEABLE, rsrc[h].len);
+    if (!rsrc[h].hglobal) return 0;
+    if (rsrc[h].off + rsrc[h].len > m->imglen) {
         log_msg("LoadResource: resource %u runs past the end of the file\n", h);
         return 0;
     }
     /* The block may span several selectors for a resource over 64 KB; the arena
        lays those out consecutively, so one copy covers it. */
-    memcpy(sel_ptr(gmem_sel(res[h].hglobal), 0),
-           m->img + res[h].off, res[h].len);
-    res[h].usage = 1;
-    return res[h].hglobal;
+    memcpy(sel_ptr(gmem_sel(rsrc[h].hglobal), 0),
+           m->img + rsrc[h].off, rsrc[h].len);
+    rsrc[h].usage = 1;
+    return rsrc[h].hglobal;
 }
 
 static uint32_t r_LockResource(Cpu *c, Args *a)
@@ -246,10 +246,10 @@ static uint32_t r_FreeResource(Cpu *c, Args *a)
     int i;
     (void)c;
     for (i = 1; i < MAX_RES; i++)
-        if (res[i].used && res[i].hglobal == hmem) {
-            if (--res[i].usage > 0) return 0;
+        if (rsrc[i].used && rsrc[i].hglobal == hmem) {
+            if (--rsrc[i].usage > 0) return 0;
             gmem_free(hmem);
-            res[i].hglobal = 0;
+            rsrc[i].hglobal = 0;
             return 0;                    /* FreeResource returns FALSE on success */
         }
     gmem_free(hmem);
@@ -262,8 +262,8 @@ static uint32_t r_AllocResource(Cpu *c, Args *a)
     uint16_t h = arg_word(a);
     uint32_t size = arg_long(a);
     (void)c; (void)hinst;
-    if (!h || h >= MAX_RES || !res[h].used) return 0;
-    if (size < res[h].len) size = res[h].len;
+    if (!h || h >= MAX_RES || !rsrc[h].used) return 0;
+    if (size < rsrc[h].len) size = rsrc[h].len;
     return gmem_alloc(MEM_MOVEABLE, size);
 }
 
@@ -279,8 +279,8 @@ static uint32_t r_AccessResource(Cpu *c, Args *a)
     uint16_t hinst = arg_word(a);
     uint16_t h = arg_word(a);
     (void)c; (void)hinst;
-    if (!h || h >= MAX_RES || !res[h].used) return 0xFFFF;
-    return dos_open_at(task.exepathw, task.mod->base + res[h].off);
+    if (!h || h >= MAX_RES || !rsrc[h].used) return 0xFFFF;
+    return dos_open_at(task.exepathw, task.mod->base + rsrc[h].off);
 }
 
 /* ---- bitmaps -------------------------------------------------------------- */

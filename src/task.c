@@ -71,7 +71,7 @@ int task_start(NeModule *m, Cpu *c, const char *cmdline, int ncmdshow)
     Task *t = &task;
     NeSeg *cs = ne_seg(m, (unsigned)(m->csip >> 16));
     NeSeg *dg = ne_seg(m, m->autodata);
-    uint16_t sp, heap_base;
+    uint16_t sp, lheap_at;
     char *slash;
 
     if (!cs || !dg) {
@@ -124,9 +124,9 @@ int task_start(NeModule *m, Cpu *c, const char *cmdline, int ncmdshow)
     }
     sp &= (uint16_t)~1u;
 
-    heap_base = sp;
-    if (m->heap && (uint32_t)heap_base + m->heap <= dg->size)
-        lmem_init(dg->sel, heap_base, m->heap);
+    lheap_at = sp;
+    if (m->heap && (uint32_t)lheap_at + m->heap <= dg->size)
+        lmem_init(dg->sel, lheap_at, m->heap);
     else if (m->heap)
         log_msg("task: no room for a %u-byte local heap above sp=%04X\n",
                 m->heap, sp);

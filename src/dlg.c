@@ -210,9 +210,9 @@ static struct {
     int      modeless;
 } dlgs[MAX_DIALOGS];
 
-static uint32_t pending_proc;
-static uint16_t pending_inst;
-static int      pending_modeless;
+static uint32_t dlg_pending_proc;
+static uint16_t dlg_pending_inst;
+static int      dlg_pending_modeless;
 
 static int dlg_slot(HWND h)
 {
@@ -250,12 +250,12 @@ static INT_PTR CALLBACK dlgproc_bridge(HWND hwnd, UINT msg,
 
     if (!proc16) {
         /* The first message for a dialog we are creating; adopt it. */
-        if (!pending_proc) return FALSE;
-        dlg_proc_set(hwnd, pending_proc, pending_inst);
+        if (!dlg_pending_proc) return FALSE;
+        dlg_proc_set(hwnd, dlg_pending_proc, dlg_pending_inst);
         slot = dlg_slot(hwnd);
-        if (slot >= 0) dlgs[slot].modeless = pending_modeless;
-        proc16 = pending_proc;
-        pending_proc = 0;
+        if (slot >= 0) dlgs[slot].modeless = dlg_pending_modeless;
+        proc16 = dlg_pending_proc;
+        dlg_pending_proc = 0;
     }
     slot = dlg_slot(hwnd);
     hinst = (slot >= 0) ? dlgs[slot].hinstance : task.hinstance;
@@ -326,13 +326,13 @@ static uint32_t d_DialogBox(Cpu *c, Args *a)
     tmpl = template_for(namep, label, sizeof label);
     if (!tmpl) return (uint32_t)-1;
 
-    pending_proc = proc;
-    pending_inst = inst ? inst : task.hinstance;
-    pending_modeless = 0;
+    dlg_pending_proc = proc;
+    dlg_pending_inst = inst ? inst : task.hinstance;
+    dlg_pending_modeless = 0;
     r = DialogBoxIndirectParamW(GetModuleHandleA(NULL),
                                 (LPCDLGTEMPLATEW)tmpl, HWND_32(parent),
                                 dlgproc_bridge, 0);
-    pending_proc = 0;
+    dlg_pending_proc = 0;
     free(tmpl);
     if (r == -1)
         log_msg("*** DialogBox(%s) failed: %lu\n", label, GetLastError());
@@ -353,13 +353,13 @@ static uint32_t d_CreateDialog(Cpu *c, Args *a)
     tmpl = template_for(namep, label, sizeof label);
     if (!tmpl) return 0;
 
-    pending_proc = proc;
-    pending_inst = inst ? inst : task.hinstance;
-    pending_modeless = 1;
+    dlg_pending_proc = proc;
+    dlg_pending_inst = inst ? inst : task.hinstance;
+    dlg_pending_modeless = 1;
     h = CreateDialogIndirectParamW(GetModuleHandleA(NULL),
                                    (LPCDLGTEMPLATEW)tmpl, HWND_32(parent),
                                    dlgproc_bridge, 0);
-    pending_proc = 0;
+    dlg_pending_proc = 0;
     free(tmpl);
     if (!h) {
         log_msg("*** CreateDialog(%s) failed: %lu\n", label, GetLastError());

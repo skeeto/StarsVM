@@ -9,6 +9,7 @@
 #include "thunk.h"
 #include "task.h"
 #include "sel.h"
+#include "gmem.h"
 #include "log.h"
 #include "handle.h"
 #include "winproc.h"
@@ -68,27 +69,13 @@ static uint32_t u_PostQuitMessage(Cpu *c, Args *a)
 
 /* ---- strings and rects ---------------------------------------------------- */
 
-static char *gstr(uint32_t segptr, char *buf, size_t n)
-{
-    uint16_t sel = SEGPTR_SEL(segptr), off = SEGPTR_OFF(segptr);
-    size_t i = 0;
-    if (!segptr) { buf[0] = 0; return buf; }
-    while (i + 1 < n) {
-        uint8_t ch = sel_rd8(sel, (uint16_t)(off + i));
-        if (!ch) break;
-        buf[i++] = (char)ch;
-    }
-    buf[i] = 0;
-    return buf;
-}
-
 /* A resource name is either a string or MAKEINTRESOURCE, which in Win16 is a
    far pointer whose selector is zero. */
 static const char *gres(uint32_t segptr, char *buf, size_t n)
 {
     if (!segptr) return NULL;
     if (SEGPTR_SEL(segptr) == 0) return MAKEINTRESOURCEA(SEGPTR_OFF(segptr));
-    return gstr(segptr, buf, n);
+    return g_str(segptr, buf, n);
 }
 
 static void put_rect16(uint32_t p, const RECT *r)
@@ -170,7 +157,7 @@ static uint32_t u_RegisterClass(Cpu *c, Args *a)
                                                 : (HBRUSH)h32(H_BRUSH, bg);
     }
     wc.lpfnWndProc  = winproc_bridge;
-    wc.lpszClassName = gstr(sel_rd32(sel, (uint16_t)(off + 22)), cls, sizeof cls);
+    wc.lpszClassName = g_str(sel_rd32(sel, (uint16_t)(off + 22)), cls, sizeof cls);
     {
         /* lpszMenuName names a resource in the GUEST's module.  Handing it to
            RegisterClassA would have Win32 look for it in ours, where it does not
@@ -221,8 +208,8 @@ static uint32_t u_CreateWindow(Cpu *c, Args *a)
     DWORD exstyle = 0;
 
     (void)c;
-    gstr(clsp, cls, sizeof cls);
-    gstr(namep, name, sizeof name);
+    g_str(clsp, cls, sizeof cls);
+    g_str(namep, name, sizeof name);
 
     proc16 = class_proc(cls);
     winproc_set_pending(proc16, inst ? inst : task.hinstance);
@@ -549,8 +536,8 @@ static uint32_t u_MessageBox(Cpu *c, Args *a)
     uint16_t type = arg_word(a);
 
     (void)c;
-    gstr(t, text, sizeof text);
-    gstr(cap, caption, sizeof caption);
+    g_str(t, text, sizeof text);
+    g_str(cap, caption, sizeof caption);
     log_msg("MessageBox: \"%s\" / \"%s\"\n", caption, text);
     return (uint32_t)MessageBoxA(HWND_32(hwnd), text,
                                  caption[0] ? caption : "Stars!", type);
@@ -662,7 +649,7 @@ static uint32_t u_SetWindowText(Cpu *c, Args *a)
     uint32_t text = arg_long(a);
     char buf[512];
     (void)c;
-    gstr(text, buf, sizeof buf);
+    g_str(text, buf, sizeof buf);
     return (uint32_t)SetWindowTextA(HWND_32(hwnd), buf);
 }
 
@@ -896,7 +883,7 @@ static uint32_t u_DrawText(Cpu *c, Args *a)
     int n;
 
     (void)c;
-    gstr(textp, buf, sizeof buf);
+    g_str(textp, buf, sizeof buf);
     get_rect16(p, &r);
     n = DrawTextA(HDC_32(hdc), buf, len < 0 ? -1 : len, &r, fmt);
     if (fmt & DT_CALCRECT) put_rect16(p, &r);
@@ -1177,7 +1164,7 @@ static uint32_t menu_item(Cpu *c, uint16_t menu, uint16_t flags, uint16_t id,
     if (flags & MF_POPUP) item = (UINT_PTR)HMENU_32(id);
     if (flags & MF_BITMAP) str = (const void *)h32(H_BITMAP, (uint16_t)data);
     else if (!(flags & (MF_SEPARATOR | MF_OWNERDRAW)))
-        str = gstr(data, buf, sizeof buf);
+        str = g_str(data, buf, sizeof buf);
 
     if (insert)
         return (uint32_t)InsertMenuA(HMENU_32(menu), pos, flags, item, str);
@@ -1239,7 +1226,7 @@ static uint32_t u_WinHelp(Cpu *c, Args *a)
     static int warned;
 
     (void)c; (void)hwnd; (void)data;
-    gstr(file, buf, sizeof buf);
+    g_str(file, buf, sizeof buf);
     /* Modern Windows has no WinHlp32, so there is nothing to forward to. */
     if (!warned) {
         warned = 1;
@@ -1264,7 +1251,7 @@ static uint32_t u_wsprintf(Cpu *c, Args *a)
     size_t fi = 0, oi = 0;
 
     (void)c;
-    gstr(fmtp, fmt, sizeof fmt);
+    g_str(fmtp, fmt, sizeof fmt);
 
     while (fmt[fi] && oi + 1 < sizeof out) {
         size_t si = 0;
@@ -1316,7 +1303,7 @@ static uint32_t u_wsprintf(Cpu *c, Args *a)
         case 's': case 'S': {
             char sbuf[512];
             uint32_t sp = arg_long_up(a);
-            gstr(sp, sbuf, sizeof sbuf);
+            g_str(sp, sbuf, sizeof sbuf);
             spec[si++] = 's';
             spec[si] = 0;
             fi++;

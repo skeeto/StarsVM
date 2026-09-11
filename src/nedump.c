@@ -7,7 +7,7 @@
 #include <stdio.h>
 #include <string.h>
 
-static uint16_t rd16(const uint8_t *p) { return (uint16_t)(p[0] | (p[1] << 8)); }
+static uint16_t dmp_rd16(const uint8_t *p) { return (uint16_t)(p[0] | (p[1] << 8)); }
 
 static const char *seg_flag_str(uint16_t f, char *buf, size_t n)
 {
@@ -34,7 +34,7 @@ static void dump_relocs(NeModule *m, unsigned segno, int verbose)
     if (!(s->flags & NES_RELOCINFO)) return;
     pos = s->filepos + (s->length ? s->length : 0x10000u);
     if (pos + 2 > m->imglen) return;
-    count = rd16(m->img + pos);
+    count = dmp_rd16(m->img + pos);
     rec = m->img + pos + 2;
     if (pos + 2 + (size_t)count * 8 > m->imglen) return;
 
@@ -48,7 +48,7 @@ static void dump_relocs(NeModule *m, unsigned segno, int verbose)
         default:            nos++;   break;
         }
         if (verbose > 1) {
-            uint16_t off = rd16(rec + 2), t1 = rd16(rec + 4), t2 = rd16(rec + 6);
+            uint16_t off = dmp_rd16(rec + 2), t1 = dmp_rd16(rec + 4), t2 = dmp_rd16(rec + 6);
             const char *mod = (rtype == NERT_ORDINAL && t1 >= 1 && t1 <= m->cmod)
                               ? m->modname[t1 - 1] : "";
             log_msg("      at %04X atype=%-2u rtype=%u%s t1=%04X t2=%04X %s%s\n",
@@ -88,10 +88,10 @@ static void dump_entries(NeModule *m)
 
             if (type == 0xFF) {
                 if (p + 6 > end) return;
-                fl = p[0]; sg = p[3]; off = rd16(p + 4); p += 6;
+                fl = p[0]; sg = p[3]; off = dmp_rd16(p + 4); p += 6;
             } else {
                 if (p + 3 > end) return;
-                fl = p[0]; sg = (uint8_t)type; off = rd16(p + 1); p += 3;
+                fl = p[0]; sg = (uint8_t)type; off = dmp_rd16(p + 1); p += 3;
             }
             name[0] = 0;
             {   /* find this ordinal in the resident name table */
@@ -99,7 +99,7 @@ static void dump_entries(NeModule *m)
                 int first = 1;
                 while (*r) {
                     unsigned len = *r;
-                    if (!first && rd16(r + 1 + len) == ord) {
+                    if (!first && dmp_rd16(r + 1 + len) == ord) {
                         if (len > sizeof name - 1) len = sizeof name - 1;
                         memcpy(name, r + 1, len);
                         name[len] = 0;
@@ -127,22 +127,22 @@ static void dump_resources(NeModule *m)
 
     if (!m->rsrctab) { log_msg("\nNo resource table\n"); return; }
     rt = m->img + m->hdr + m->rsrctab;
-    shift = rd16(rt);
+    shift = dmp_rd16(rt);
     p = rt + 2;
 
     log_msg("\nResource table (alignment shift %u)\n", shift);
     for (;;) {
-        uint16_t tid = rd16(p);
+        uint16_t tid = dmp_rd16(p);
         uint16_t cnt;
         unsigned i;
         uint32_t bytes = 0;
         char tname[64];
 
         if (tid == 0) break;
-        cnt = rd16(p + 2);
+        cnt = dmp_rd16(p + 2);
         p += 8;
         for (i = 0; i < cnt; i++)
-            bytes += (uint32_t)rd16(p + i * 12 + 2) << shift;
+            bytes += (uint32_t)dmp_rd16(p + i * 12 + 2) << shift;
         grand += bytes;
         log_msg("  type %-10s count %3u  %8u bytes\n",
                 ne_resource_type_name(m, tid, tname, sizeof tname), cnt, bytes);
