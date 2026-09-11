@@ -1,0 +1,16 @@
+# Build output.
+build/
+stars16.exe
+
+# Generated at build time by tools/mkicon.py from the game's own
+# RT_GROUP_ICON.  Not checked in: it is derived, and the artwork belongs to
+# Stars!, not to this program.  A build with no Stars!.exe next door gets a
+# comment in place of the ICON directive and still links.
+stars16.ico
+stars16_icon.rc
+
+# Logs and screenshots from driving the game.
+*.log
+*.png
+
+__pycache__/

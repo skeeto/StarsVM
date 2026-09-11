@@ -1,0 +1,239 @@
+/* thunk.c - dispatching guest calls out to host handlers, and host calls back
+   into guest code. */
+
+#include "thunk.h"
+#include "sel.h"
+#include "log.h"
+#include "fpu.h"
+
+#include <stdio.h>
+#include <string.h>
+
+ImpEntry *imp_slot(unsigned index);
+unsigned  imp_index_for_offset(uint16_t off);
+
+/* Keep going after an unimplemented API (returning zero) instead of stopping.
+   Useful for surveying what the game calls; wrong answers, but a long log. */
+int thunk_survey;
+
+/* The last import that had no handler, so the stop can name it even where the
+   log went nowhere. */
+static char last_missing[64];
+
+const char *thunk_last_missing(void)
+{
+    return last_missing[0] ? last_missing : NULL;
+}
+
+static uint16_t ret_sel;
+static int      depth;
+
+int call16_depth(void) { return depth; }
+
+uint16_t call16_ret_selector(void) { return ret_sel; }
+
+int call16_init(void)
+{
+    ret_sel = sel_alloc(0x10000u, SK_CODE);
+    if (!ret_sel) {
+        log_msg("thunk: cannot allocate the return selector\n");
+        return 0;
+    }
+    return 1;
+}
+
+/* --------------------------------------------------------- guest -> host ---- */
+
+static void log_call(const ImpEntry *e, const uint16_t *words, unsigned nwords)
+{
+    char buf[256];
+    int n = 0;
+    unsigned i;
+
+    n += snprintf(buf + n, sizeof buf - n, "%s.%u %s(",
+                  e->module, e->ordinal, e->name);
+    /* Print in declaration order, i.e. from the top of the block downwards. */
+    for (i = nwords; i-- > 0 && n < (int)sizeof buf - 8; )
+        n += snprintf(buf + n, sizeof buf - n, "%04X%s", words[i], i ? " " : "");
+    snprintf(buf + n, sizeof buf - n, ")");
+    log_msg("%s\n", buf);
+}
+
+void thunk_dispatch(Cpu *c, uint16_t off)
+{
+    unsigned index = imp_index_for_offset(off);
+    ImpEntry *e = imp_slot(index);
+    uint16_t ss = c->seg[S_SS];
+    uint16_t sp = reg16(c, R_SP);
+    uint16_t ret_ip, ret_cs;
+    const uint16_t *words;
+    uint32_t result = 0;
+    Args a;
+
+    if (!e) {
+        log_msg("*** call into thunk selector at offset %04X, which is not a slot\n",
+                off);
+        c->state = CPU_BADOP;
+        return;
+    }
+
+    ret_ip = sel_rd16(ss, sp);
+    ret_cs = sel_rd16(ss, (uint16_t)(sp + 2));
+    words  = (const uint16_t *)sel_ptr(ss, (uint16_t)(sp + 4));
+
+    if (log_verbose) log_call(e, words, e->pop / 2u);
+
+    if (!e->fn) {
+        snprintf(last_missing, sizeof last_missing, "%s.%u %s",
+                 e->module, e->ordinal, e->name);
+        log_msg("*** %s.%u %s is not implemented (called from %04X:%04X)\n",
+                e->module, e->ordinal, e->name, ret_cs, ret_ip);
+        if (!log_verbose) log_call(e, words, e->pop / 2u);
+        if (!thunk_survey) {
+            c->state = CPU_NOAPI;
+            c->bad_cs = ret_cs;
+            c->bad_ip = ret_ip;
+            return;
+        }
+    } else {
+        a.top = words + e->pop / 2u;
+        result = e->fn(c, &a);
+    }
+
+    /* A register-convention entry (InitTask, DOS3Call, the FP dispatcher) takes
+       no stack arguments and returns through the whole register file, so its
+       handler has already set what it needs; overwriting AX and DX here would
+       destroy the result. */
+    if (!(e->flags & IMP_REGISTER)) {
+        set_reg16(c, R_AX, (uint16_t)result);
+        if (e->flags & IMP_RET32) set_reg16(c, R_DX, (uint16_t)(result >> 16));
+    }
+
+    /* Do the RETF the real entry point would have done.  A cdecl entry leaves
+       the arguments for the caller to remove. */
+    sp = (uint16_t)(sp + 4 + ((e->flags & IMP_CDECL) ? 0 : e->pop));
+    set_reg16(c, R_SP, sp);
+    c->seg[S_CS] = ret_cs;
+    c->eip = ret_ip;
+}
+
+/* --------------------------------------------------------- host -> guest ---- */
+
+uint32_t call16_wndproc(uint32_t proc, uint16_t ax,
+                        const uint16_t *args, unsigned nbytes,
+                        void *extra, unsigned extralen)
+{
+    Cpu *c = &cpu;
+    Cpu saved;
+    uint32_t result;
+    unsigned i;
+    uint16_t sp;
+    uint16_t extra_sel = 0, extra_off = 0;
+    int r;
+
+    if (!proc) return 0;
+    if (depth >= 32) {
+        log_msg("*** call16 nested %d deep; refusing to go further\n", depth);
+        c->bad_cs = SEGPTR_SEL(proc);
+        c->bad_ip = SEGPTR_OFF(proc);
+        cpu_stop_latch(c, CPU_FAULT);
+        return 0;
+    }
+
+    saved = *c;
+
+    /* Guest stack check: leave room for the frame plus headroom for whatever the
+       callee does.  DGROUP holds only ne_stack bytes, and deep callback chains
+       are how that gets exhausted. */
+    sp = reg16(c, R_SP);
+    if (sp < nbytes + extralen + 0x200) {
+        log_msg("*** guest stack exhausted (sp=%04X, need %u) at call16 depth %d\n",
+                sp, nbytes + extralen + 0x200, depth);
+        c->bad_cs = SEGPTR_SEL(proc);
+        c->bad_ip = SEGPTR_OFF(proc);
+        cpu_stop_latch(c, CPU_FAULT);
+        return 0;
+    }
+
+    /* Optionally place a struct on the guest stack and point the last four
+       argument bytes at it.  Win16 code frequently treats such an lParam as a
+       near pointer, which only works when it really lives in SS. */
+    if (extra && extralen) {
+        sp = (uint16_t)(sp - extralen);
+        set_reg16(c, R_SP, sp);
+        memcpy(sel_ptr(c->seg[S_SS], sp), extra, extralen);
+        extra_sel = c->seg[S_SS];
+        extra_off = sp;
+    }
+
+    /* args[0] is the last declared argument, so pushing from the top down leaves
+       args[0] at the lowest address - the layout the callee expects. */
+    for (i = nbytes / 2u; i-- > 0; ) {
+        uint16_t w = args[i];
+        if (extra && extralen && i < 2) {
+            /* Rewrite the far pointer to point at the copy we just made. */
+            w = (i == 0) ? sp : c->seg[S_SS];
+        }
+        cpu_push16(c, w);
+    }
+
+    depth++;
+    cpu_push16(c, ret_sel);
+    cpu_push16(c, (uint16_t)depth);
+
+    c->seg[S_CS] = SEGPTR_SEL(proc);
+    c->eip       = SEGPTR_OFF(proc);
+    c->seg[S_DS] = c->seg[S_SS];
+    c->seg[S_ES] = c->seg[S_SS];
+    set_reg16(c, R_AX, ax ? ax : c->seg[S_SS]);
+    set_reg16(c, R_BP, (uint16_t)(reg16(c, R_SP) + 2));
+
+    /* A budget rather than no limit: a callback that never reaches the return
+       address would otherwise hang the whole program with no clue why, which is
+       exactly how a wiped return selector presented itself. */
+    r = cpu_run(c, 200000000ull);
+    depth--;
+
+    /* Read the struct back before the CPU state is restored; the bytes live in
+       the arena and are still there, but the selector and offset are only known
+       here. */
+    if (extra && extralen)
+        memcpy(extra, sel_ptr(extra_sel, extra_off), extralen);
+
+    if (r == CPU_STEPS)
+        log_msg("*** guest callback %04X:%04X ran away (no return after 200M "
+                "instructions)\n", SEGPTR_SEL(proc), SEGPTR_OFF(proc));
+    if (r != CPU_RETURN) {
+        if (!cpu_stop_latched())
+            log_msg("*** guest callback %04X:%04X stopped: %s at %04X:%04X"
+                    " (op %02X %02X)\n",
+                    SEGPTR_SEL(proc), SEGPTR_OFF(proc), cpu_state_name(r),
+                    c->bad_cs, c->bad_ip, c->bad_op, c->bad_op2);
+        /* The host frames between here and the interpreter - DispatchMessage, a
+           modal dialog loop - have no way to carry a failure back out, and
+           returning 0 to Win32 as though nothing happened is exactly how the
+           serial-number dialog vanished without trace.  Latch it instead, so no
+           further guest instruction runs and one report comes out at the top. */
+        if (r == CPU_NOAPI || r == CPU_BADOP || r == CPU_FAULT || r == CPU_STEPS)
+            cpu_stop_latch(c, r);
+        result = 0;
+    } else {
+        result = (uint32_t)reg16(c, R_AX) | ((uint32_t)reg16(c, R_DX) << 16);
+    }
+
+    /* Restore everything except the result.  Like Wine, we do not trust the
+       callee to have balanced the stack. */
+    {
+        uint32_t ax_ = c->r32[R_AX], dx_ = c->r32[R_DX];
+        *c = saved;
+        c->r32[R_AX] = ax_;
+        c->r32[R_DX] = dx_;
+        c->state = CPU_RUNNING;
+    }
+    return result;
+}
+
+uint32_t call16(uint32_t proc, const uint16_t *args, unsigned nbytes)
+{
+    return call16_wndproc(proc, 0, args, nbytes, NULL, 0);
+}
