@@ -46,15 +46,21 @@ static int looks_like_ne(const uint8_t *d, uint32_t len, uint32_t at)
 {
     uint32_t lfanew, cseg, segtab;
 
+    /* e_lfanew is an arbitrary dword from whatever bytes were concatenated, so
+       every bound is written as a subtraction from `len` rather than a sum
+       against it: `at + lfanew + 0x40 > len` wraps for a hostile lfanew and
+       admits an index far outside the buffer.  Each subtraction below is safe
+       because the test before it has already established the room it needs. */
     if (at + 0x40 > len || d[at] != 0x4D || d[at + 1] != 0x5A) return 0;
     lfanew = rd32(d + at + 0x3C);
-    if (lfanew < 0x40 || at + lfanew + 0x40 > len) return 0;
+    if (lfanew < 0x40 || lfanew > len - at - 0x40) return 0;
     if (d[at + lfanew] != 0x4E || d[at + lfanew + 1] != 0x45) return 0;
 
     cseg   = rd16(d + at + lfanew + 0x1C);
     segtab = rd16(d + at + lfanew + 0x22);
     if (cseg == 0 || cseg > 4096) return 0;
-    if (at + lfanew + segtab + cseg * 8u > len) return 0;
+    if (segtab > len - at - lfanew) return 0;
+    if (cseg * 8u > len - at - lfanew - segtab) return 0;
     return 1;
 }
 

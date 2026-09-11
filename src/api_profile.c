@@ -133,10 +133,12 @@ static int ini_get(const wchar_t *path, const char *section, const char *key,
                    char *value, size_t vlen)
 {
     size_t len;
-    char *text = slurp(path, &len);
+    char *text;
     char *line, *next;
     int in_section = 0, found = 0;
 
+    if (!path[0]) return 0;
+    text = slurp(path, &len);
     if (!text) return 0;
     for (line = text; line && *line; line = next) {
         char *eol = strchr(line, '\n');
@@ -175,11 +177,19 @@ static int ini_set(const wchar_t *path, const char *section, const char *key,
                    const char *value)
 {
     size_t len;
-    char *text = slurp(path, &len);
+    char *text;
     FILE *out;
     char *line, *next;
     int in_section = 0, wrote = 0, seen_section = 0;
     wchar_t tmp[MAX_PATH + 8];
+
+    /* ini_path refuses rather than truncates, and hands back an empty string
+       when it does.  Without this the ".tmp" suffix would be the whole name and
+       the settings would land in a file called ".tmp" in whatever the current
+       directory happens to be - which is worse than not writing them at all,
+       because it looks like it worked. */
+    if (!path[0]) return 0;
+    text = slurp(path, &len);
 
     _snwprintf(tmp, sizeof tmp / sizeof *tmp - 1, L"%.*ls.tmp",
                (int)(sizeof tmp / sizeof *tmp - 6), path);

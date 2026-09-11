@@ -1153,8 +1153,19 @@ static uint32_t u_EnableMenuItem(Cpu *c, Args *a)
 static uint32_t u_CreatePopupMenu(Cpu *c, Args *a)
 { (void)c; (void)a; return HMENU_16(CreatePopupMenu()); }
 
-/* A string item's data is a far pointer; a bitmap item's is a handle whose high
-   word is the caller's data segment, so only the low word is meaningful. */
+/* AppendMenu(hMenu, wFlags, wIDNewItem, lpNewItem) - and the two arguments are
+   not interchangeable.  wIDNewItem is the command id, EXCEPT under MF_POPUP,
+   where it is the handle of the drop-down menu; lpNewItem is always the label,
+   a far pointer to a string, or a bitmap handle under MF_BITMAP whose high word
+   is the caller's data segment and so carries nothing.
+
+   Taking the submenu from lpNewItem instead is silent and specific: the item
+   still appears with the right text, because Win32 copies the label, but its
+   submenu handle is nonsense and the cascade never opens.  In Stars! that is
+   the Advanced New Game Wizard's player list, where Predefined Race, Custom
+   Race and Computer Player are all submenus - so every way of ADDING a player
+   did nothing, and only "No Player", the one plain command item on the menu,
+   worked. */
 static uint32_t menu_item(Cpu *c, uint16_t menu, uint16_t flags, uint16_t id,
                           uint32_t data, uint16_t pos, int insert)
 {
@@ -1163,7 +1174,7 @@ static uint32_t menu_item(Cpu *c, uint16_t menu, uint16_t flags, uint16_t id,
     const void *str = NULL;
 
     (void)c;
-    if (flags & MF_POPUP) item = (UINT_PTR)HMENU_32((uint16_t)data);
+    if (flags & MF_POPUP) item = (UINT_PTR)HMENU_32(id);
     if (flags & MF_BITMAP) str = (const void *)h32(H_BITMAP, (uint16_t)data);
     else if (!(flags & (MF_SEPARATOR | MF_OWNERDRAW)))
         str = gstr(data, buf, sizeof buf);
