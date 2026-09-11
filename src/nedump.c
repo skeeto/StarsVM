@@ -157,7 +157,7 @@ void ne_dump(NeModule *m, int verbose)
     char buf[128];
 
     log_msg("%s: NE module \"%s\" (%u bytes, header at %08X)\n",
-            m->path, m->name, m->imglen, m->hdr);
+            log_wide(m->path), m->name, m->imglen, m->hdr);
     log_msg("  flags      %04X  %s%s%s%s\n", m->flags,
             (m->flags & NEF_SINGLEDATA)   ? "SINGLEDATA "   : "",
             (m->flags & NEF_MULTIPLEDATA) ? "MULTIPLEDATA " : "",

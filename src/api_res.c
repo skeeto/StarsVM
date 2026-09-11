@@ -268,14 +268,19 @@ static uint32_t r_AllocResource(Cpu *c, Args *a)
 }
 
 /* AccessResource hands back a DOS file handle already positioned at the data.
-   The game uses this plus _lread for the bitmaps that exceed 64 KB. */
+   The game uses this plus _lread for the bitmaps that exceed 64 KB.
+
+   This is the one place a resource offset escapes as a FILE offset rather than
+   an offset into the loaded image, so it is the one place that has to add
+   NeModule.base: when the module is appended to our own executable, the two
+   differ by however many bytes of us come first. */
 static uint32_t r_AccessResource(Cpu *c, Args *a)
 {
     uint16_t hinst = arg_word(a);
     uint16_t h = arg_word(a);
     (void)c; (void)hinst;
     if (!h || h >= MAX_RES || !res[h].used) return 0xFFFF;
-    return dos_open_at(task.exepath, res[h].off);
+    return dos_open_at(task.exepathw, task.mod->base + res[h].off);
 }
 
 /* ---- bitmaps -------------------------------------------------------------- */

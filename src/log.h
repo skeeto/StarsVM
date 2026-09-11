@@ -1,9 +1,19 @@
 #ifndef LOG_H
 #define LOG_H
 
+#include <wchar.h>
+
 void log_open(const char *path);
 void log_close(void);
 void log_msg(const char *fmt, ...);
+
+/* A wide string rendered for the log.  Print paths with %s and this, never with
+   %ls: vfprintf's %ls converts through the C locale, and in the default "C"
+   locale it stops dead at the first character it cannot represent - which is
+   precisely the paths worth logging, since a path that is pure ASCII was never
+   the one in doubt.  The result is UTF-8 in one of a few rotating buffers, so
+   two or three can appear in the same call. */
+const char *log_wide(const wchar_t *s);
 void log_fatal(const char *fmt, ...);   /* logs, then exits */
 
 extern int log_verbose;                 /* --trace-api etc. */

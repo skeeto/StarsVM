@@ -73,9 +73,11 @@ static HANDLE file_get(int fd)
 
 static char *guest_path(uint32_t segptr, char *buf, size_t n);
 
-uint16_t dos_open_at(const char *path, uint32_t offset)
+/* Wide: the only caller is AccessResource reopening the module file, which is
+   a path we own rather than one the guest supplied. */
+uint16_t dos_open_at(const wchar_t *path, uint32_t offset)
 {
-    HANDLE h = CreateFileA(path, GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE,
+    HANDLE h = CreateFileW(path, GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE,
                            NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
     int fd;
 

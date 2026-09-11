@@ -34,6 +34,11 @@ static const char usage_text[] =
     "\n"
     "usage: stars16 [options] [Stars!.exe]\n"
     "\n"
+    "With no path, the game is taken from a module appended to this executable\n"
+    "if there is one, and otherwise from the Stars!.exe beside it.  So\n"
+    "    cat Stars!VM.exe Stars!.exe > Stars!-x86.exe\n"
+    "is a single self-contained program; nothing else needs installing.\n"
+    "\n"
     "  --dump          print the NE structure and exit\n"
     "  --dump-relocs   as --dump, with per-segment relocation counts\n"
     "  --imports       print the import thunk table and exit\n"
@@ -52,29 +57,39 @@ static const char usage_text[] =
     "  --log FILE      also write the log to FILE\n"
     "  --help          this text\n";
 
-/* Default to the Stars!.exe next to us, so the emulator can live in emu/ and
-   still be run with no arguments. */
-static void default_target(char *out, size_t n)
+/* Our own full path.  Wide throughout: everything we go on to open ourselves -
+   the module, and the Stars.ini beside it - is built from this, and
+   GetModuleFileNameA would already have spelled a directory outside the ANSI
+   code page as question marks. */
+static int self_path(wchar_t *out, size_t n)
 {
-    char self[MAX_PATH];
-    char *slash;
+    DWORD r = GetModuleFileNameW(NULL, out, (DWORD)n);
+    return r > 0 && r < n;
+}
 
-    if (!GetModuleFileNameA(NULL, self, sizeof self)) {
-        snprintf(out, n, "Stars!.exe");
+/* Default to the Stars!.exe sitting beside us. */
+static void default_target(wchar_t *out, size_t n)
+{
+    wchar_t self[MAX_PATH];
+    wchar_t *slash;
+
+    if (!self_path(self, sizeof self / sizeof *self)) {
+        _snwprintf(out, n - 1, L"Stars!.exe");
+        out[n - 1] = 0;
         return;
     }
-    slash = strrchr(self, '\\');
+    slash = wcsrchr(self, L'\\');
     if (slash) *slash = 0;
-    snprintf(out, n, "%s\\Stars!.exe", self);
-    if (GetFileAttributesA(out) != INVALID_FILE_ATTRIBUTES) return;
-    snprintf(out, n, "%s\\..\\Stars!.exe", self);
+    _snwprintf(out, n - 1, L"%ls\\Stars!.exe", self);
+    out[n - 1] = 0;
 }
 
 int main(int argc, char **argv)
 {
     const char *target = NULL;
     const char *logfile = NULL;
-    char defpath[MAX_PATH * 2];
+    wchar_t targetw[MAX_PATH * 2];
+    int targeti = 0, opened = 0;
     int do_dump = 0, do_imports = 0, do_load = 0, do_run = 0, verbose = 0;
     uint64_t steps = 0;
     long trace_cpu = 0;
@@ -137,7 +152,25 @@ int main(int argc, char **argv)
             return 2;
         } else {
             target = a;
+            targeti = i;        /* remembered so the WIDE argv can supply it */
         }
+    }
+
+    /* argv reached us through the ANSI code page, which cannot spell every path
+       Windows can.  Flags are ASCII and fine; the one argument that names a
+       file is taken from the wide command line instead. */
+    targetw[0] = 0;
+    if (target) {
+        int wargc = 0;
+        wchar_t **wargv = CommandLineToArgvW(GetCommandLineW(), &wargc);
+        if (wargv && targeti < wargc)
+            _snwprintf(targetw, sizeof targetw / sizeof *targetw - 1,
+                       L"%ls", wargv[targeti]);
+        else
+            MultiByteToWideChar(CP_ACP, 0, target, -1, targetw,
+                                sizeof targetw / sizeof *targetw);
+        targetw[sizeof targetw / sizeof *targetw - 1] = 0;
+        if (wargv) LocalFree(wargv);
     }
 
     /* Double-clicked, or run with nothing but a path: play the game.  The
@@ -150,11 +183,6 @@ int main(int argc, char **argv)
     if (play_wave >= 0) do_run = 1;
 
     log_open(logfile);
-
-    if (!target) {
-        default_target(defpath, sizeof defpath);
-        target = defpath;
-    }
 
     if (!sel_init()) return 1;
     if (!thunk_init()) return 1;
@@ -171,8 +199,25 @@ int main(int argc, char **argv)
         if (!do_dump && !do_load && !do_run) { log_close(); return 0; }
     }
 
-    if (!ne_open(&module, target)) {
-        log_msg("stars16: cannot read %s\n", target);
+    /* Three places the game can be, in order of how deliberate they are.  A
+       path on the command line wins; otherwise a module appended to this
+       executable, so that
+           cat Stars!VM.exe Stars!.exe > Stars!-x86.exe
+       is a single self-contained program with nothing else to install; and
+       failing that the Stars!.exe sitting beside us. */
+    if (target) {
+        opened = ne_open(&module, targetw);
+    } else {
+        wchar_t self[MAX_PATH];
+        opened = self_path(self, sizeof self / sizeof *self) &&
+                 ne_open_appended(&module, self);
+        if (!opened) {
+            default_target(targetw, sizeof targetw / sizeof *targetw);
+            opened = ne_open(&module, targetw);
+        }
+    }
+    if (!opened) {
+        log_msg("stars16: cannot read %s\n", log_wide(targetw));
         log_close();
         return 1;
     }

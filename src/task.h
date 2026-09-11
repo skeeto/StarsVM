@@ -3,6 +3,7 @@
 #define TASK_H
 
 #include <stdint.h>
+#include <wchar.h>
 #include "ne.h"
 #include "cpu.h"
 
@@ -35,8 +36,17 @@ typedef struct {
     uint16_t  stacktop;
     int       ncmdshow;
     char      cmdline[128];
-    char      exepath[520];   /* full path of Stars!.exe                    */
+    /* The guest sees these, so they stay in its own byte encoding: they go into
+       its environment and come back out of GetModuleFileName.  They are also
+       what its file dialogs and its own file calls are built from. */
+    char      exepath[520];   /* full path of the module file               */
     char      exedir[520];    /* the directory holding it                   */
+    /* The same two as Windows really spells them.  A path we open OURSELVES -
+       Stars.ini, and the module file when AccessResource reopens it - has to go
+       through these, or a directory name outside the ANSI code page turns into
+       question marks and nothing opens. */
+    wchar_t   exepathw[520];
+    wchar_t   exedirw[520];
 } Task;
 
 extern Task task;

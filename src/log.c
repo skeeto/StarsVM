@@ -53,6 +53,18 @@ static void vlog(const char *fmt, va_list ap)
     va_end(ap2);
 }
 
+const char *log_wide(const wchar_t *s)
+{
+    static char buf[4][1024];
+    static int next;
+    char *out = buf[next++ & 3];
+
+    if (!s) return "(null)";
+    if (!WideCharToMultiByte(CP_UTF8, 0, s, -1, out, sizeof buf[0], NULL, NULL))
+        snprintf(out, sizeof buf[0], "(unprintable path)");
+    return out;
+}
+
 void log_msg(const char *fmt, ...)
 {
     va_list ap;

@@ -21,6 +21,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <wchar.h>
 #include <windows.h>
 
 static char *gstr(uint32_t segptr, char *buf, size_t n)
@@ -47,31 +48,51 @@ static void pstr(uint32_t segptr, const char *s, unsigned max)
     sel_wr8(sel, (uint16_t)(off + i), 0);
 }
 
-/* Resolve a profile filename to an absolute path next to the game. */
-static void ini_path(const char *name, char *out, size_t n)
+/* Resolve a profile filename to an absolute path next to the module.
+ *
+ * Wide, because this is a path we open ourselves rather than one we hand to the
+ * guest.  The guest's own name for the file is bytes in its code page and is
+ * converted here, but the directory comes from task.exedirw - what Windows
+ * really calls it - so an installation under a directory the code page cannot
+ * spell still finds its Stars.ini instead of a trail of question marks. */
+static void ini_path(const char *name, wchar_t *out, size_t n)
 {
-    size_t dl = strlen(task.exedir);
+    wchar_t wname[MAX_PATH];
+    const wchar_t *leaf = L"stars16.ini";
 
-    if (dl > n / 2) dl = n / 2;                 /* keep room for the filename */
-    if (!name || !name[0]) {
-        snprintf(out, n, "%.*s\\stars16.ini", (int)dl, task.exedir);
+    out[0] = 0;
+    if (name && name[0]) {
+        if (!MultiByteToWideChar(CP_ACP, 0, name, -1, wname,
+                                 (int)(sizeof wname / sizeof *wname)))
+            wname[0] = 0;
+        if (name[1] == ':' || name[0] == '\\' || name[0] == '/') {
+            if (wcslen(wname) < n) wcscpy(out, wname);   /* already absolute */
+            else log_msg("profile: absolute path too long: %s\n", log_wide(wname));
+            return;
+        }
+        leaf = wname;
+    }
+
+    /* Refuse rather than truncate.  The old code clamped the directory to half
+       the buffer so the filename would always fit, which meant an installation
+       more than that deep silently wrote its settings to a directory that does
+       not exist - the INI simply never appeared, with nothing said. */
+    if (wcslen(task.exedirw) + 1 + wcslen(leaf) + 1 > n) {
+        log_msg("profile: no room for %s\\%s in a %u-character path\n",
+                log_wide(task.exedirw), log_wide(leaf), (unsigned)n);
         return;
     }
-    if (name[1] == ':' || name[0] == '\\' || name[0] == '/') {
-        snprintf(out, n, "%.*s", (int)n - 1, name);   /* already absolute */
-        return;
-    }
-    snprintf(out, n, "%.*s\\%.*s", (int)dl, task.exedir,
-             (int)(n - dl - 2), name);
+    _snwprintf(out, n - 1, L"%ls\\%ls", task.exedirw, leaf);
+    out[n - 1] = 0;
 }
 
 /* ---- a small INI model --------------------------------------------------- */
 
 /* The files involved are a few kilobytes, so read-modify-write of the whole
    thing is simpler than anything incremental and fast enough. */
-static char *slurp(const char *path, size_t *len)
+static char *slurp(const wchar_t *path, size_t *len)
 {
-    FILE *f = fopen(path, "rb");
+    FILE *f = _wfopen(path, L"rb");
     char *buf;
     long n;
 
@@ -108,7 +129,7 @@ static const char *skip_ws(const char *s)
 }
 
 /* Find `key` in `section`.  Returns 1 and fills `value` on success. */
-static int ini_get(const char *path, const char *section, const char *key,
+static int ini_get(const wchar_t *path, const char *section, const char *key,
                    char *value, size_t vlen)
 {
     size_t len;
@@ -150,7 +171,7 @@ static int ini_get(const char *path, const char *section, const char *key,
 
 /* Set or remove a key.  A NULL value removes the key; a NULL key removes the
    whole section.  The file is rewritten in place, preserving order. */
-static int ini_set(const char *path, const char *section, const char *key,
+static int ini_set(const wchar_t *path, const char *section, const char *key,
                    const char *value)
 {
     size_t len;
@@ -158,10 +179,12 @@ static int ini_set(const char *path, const char *section, const char *key,
     FILE *out;
     char *line, *next;
     int in_section = 0, wrote = 0, seen_section = 0;
-    char tmp[MAX_PATH + 8];
+    wchar_t tmp[MAX_PATH + 8];
 
-    snprintf(tmp, sizeof tmp, "%.*s.tmp", (int)(sizeof tmp - 6), path);
-    out = fopen(tmp, "wb");
+    _snwprintf(tmp, sizeof tmp / sizeof *tmp - 1, L"%.*ls.tmp",
+               (int)(sizeof tmp / sizeof *tmp - 6), path);
+    tmp[sizeof tmp / sizeof *tmp - 1] = 0;
+    out = _wfopen(tmp, L"wb");
     if (!out) { free(text); return 0; }
 
     for (line = text; line && *line; line = next) {
@@ -213,9 +236,9 @@ static int ini_set(const char *path, const char *section, const char *key,
     free(text);
 
     /* Replace atomically enough for our purposes. */
-    DeleteFileA(path);
-    if (!MoveFileA(tmp, path)) {
-        log_msg("profile: cannot replace %s\n", path);
+    DeleteFileW(path);
+    if (!MoveFileW(tmp, path)) {
+        log_msg("profile: cannot replace %s\n", log_wide(path));
         return 0;
     }
     return 1;
@@ -225,7 +248,8 @@ static int ini_set(const char *path, const char *section, const char *key,
 
 static uint32_t p_GetPrivateProfileString(Cpu *c, Args *a)
 {
-    char sec[128], key[128], def[512], file[MAX_PATH], path[MAX_PATH];
+    char sec[128], key[128], def[512], file[MAX_PATH];
+    wchar_t path[MAX_PATH];
     char value[512];
     uint32_t secp = arg_long(a);
     uint32_t keyp = arg_long(a);
@@ -239,7 +263,7 @@ static uint32_t p_GetPrivateProfileString(Cpu *c, Args *a)
     gstr(keyp, key, sizeof key);
     gstr(defp, def, sizeof def);
     gstr(filep, file, sizeof file);
-    ini_path(file, path, sizeof path);
+    ini_path(file, path, sizeof path / sizeof *path);
 
     if (!ini_get(path, sec, key, value, sizeof value))
         snprintf(value, sizeof value, "%s", def);
@@ -247,7 +271,7 @@ static uint32_t p_GetPrivateProfileString(Cpu *c, Args *a)
     pstr(bufp, value, size);
     if (log_verbose)
         log_msg("GetPrivateProfileString [%s] %s -> \"%s\" (%s)\n",
-                sec, key, value, path);
+                sec, key, value, log_wide(path));
     {
         size_t n = strlen(value);
         if (size && n > (size_t)size - 1) n = (size_t)size - 1;
@@ -257,7 +281,8 @@ static uint32_t p_GetPrivateProfileString(Cpu *c, Args *a)
 
 static uint32_t p_GetPrivateProfileInt(Cpu *c, Args *a)
 {
-    char sec[128], key[128], file[MAX_PATH], path[MAX_PATH], value[64];
+    char sec[128], key[128], file[MAX_PATH], value[64];
+    wchar_t path[MAX_PATH];
     uint32_t secp = arg_long(a);
     uint32_t keyp = arg_long(a);
     int16_t  def  = arg_sword(a);
@@ -268,18 +293,20 @@ static uint32_t p_GetPrivateProfileInt(Cpu *c, Args *a)
     gstr(secp, sec, sizeof sec);
     gstr(keyp, key, sizeof key);
     gstr(filep, file, sizeof file);
-    ini_path(file, path, sizeof path);
+    ini_path(file, path, sizeof path / sizeof *path);
 
     if (!ini_get(path, sec, key, value, sizeof value)) v = def;
     else v = strtol(value, NULL, 0);
     if (log_verbose)
-        log_msg("GetPrivateProfileInt [%s] %s -> %ld (%s)\n", sec, key, v, path);
+        log_msg("GetPrivateProfileInt [%s] %s -> %ld (%s)\n", sec, key, v,
+                log_wide(path));
     return (uint32_t)(uint16_t)v;
 }
 
 static uint32_t p_WritePrivateProfileString(Cpu *c, Args *a)
 {
-    char sec[128], key[128], val[512], file[MAX_PATH], path[MAX_PATH];
+    char sec[128], key[128], val[512], file[MAX_PATH];
+    wchar_t path[MAX_PATH];
     uint32_t secp = arg_long(a);
     uint32_t keyp = arg_long(a);
     uint32_t valp = arg_long(a);
@@ -290,11 +317,11 @@ static uint32_t p_WritePrivateProfileString(Cpu *c, Args *a)
     gstr(keyp, key, sizeof key);
     gstr(valp, val, sizeof val);
     gstr(filep, file, sizeof file);
-    ini_path(file, path, sizeof path);
+    ini_path(file, path, sizeof path / sizeof *path);
 
     if (log_verbose)
         log_msg("WritePrivateProfileString [%s] %s = \"%s\" (%s)\n",
-                sec, key, val, path);
+                sec, key, val, log_wide(path));
     return (uint32_t)ini_set(path, sec, keyp ? key : NULL, valp ? val : NULL);
 }
 

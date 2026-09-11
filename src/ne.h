@@ -3,6 +3,7 @@
 #define NE_H
 
 #include <stdint.h>
+#include <wchar.h>
 
 /* ne_flags */
 #define NEF_SINGLEDATA   0x0001
@@ -47,9 +48,10 @@ typedef struct {
 } NeSeg;
 
 typedef struct {
-    uint8_t  *img;        /* whole file image */
+    uint8_t  *img;        /* the NE image, which may be a slice of a larger file */
     uint32_t  imglen;
-    uint32_t  hdr;        /* file offset of the NE header */
+    uint32_t  hdr;        /* offset of the NE header within img */
+    uint32_t  base;       /* where img starts in the file it was read from     */
 
     uint16_t  flags, autodata, heap, stack, align;
     uint16_t  cseg, cmod, cmovent, expver;
@@ -62,7 +64,7 @@ typedef struct {
     int       nmod;
 
     uint16_t  dgroup_sel;
-    char      path[512];  /* full path of the module file */
+    wchar_t   path[512];  /* full path of the file the image came from */
     char      name[16];   /* resident module name */
 } NeModule;
 
@@ -75,7 +77,20 @@ static inline NeSeg *ne_seg(NeModule *m, unsigned n)   /* n is 1-based */
    thunk layer; the loader calls it while applying relocations. */
 typedef uint32_t (*NeImportFn)(const char *module, uint16_t ordinal, void *user);
 
-int  ne_open(NeModule *m, const char *path);
+int  ne_open(NeModule *m, const wchar_t *path);
+
+/* Open an NE module that has been appended to another file - the emulator's own
+   executable, so that `cat Stars!VM.exe Stars!.exe > Stars!-x86.exe` is a
+   single self-contained program.  Finds the image by signature rather than by
+   arithmetic on our own size: nothing then depends on the toolchain's idea of
+   where our binary ends, which is not its file size (mingw leaves the COFF
+   symbol table past the last section).  Returns 0 if there is nothing appended.
+
+   Every offset inside the module stays relative to the image, so a payload at
+   an arbitrary byte offset needs no alignment; only NeModule.base, added back
+   by anything that reopens the file, knows the difference. */
+int  ne_open_appended(NeModule *m, const wchar_t *path);
+
 void ne_close(NeModule *m);
 int  ne_load(NeModule *m, NeImportFn resolve, void *user);
 void ne_dump(NeModule *m, int verbose);

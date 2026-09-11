@@ -86,8 +86,21 @@ int task_start(NeModule *m, Cpu *c, const char *cmdline, int ncmdshow)
     t->ncmdshow = ncmdshow;
     snprintf(t->cmdline, sizeof t->cmdline, "%s", cmdline ? cmdline : "");
 
-    if (!GetFullPathNameA(m->path, sizeof t->exepath, t->exepath, NULL))
-        snprintf(t->exepath, sizeof t->exepath, "%s", m->path);
+    /* Wide first, because that is the path that has to actually open.  The
+       narrow copies below are for the guest, which has no other way to see a
+       filename; a character the code page cannot spell survives in exepathw and
+       is lost in exepath, and only the latter is ever merely shown. */
+    if (!GetFullPathNameW(m->path, sizeof t->exepathw / sizeof *t->exepathw,
+                          t->exepathw, NULL))
+        _snwprintf(t->exepathw, sizeof t->exepathw / sizeof *t->exepathw - 1,
+                   L"%ls", m->path);
+    t->exepathw[sizeof t->exepathw / sizeof *t->exepathw - 1] = 0;
+    wcscpy(t->exedirw, t->exepathw);
+    { wchar_t *w = wcsrchr(t->exedirw, L'\\'); if (w) *w = 0; }
+
+    WideCharToMultiByte(CP_ACP, 0, t->exepathw, -1,
+                        t->exepath, sizeof t->exepath, NULL, NULL);
+    t->exepath[sizeof t->exepath - 1] = 0;
     memcpy(t->exedir, t->exepath, sizeof t->exedir);
     t->exedir[sizeof t->exedir - 1] = 0;
     slash = strrchr(t->exedir, '\\');
