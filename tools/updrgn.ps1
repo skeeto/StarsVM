@@ -1,4 +1,5 @@
-# Which windows of the stars16 process have a non-empty update region right now?
+# Which windows of the Stars!VM process have a non-empty update region right now?
+. (Join-Path $PSScriptRoot 'starsproc.ps1')
 $src = @"
 using System;
 using System.Collections.Generic;
@@ -38,8 +39,8 @@ public class UR {
 }
 "@
 Add-Type -TypeDefinition $src
-$pids = @(Get-Process stars16 -ErrorAction SilentlyContinue | ForEach-Object { [uint32]$_.Id })
-if (-not $pids) { Write-Output "not running"; exit 1 }
+$pids = Get-StarsPids
+if (-not $pids) { Write-Output (Get-StarsNotRunning); exit 1 }
 for ($i = 0; $i -lt 4; $i++) {
   [UR]::Lines.Clear()
   [UR]::Run($pids)

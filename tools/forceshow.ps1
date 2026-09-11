@@ -1,5 +1,6 @@
-# Force-show a hidden top-level window of the stars16 process, by title.
+# Force-show a hidden top-level window of the Stars!VM process, by title.
 param([string]$Title = "")
+. (Join-Path $PSScriptRoot 'starsproc.ps1')
 $src = @"
 using System;
 using System.Collections.Generic;
@@ -19,8 +20,8 @@ public class FS {
 }
 "@
 Add-Type -TypeDefinition $src
-$pids = @(Get-Process stars16 -ErrorAction SilentlyContinue | ForEach-Object { [uint32]$_.Id })
-if (-not $pids) { Write-Output "not running"; exit 1 }
+$pids = Get-StarsPids
+if (-not $pids) { Write-Output (Get-StarsNotRunning); exit 1 }
 $cb = [FS+EnumProc]{
   param($h, $l)
   $procId = 0

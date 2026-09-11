@@ -1,4 +1,5 @@
-# Print the whole window tree of the stars16 process, visible or not.
+# Print the whole window tree of the Stars!VM process, visible or not.
+. (Join-Path $PSScriptRoot 'starsproc.ps1')
 $src = @"
 using System;
 using System.Collections.Generic;
@@ -46,7 +47,7 @@ public class T {
 }
 "@
 Add-Type -TypeDefinition $src
-$pids = @(Get-Process stars16 -ErrorAction SilentlyContinue | ForEach-Object { [uint32]$_.Id })
-if (-not $pids) { Write-Output "stars16 is not running"; exit 1 }
+$pids = Get-StarsPids
+if (-not $pids) { Write-Output (Get-StarsNotRunning); exit 1 }
 [T]::Run($pids)
 [T]::Lines | ForEach-Object { Write-Output $_ }

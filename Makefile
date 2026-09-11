@@ -1,19 +1,19 @@
-# stars16 - Win16-on-Win32 emulator for Stars! 2.70j
+# Win16-on-Win32 emulator for Stars! 2.70j
 #
-# Built with w64devkit (i686-w64-mingw32).  32-bit is the primary target; the
-# sources stay 64-bit-clean so an x64 build is a recompile, not a rewrite.
+# Built with w64devkit.  32-bit is the primary target; the sources stay
+# 64-bit-clean so an x64 build is a recompile, not a rewrite.
 
-CC      := gcc
-WINDRES := windres
+CROSS   := i686-w64-mingw32-
+CC      := $(CROSS)gcc
+WINDRES := $(CROSS)windres
 CFLAGS  := -std=c11 -O2 -g -Wall -Wextra -Wshadow -Wstrict-prototypes \
            -Wno-unused-parameter -MMD -MP
-# A GUI-subsystem binary: no console window unless --console asks for one.
 LDFLAGS := -mwindows
 LDLIBS  := -luser32 -lgdi32 -lcomdlg32 -lwinmm
 
 SRCDIR  := src
 OBJDIR  := build
-TARGET  := stars16.exe
+TARGET  := Stars!VM.exe
 RES     := $(OBJDIR)/stars16.res.o
 
 SRC := $(wildcard $(SRCDIR)/*.c)

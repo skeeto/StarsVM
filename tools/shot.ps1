@@ -1,6 +1,7 @@
-# Capture a top-level window of the running stars16 process to a PNG.
+# Capture a top-level window of the running Stars!VM process to a PNG.
 # Usage: powershell -File tools/shot.ps1 out.png [titleSubstring]
 param([string]$Out = "window.png", [string]$Match = "")
+. (Join-Path $PSScriptRoot 'starsproc.ps1')
 
 Add-Type -AssemblyName System.Drawing
 $src = @"
@@ -21,8 +22,8 @@ public class W {
 "@
 Add-Type -TypeDefinition $src
 
-$pids = @(Get-Process stars16 -ErrorAction SilentlyContinue | ForEach-Object { $_.Id })
-if (-not $pids) { Write-Output "stars16 is not running"; exit 1 }
+$pids = Get-StarsPids
+if (-not $pids) { Write-Output (Get-StarsNotRunning); exit 1 }
 
 $found = @()
 $cb = [W+EnumProc]{

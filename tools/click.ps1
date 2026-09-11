@@ -1,7 +1,8 @@
-# Click at a client-relative point of a stars16 window using real mouse input,
+# Click at a client-relative point of a Stars!VM window using real mouse input,
 # then put the pointer back where it was.
 # Usage: powershell -File tools/click.ps1 -Title "Stars!" -X 80 -Y 430
 param([string]$Title = "Stars!", [int]$X = 0, [int]$Y = 0, [switch]$WindowRelative)
+. (Join-Path $PSScriptRoot 'starsproc.ps1')
 
 $src = @"
 using System;
@@ -25,8 +26,8 @@ public class C {
 "@
 Add-Type -TypeDefinition $src
 
-$pids = @(Get-Process stars16 -ErrorAction SilentlyContinue | ForEach-Object { $_.Id })
-if (-not $pids) { Write-Output "stars16 is not running"; exit 1 }
+$pids = Get-StarsPids
+if (-not $pids) { Write-Output (Get-StarsNotRunning); exit 1 }
 
 $found = @()
 $cb = [C+EnumProc]{

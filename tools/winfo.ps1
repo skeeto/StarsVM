@@ -1,5 +1,6 @@
-# Dump every window of the stars16 process with the attributes that decide
+# Dump every window of the Stars!VM process with the attributes that decide
 # taskbar presence, activation and caption icon.
+. (Join-Path $PSScriptRoot 'starsproc.ps1')
 $src = @"
 using System;
 using System.Collections.Generic;
@@ -52,7 +53,7 @@ public class WI {
 }
 "@
 Add-Type -TypeDefinition $src
-$pids = @(Get-Process stars16 -ErrorAction SilentlyContinue | ForEach-Object { [uint32]$_.Id })
-if (-not $pids) { Write-Output "stars16 is not running"; exit 1 }
+$pids = Get-StarsPids
+if (-not $pids) { Write-Output (Get-StarsNotRunning); exit 1 }
 [WI]::Run($pids)
 [WI]::Lines | ForEach-Object { Write-Output $_ }

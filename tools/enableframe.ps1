@@ -1,4 +1,5 @@
 # During the tutorial hang: re-enable the frame from outside and watch the CPU.
+. (Join-Path $PSScriptRoot 'starsproc.ps1')
 $src = @"
 using System;
 using System.Collections.Generic;
@@ -15,7 +16,7 @@ public class EF {
 }
 "@
 Add-Type -TypeDefinition $src
-$pids = @(Get-Process stars16 -ErrorAction SilentlyContinue | ForEach-Object { [uint32]$_.Id })
+$pids = Get-StarsPids
 $cb = [EF+EnumProc]{
   param($h, $l)
   $procId = 0
@@ -30,12 +31,12 @@ $cb = [EF+EnumProc]{
 if ([EF]::Frames.Count -eq 0) { Write-Output "no frame"; exit 1 }
 $f = [EF]::Frames[0]
 Write-Output ("frame {0} enabled={1}" -f $f, [EF]::IsWindowEnabled($f))
-Write-Output ("cpu t0 = " + (Get-Process stars16).CPU)
+Write-Output ("cpu t0 = " + (Get-StarsProcess).CPU)
 Start-Sleep -Seconds 4
-Write-Output ("cpu t4 = " + (Get-Process stars16).CPU)
+Write-Output ("cpu t4 = " + (Get-StarsProcess).CPU)
 [void][EF]::EnableWindow($f, $true)
 Write-Output ("re-enabled; enabled={0}" -f [EF]::IsWindowEnabled($f))
 Start-Sleep -Seconds 4
-Write-Output ("cpu t8 = " + (Get-Process stars16).CPU)
+Write-Output ("cpu t8 = " + (Get-StarsProcess).CPU)
 Start-Sleep -Seconds 4
-Write-Output ("cpu t12 = " + (Get-Process stars16).CPU)
+Write-Output ("cpu t12 = " + (Get-StarsProcess).CPU)

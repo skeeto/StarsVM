@@ -1,5 +1,6 @@
-# Force the starved children of the stars16 windows to paint, and see whether
+# Force the starved children of the Stars!VM windows to paint, and see whether
 # the repaint storm stops.
+. (Join-Path $PSScriptRoot 'starsproc.ps1')
 $src = @"
 using System;
 using System.Collections.Generic;
@@ -18,7 +19,7 @@ public class RW {
 }
 "@
 Add-Type -TypeDefinition $src
-$pids = @(Get-Process stars16 -ErrorAction SilentlyContinue | ForEach-Object { [uint32]$_.Id })
+$pids = Get-StarsPids
 $cb = [RW+EnumProc]{
   param($h, $l)
   $procId = 0
@@ -32,15 +33,15 @@ $cb = [RW+EnumProc]{
 [void][RW]::EnumWindows($cb, [IntPtr]::Zero)
 if ([RW]::Tops.Count -eq 0) { Write-Output "no frame"; exit 1 }
 $f = [RW]::Tops[0]
-$a = (Get-Process stars16).CPU
+$a = (Get-StarsProcess).CPU
 Start-Sleep -Seconds 3
-$b = (Get-Process stars16).CPU
+$b = (Get-StarsProcess).CPU
 Write-Output ("before: " + [math]::Round($b-$a,2) + "s per 3s")
 # RDW_INVALIDATE|RDW_ERASE|RDW_UPDATENOW|RDW_ALLCHILDREN = 1|4|0x100|0x80
 [void][RW]::RedrawWindow($f, [IntPtr]::Zero, [IntPtr]::Zero, 0x185)
 Start-Sleep -Seconds 3
-$c2 = (Get-Process stars16).CPU
+$c2 = (Get-StarsProcess).CPU
 Write-Output ("after RedrawWindow(ALLCHILDREN|UPDATENOW): " + [math]::Round($c2-$b,2) + "s per 3s")
 Start-Sleep -Seconds 3
-$d = (Get-Process stars16).CPU
+$d = (Get-StarsProcess).CPU
 Write-Output ("3s later: " + [math]::Round($d-$c2,2) + "s per 3s")

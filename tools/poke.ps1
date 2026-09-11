@@ -1,7 +1,8 @@
-# Drive a window of the running stars16 process: type into a control and click a
+# Drive a window of the running Stars!VM process: type into a control and click a
 # button, by message rather than by stealing the keyboard focus.
 # Usage: powershell -File tools/poke.ps1 -Title "..." -Text "..." -Button "OK"
 param([string]$Title = "", [string]$Text = "", [string]$Button = "", [string]$Click = "", [string]$Key = "", [int]$VKey = 0, [int]$Command = 0)
+. (Join-Path $PSScriptRoot 'starsproc.ps1')
 
 $src = @"
 using System;
@@ -24,8 +25,8 @@ public class P {
 "@
 Add-Type -TypeDefinition $src
 
-$pids = @(Get-Process stars16 -ErrorAction SilentlyContinue | ForEach-Object { $_.Id })
-if (-not $pids) { Write-Output "stars16 is not running"; exit 1 }
+$pids = Get-StarsPids
+if (-not $pids) { Write-Output (Get-StarsNotRunning); exit 1 }
 
 $top = [IntPtr]::Zero
 $cb = [P+EnumProc]{
