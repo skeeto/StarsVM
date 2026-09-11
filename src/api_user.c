@@ -995,6 +995,24 @@ static uint32_t u_ScrollWindow(Cpu *c, Args *a)
 
 /* ---- window words and subclassing ---------------------------------------- */
 
+/* The offset in a Get/SetWindowLong is a number the GUEST chose, so it is a
+   Win16 constant and has to be compared against Win16's values.  The host's
+   agree only by accident, and only on a 32-bit build:
+
+     - GWL_WNDPROC is -4 in both, but the Win32 headers stop defining it on x64
+       to push callers towards the _PTR forms, so naming it there will not even
+       compile.
+     - DWL_DLGPROC is 4 in Win16 and 4 in a 32-bit Win32, but 8 on x64, because
+       the LRESULT at DWL_MSGRESULT that it follows doubled in width.  Comparing
+       against the host's DWLP_DLGPROC therefore matches nothing on a 64-bit
+       build, and a dialog would quietly lose its procedure rather than fail
+       loudly.
+
+   The host side of each is still done with the _PTR calls, which is what
+   actually has to widen. */
+#define GWL16_WNDPROC   (-4)
+#define DWL16_DLGPROC     4
+
 /* GWL_WNDPROC has to round-trip: the guest may read the current procedure,
    install its own, and later call the previous one.  A host procedure is handed
    back wrapped in a reserved selector so CallWindowProc can tell them apart. */
@@ -1005,12 +1023,12 @@ static uint32_t u_GetWindowLong(Cpu *c, Args *a)
     HWND hwnd = HWND_32(hwnd16);
 
     (void)c;
-    if (off == GWL_WNDPROC) {
+    if (off == GWL16_WNDPROC) {
         uint32_t p16 = winproc_get(hwnd);
         if (p16) return p16;
         return winproc_from_host((WNDPROC)GetWindowLongPtrA(hwnd, GWLP_WNDPROC));
     }
-    if (off == DWLP_DLGPROC && dlg_proc_get(hwnd))
+    if (off == DWL16_DLGPROC && dlg_proc_get(hwnd))
         return dlg_proc_get(hwnd);
     /* Win16 windows have 4-byte extra words at non-negative offsets. */
     return (uint32_t)GetWindowLongA(hwnd, off);
@@ -1024,7 +1042,7 @@ static uint32_t u_SetWindowLong(Cpu *c, Args *a)
     HWND hwnd = HWND_32(hwnd16);
 
     (void)c;
-    if (off == GWL_WNDPROC) {
+    if (off == GWL16_WNDPROC) {
         uint32_t prev = winproc_get(hwnd);
         WNDPROC host_prev = NULL;
         WNDPROC host_new = winproc_to_host(val);
@@ -1048,7 +1066,7 @@ static uint32_t u_SetWindowLong(Cpu *c, Args *a)
         SetWindowLongPtrA(hwnd, GWLP_WNDPROC, (LONG_PTR)winproc_bridge);
         return prev ? prev : winproc_from_host(host_prev);
     }
-    if (off == DWLP_DLGPROC && dlg_proc_get(hwnd)) {
+    if (off == DWL16_DLGPROC && dlg_proc_get(hwnd)) {
         uint32_t prev = dlg_proc_get(hwnd);
         dlg_proc_set(hwnd, val, task.hinstance);
         return prev;

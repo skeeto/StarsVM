@@ -484,6 +484,24 @@ int fuzz_main(long rounds, unsigned seed)
     Cpu *c = &cpu;
     long i, tested = 0, skipped = 0, failed = 0;
 
+    /* The trampoline is emitted as 32-bit machine code against 32-bit absolute
+       addresses: eabs() writes the operand address as a bare disp32, which on
+       x86-64 both truncates the pointer and means RIP-relative rather than
+       absolute.  Running it there is a segfault, not a test result.
+
+       Porting it wants a scratch base register the guest state does not use -
+       r12, say, loaded with a movabs - plus a REX prefix on every access, and
+       fz_in/fz_out/fz_saved_esp gathered behind one base.  That is worth doing
+       deliberately rather than in passing: a fuzzer nobody trusts is worse than
+       one that says it cannot run.  Until then, note that this tests cpu.c,
+       which is host-independent C, so a 32-bit run covers the same interpreter. */
+    if (sizeof(void *) != 4) {
+        log_msg("fuzz: needs a 32-bit host; the trampoline encodes 32-bit\n"
+                "      absolute addresses.  Build with the i686 toolchain to\n"
+                "      exercise the interpreter - it is the same C either way.\n");
+        return 1;
+    }
+
     if (seed) rng_state = seed;
     if (!tramp_build(16)) return 1;
     code_sel = sel_alloc(0x10000u, SK_CODE);

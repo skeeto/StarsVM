@@ -1,7 +1,10 @@
 # Win16-on-Win32 emulator for Stars! 2.70j
 #
 # Built with w64devkit.  32-bit is the primary target; the sources stay
-# 64-bit-clean so an x64 build is a recompile, not a rewrite.
+# 64-bit-clean so an x64 build is a recompile, not a rewrite - `make CROSS=`
+# uses the native toolchain and produces a working x64 emulator.  The one thing
+# that does not survive is `make fuzz`, whose trampoline is 32-bit machine code;
+# it says so and stops rather than pretending.
 
 CROSS   := i686-w64-mingw32-
 CC      := $(CROSS)gcc
