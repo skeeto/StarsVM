@@ -15,6 +15,9 @@ stars16_icon.rc
 
 __pycache__/
 
-# A Stars! installation to test against.  The game is not ours to
+# A Stars! installation to test against, and a copy of the game beside the
+# build so the icon step and the no-argument lookup find it.  Not ours to
 # redistribute, and neither are the saved games next to it.
 Stars!-2.70j/
+Stars!.exe
+Stars.ini

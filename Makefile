@@ -6,9 +6,9 @@
 CROSS   := i686-w64-mingw32-
 CC      := $(CROSS)gcc
 WINDRES := $(CROSS)windres
-CFLAGS  := -std=c11 -O2 -g -Wall -Wextra -Wshadow -Wstrict-prototypes \
+CFLAGS  := -std=c11 -Oz -g -Wall -Wextra -Wshadow -Wstrict-prototypes \
            -Wno-unused-parameter -MMD -MP
-LDFLAGS := -mwindows
+LDFLAGS := -mwindows -s
 LDLIBS  := -luser32 -lgdi32 -lcomdlg32 -lwinmm
 
 SRCDIR  := src
@@ -33,7 +33,7 @@ $(RES): stars16.rc stars16.manifest stars16_icon.rc | $(OBJDIR)
 # The icon comes out of the game's own resources.  Never fatal: without the
 # game next door the generated .rc is just a comment.
 stars16_icon.rc:
-	-python tools/mkicon.py "../Stars!.exe" stars16.ico $@ StarsIco
+	-python tools/mkicon.py "Stars!.exe" stars16.ico $@ StarsIco
 	@test -f $@ || echo "/* no icon */" > $@
 
 $(OBJDIR)/%.o: $(SRCDIR)/%.c | $(OBJDIR)
