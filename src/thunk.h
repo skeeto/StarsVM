@@ -122,8 +122,15 @@ const char *thunk_last_missing(void);
 
 /* --------------------------------------------------------- host -> guest ---- */
 
-/* Push `nbytes` of argument words (already in Pascal order: args[0] is the
-   deepest/leftmost) and call the 16-bit procedure at `proc`.  Returns DX:AX. */
+/* Push `nbytes` of argument words and call the 16-bit procedure at `proc`.
+   Returns DX:AX.
+
+   The array is in REVERSE declaration order: args[0] is the LAST declared
+   argument and ends up at the lowest address, which is where Pascal puts it.
+   That is the opposite of the Args cursor above, so the two are easy to
+   confuse - winproc.c:626-630 is the worked example, building a window
+   procedure's frame as args[4]=hwnd, args[3]=msg, args[2]=wParam,
+   args[1]:args[0]=lParam. */
 uint32_t call16(uint32_t proc, const uint16_t *args, unsigned nbytes);
 
 /* As call16, but also sets AX on entry (window procedures want hInstance there)

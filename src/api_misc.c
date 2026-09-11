@@ -1,4 +1,4 @@
-/* api_misc.c - WIN87EM, TOOLHELP, MMSYSTEM, WAVEMIX and COMMDLG.
+/* api_misc.c - WIN87EM, TOOLHELP, MMSYSTEM and COMMDLG.
  *
  * These are small, and two of them are only here because the game's C runtime
  * insists on asking.
@@ -67,11 +67,14 @@ static uint32_t t_TimerCount(Cpu *c, Args *a)
     return 1;
 }
 
-/* ---- audio: stubbed for now ---------------------------------------------- */
+/* ---- CD audio -------------------------------------------------------------- */
 
-/* MMSYSTEM.701 mciSendCommand.  The game drives CD audio through MCI for its
-   soundtrack; report "no such device" so it gives up quietly rather than
-   waiting on a device that will never answer. */
+/* MMSYSTEM.701 mciSendCommand.  The game's music is Red Book audio: MCI_OPEN on
+   "cdaudio", then MCI_PLAY of a track between 2 and 21 off the retail disc.  It
+   stores a track number and nothing else, so there is no music data anywhere to
+   substitute.  Reporting "no such device" is therefore not a stub but the right
+   answer - the game clears its music bit and stops asking, which is what it did
+   on a machine with no CD in 1995. */
 static uint32_t m_mciSendCommand(Cpu *c, Args *a)
 {
     uint16_t dev = arg_word(a);
@@ -84,11 +87,7 @@ static uint32_t m_mciSendCommand(Cpu *c, Args *a)
     return MCIERR_INVALID_DEVICE_NAME;
 }
 
-/* WaveMix: every entry reports success and does nothing, so the game's sound
-   effects simply do not play.  The argument counts come from the DLL's own RETF
-   immediates, so the stack stays balanced even though the calls do nothing. */
-static uint32_t wm_ok(Cpu *c, Args *a)      { (void)c; (void)a; return 0; }
-static uint32_t wm_init(Cpu *c, Args *a)    { (void)c; (void)a; return 0; }
+/* WaveMix lives in audio.c, which reimplements all eleven entries on waveOut. */
 
 /* ---- COMMDLG ------------------------------------------------------------- */
 
@@ -222,18 +221,6 @@ void api_misc_register(void)
     api_bind("WIN87EM",   1, w_fpMath);
     api_bind("TOOLHELP", 80, t_TimerCount);
     api_bind("MMSYSTEM", 701, m_mciSendCommand);
-
-    api_bind("WAVEMIX",  4, wm_ok);      /* WaveMixActivate      */
-    api_bind("WAVEMIX",  5, wm_ok);      /* WaveMixOpenWave      */
-    api_bind("WAVEMIX",  6, wm_ok);      /* WaveMixOpenChannel   */
-    api_bind("WAVEMIX",  7, wm_ok);      /* WaveMixPlay          */
-    api_bind("WAVEMIX",  8, wm_ok);      /* WaveMixFlushChannel  */
-    api_bind("WAVEMIX",  9, wm_ok);      /* WaveMixCloseChannel  */
-    api_bind("WAVEMIX", 10, wm_ok);      /* WaveMixFreeWave      */
-    api_bind("WAVEMIX", 11, wm_ok);      /* WaveMixCloseSession  */
-    api_bind("WAVEMIX", 12, wm_ok);      /* WaveMixPump          */
-    api_bind("WAVEMIX", 14, wm_ok);      /* WaveMixGetInfo       */
-    api_bind("WAVEMIX", 15, wm_init);    /* WaveMixConfigureInit */
 
     api_bind("COMMDLG",  1, cd_GetOpenFileName);
     api_bind("COMMDLG",  2, cd_GetSaveFileName);

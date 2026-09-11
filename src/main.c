@@ -7,6 +7,7 @@
 #include "thunk.h"
 #include "fpu.h"
 #include "task.h"
+#include "audio.h"
 
 #include <stdio.h>
 #include <string.h>
@@ -45,6 +46,9 @@ static const char usage_text[] =
     "  --survey        keep going past unimplemented APIs (returning 0)\n"
     "  --console       open a console for the log (this is a GUI binary)\n"
     "  --trace-paint   log update regions around painting (repaint loops)\n"
+    "  --play-wave N   play \"WAVE\" resource N through the sound path\n"
+    "                  and exit (the game has 2601 2602 2611 2612 2621 2631;\n"
+    "                  N = 0 plays all six, overlapping)\n"
     "  --log FILE      also write the log to FILE\n"
     "  --help          this text\n";
 
@@ -77,6 +81,7 @@ int main(int argc, char **argv)
     int do_fuzz = 0;
     long fuzz_rounds = 200000;
     unsigned fuzz_seed = 0;
+    long play_wave = -1;
     struct { unsigned seg, off, len; } peek[8];
     int npeek = 0;
     int i;
@@ -111,6 +116,8 @@ int main(int argc, char **argv)
             fuzz_seed = (unsigned)strtoul(argv[++i], NULL, 0);
         } else if (!strcmp(a, "--fuzz-rounds") && i + 1 < argc) {
             fuzz_rounds = strtol(argv[++i], NULL, 0);
+        } else if (!strcmp(a, "--play-wave") && i + 1 < argc) {
+            play_wave = strtol(argv[++i], NULL, 0);
         } else if (!strcmp(a, "--trace-paint")) {
             trace_paint = 1;
         } else if (!strcmp(a, "--survey")) {
@@ -137,6 +144,10 @@ int main(int argc, char **argv)
        inspection modes are what needs asking for, not the ordinary one. */
     if (!do_dump && !do_imports && !do_load && !do_fuzz && npeek == 0)
         do_run = 1;
+
+    /* --play-wave wants the module loaded and a task, because the waves are
+       resources inside it - but not the interpreter. */
+    if (play_wave >= 0) do_run = 1;
 
     log_open(logfile);
 
@@ -213,6 +224,7 @@ int main(int argc, char **argv)
     api_gdi_register();
     api_res_register();
     api_misc_register();
+    api_audio_register();
     api_profile_register();
     api_dlg_register();
     thunk_report_unbound();
@@ -221,6 +233,15 @@ int main(int argc, char **argv)
         log_close();
         return 1;
     }
+    /* The effects are reachable only from the battle VCR, so being able to
+       drive the sound path without one is what makes it testable at all. */
+    if (play_wave >= 0) {
+        int rc = audio_selftest((unsigned)play_wave);
+        ne_close(&module);
+        log_close();
+        return rc;
+    }
+
     log_msg("\nStarting at %04X:%04X, ss:sp %04X:%04X, ds %04X\n\n",
             cpu.seg[S_CS], (unsigned)cpu.eip, cpu.seg[S_SS],
             reg16(&cpu, R_SP), cpu.seg[S_DS]);
@@ -250,6 +271,7 @@ int main(int argc, char **argv)
                 cpu_state_name(r), (unsigned long long)cpu.icount);
     }
     fpu_host_leave();
+    audio_shutdown();
 
     if (cpu.state == CPU_NOAPI) {
         log_msg("  That API has no implementation yet; the call is named above.\n"

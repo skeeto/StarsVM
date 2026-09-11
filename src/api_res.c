@@ -134,6 +134,17 @@ const uint8_t *res_locate_name(uint16_t type_id, const char *name, uint32_t *len
     return m->img + nr.off;
 }
 
+/* Types are usually the numeric RT16_x above, but a program may invent its own:
+   Stars! keeps its sound effects under a type literally named "WAVE".  The
+   resource table refers to such a type by the offset of its name string, so the
+   lookup has to happen before any of the res_locate_* calls can be used. */
+uint16_t res_type_key(const char *type_name)
+{
+    NeModule *m = task.mod;
+    if (!m || !type_name) return 0;
+    return (uint16_t)res_key_str(m, type_name, 1);
+}
+
 const uint8_t *res_locate_id(uint16_t type_id, uint16_t id, uint32_t *len)
 {
     NeModule *m = task.mod;

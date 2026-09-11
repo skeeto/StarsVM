@@ -15,7 +15,7 @@
 enum {
     H_NONE = 0,
     H_WND, H_DC, H_BITMAP, H_BRUSH, H_PEN, H_FONT, H_RGN, H_PALETTE,
-    H_MENU, H_CURSOR, H_ICON, H_ACCEL, H_FILE, H_GDIOBJ
+    H_MENU, H_CURSOR, H_ICON, H_ACCEL, H_FILE, H_GDIOBJ, H_MIXSESSION
 };
 
 /* Map a host handle to a 16-bit one, reusing the existing entry if the same

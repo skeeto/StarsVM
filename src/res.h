@@ -33,4 +33,10 @@ const uint8_t *res_locate_name(uint16_t type_id, const char *name, uint32_t *len
 /* The same, for a resource already known by its numeric id. */
 const uint8_t *res_locate_id(uint16_t type_id, uint16_t id, uint32_t *len);
 
+/* Resolve a string-named resource TYPE - "WAVE", say - to the id the NE
+   resource table uses for it, which is the byte offset of its Pascal string
+   within that table.  That id is what the res_locate_* calls above want.
+   Returns 0 if the module has no such type. */
+uint16_t res_type_key(const char *type_name);
+
 #endif
