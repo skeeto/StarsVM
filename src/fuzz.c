@@ -749,13 +749,22 @@ static void gen(struct form *f)
         f->what = "inc/dec";
         break;
     }
-    case 6: {                                     /* MUL / IMUL */
+    case 6: {                                     /* MUL / IMUL / DIV / IDIV */
+        int sub = 4 + (int)rnd_below(4);
         f->bytes[0] = size8 ? 0xF6 : 0xF7;
-        f->bytes[1] = modrm_rr(4 + (int)rnd_below(2), rm);
+        f->bytes[1] = modrm_rr(sub, rm);
         f->len = 2;
-        /* Only CF and OF are defined; SF/ZF/AF/PF are not. */
-        f->mask = F_CF | F_OF | F_DF;
-        f->what = "mul/imul";
+        if (sub < 6) {
+            /* Only CF and OF are defined; SF/ZF/AF/PF are not. */
+            f->mask = F_CF | F_OF | F_DF;
+            f->what = "mul/imul";
+        } else {
+            /* A divide defines no arithmetic flag at all, so only DF is
+               compared.  The quotient and the remainder are what there is to
+               check, and those are registers, which are compared in full. */
+            f->mask = F_DF;
+            f->what = "div/idiv";
+        }
         break;
     }
     case 7: {                                     /* shifts and rotates */
@@ -1029,15 +1038,67 @@ static void gen(struct form *f)
     }
 }
 
-/* Would this instruction divide by zero or overflow?  Skip those: the host
-   would raise an exception where the interpreter reports a fault. */
-static int is_divide(const struct form *f)
+/* An 8-bit operand register as the hardware numbers them: 4-7 are the high
+   halves of AX-BX, not the low halves of SP-DI. */
+static uint32_t in_reg8(int r)
 {
-    if (f->len >= 2 && (f->bytes[0] == 0xF6 || f->bytes[0] == 0xF7)) {
-        int sub = (f->bytes[1] >> 3) & 7;
-        return sub == 6 || sub == 7;
+    return (r < 4) ? (fz.in_r[r] & 0xFFu) : ((fz.in_r[r - 4] >> 8) & 0xFFu);
+}
+
+/* Would this divide fault - a zero divisor, or a quotient too wide for its
+   destination?  Those are skipped, because a #DE inside the trampoline takes
+   the process down rather than reporting a mismatch.
+   Only the ones that genuinely would, though.  This used to answer yes to every
+   divide, which meant DIV and IDIV were never tested at all: gen() only emitted
+   reg fields 4 and 5, so it never even fired.  The operands are drawn before
+   gen(), so the answer here is exact rather than cautious.
+   The INT_MIN / -1 guards are not pedantry: that division is undefined in C as
+   well as on the hardware, so asking would be the bug. */
+static int div_faults(const struct form *f)
+{
+    int sub, idiv, size, rm;
+
+    if (f->len < 2 || (f->bytes[0] != 0xF6 && f->bytes[0] != 0xF7)) return 0;
+    sub = (f->bytes[1] >> 3) & 7;
+    if (sub != 6 && sub != 7) return 0;
+    idiv = sub == 7;
+    rm = f->bytes[1] & 7;
+    size = f->bytes[0] == 0xF6 ? 1 : (f->want32 ? 4 : 2);
+
+    if (size == 1) {
+        uint32_t src = in_reg8(rm);
+        uint32_t ax = fz.in_r[R_AX] & 0xFFFFu;
+        if (!src) return 1;
+        if (!idiv) return ax / src > 0xFFu;
+        {   /* int16 over int8 cannot overflow int32, so no guard is needed */
+            int32_t q = (int32_t)(int16_t)(uint16_t)ax / (int32_t)(int8_t)(uint8_t)src;
+            return q < -128 || q > 127;
+        }
     }
-    return 0;
+    if (size == 2) {
+        uint32_t src = fz.in_r[rm] & 0xFFFFu;
+        uint32_t n = ((fz.in_r[R_DX] & 0xFFFFu) << 16) | (fz.in_r[R_AX] & 0xFFFFu);
+        if (!src) return 1;
+        if (!idiv) return n / src > 0xFFFFu;
+        {
+            int32_t sn = (int32_t)n, s = (int32_t)(int16_t)(uint16_t)src, q;
+            if (s == -1 && sn == (int32_t)0x80000000u) return 1;
+            q = sn / s;
+            return q < -32768 || q > 32767;
+        }
+    }
+    {
+        uint32_t src = fz.in_r[rm];
+        uint64_t n = ((uint64_t)fz.in_r[R_DX] << 32) | fz.in_r[R_AX];
+        if (!src) return 1;
+        if (!idiv) return n / src > 0xFFFFFFFFull;
+        {
+            int64_t sn = (int64_t)n, s = (int64_t)(int32_t)src, q;
+            if (s == -1 && sn == (-9223372036854775807LL - 1)) return 1;
+            q = sn / s;
+            return q < -2147483647LL - 1 || q > 2147483647LL;
+        }
+    }
 }
 
 /* ------------------------------------------------------------------ the test */
@@ -1114,7 +1175,7 @@ static int fuzz_run(long rounds, unsigned seed)
         fz.in_r[4] = 0;                            /* the stack is the host's */
 
         gen(&f);
-        if (is_divide(&f)) { skipped++; continue; }
+        if (div_faults(&f)) { skipped++; continue; }
         if (f.why_not) {
             tally(skip_name, skip_count, f.why_not);
             unrunnable++;
