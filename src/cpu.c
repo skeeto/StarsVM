@@ -32,15 +32,13 @@ static const uint8_t parity8[256] = {
 #undef P2
 };
 
-static uint32_t mask_of(int size)
-{
-    return size == 1 ? 0xFFu : size == 2 ? 0xFFFFu : 0xFFFFFFFFu;
-}
+/* Indexed by operand size in bytes.  1, 2 and 4 are the only sizes that occur;
+   0 and 3 are there to make the index the size itself. */
+static const uint32_t size_mask[5] = { 0, 0xFFu, 0xFFFFu, 0, 0xFFFFFFFFu };
+static const uint32_t size_sign[5] = { 0, 0x80u, 0x8000u, 0, 0x80000000u };
 
-static uint32_t sign_of(int size)
-{
-    return size == 1 ? 0x80u : size == 2 ? 0x8000u : 0x80000000u;
-}
+static uint32_t mask_of(int size) { return size_mask[size]; }
+static uint32_t sign_of(int size) { return size_sign[size]; }
 
 static uint32_t sext(uint32_t v, int size)
 {
@@ -184,45 +182,53 @@ static uint32_t pop_size(Cpu *c, int size)
 
 static void set_zsp(Cpu *c, uint32_t res, int size)
 {
-    uint32_t m = mask_of(size);
-    res &= m;
-    c->eflags &= ~(F_ZF | F_SF | F_PF);
-    if (res == 0)               c->eflags |= F_ZF;
-    if (res & sign_of(size))    c->eflags |= F_SF;
-    c->eflags |= parity8[res & 0xFF];
+    uint32_t r = res & size_mask[size];
+    uint32_t f = c->eflags & ~(F_ZF | F_SF | F_PF);
+
+    if (r == 0)               f |= F_ZF;
+    if (r & size_sign[size])  f |= F_SF;
+    c->eflags = f | parity8[r & 0xFF];
 }
 
 static void flags_add(Cpu *c, uint32_t a, uint32_t b, uint32_t carry,
                       uint32_t res, int size)
 {
-    uint32_t m = mask_of(size), s = sign_of(size);
+    uint32_t m = size_mask[size], s = size_sign[size];
     uint32_t r = res & m;
+    uint32_t f = c->eflags & ~(F_CF | F_OF | F_AF | F_ZF | F_SF | F_PF);
 
-    c->eflags &= ~(F_CF | F_OF | F_AF);
     /* Carry out of the top bit, computed without relying on wider arithmetic. */
-    if (r < (a & m) || (carry && r == (a & m))) c->eflags |= F_CF;
-    if (((a ^ ~b) & (a ^ r) & s) != 0)          c->eflags |= F_OF;
-    if (((a ^ b ^ r) & 0x10u) != 0)             c->eflags |= F_AF;
-    set_zsp(c, r, size);
+    if (r < (a & m) || (carry && r == (a & m))) f |= F_CF;
+    if (((a ^ ~b) & (a ^ r) & s) != 0)          f |= F_OF;
+    if (((a ^ b ^ r) & 0x10u) != 0)             f |= F_AF;
+    if (r == 0)                                 f |= F_ZF;
+    if (r & s)                                  f |= F_SF;
+    c->eflags = f | parity8[r & 0xFF];
 }
 
 static void flags_sub(Cpu *c, uint32_t a, uint32_t b, uint32_t borrow,
                       uint32_t res, int size)
 {
-    uint32_t m = mask_of(size), s = sign_of(size);
+    uint32_t m = size_mask[size], s = size_sign[size];
     uint32_t r = res & m;
+    uint32_t f = c->eflags & ~(F_CF | F_OF | F_AF | F_ZF | F_SF | F_PF);
 
-    c->eflags &= ~(F_CF | F_OF | F_AF);
-    if ((a & m) < (b & m) || (borrow && (a & m) == (b & m))) c->eflags |= F_CF;
-    if (((a ^ b) & (a ^ r) & s) != 0)                        c->eflags |= F_OF;
-    if (((a ^ b ^ r) & 0x10u) != 0)                          c->eflags |= F_AF;
-    set_zsp(c, r, size);
+    if ((a & m) < (b & m) || (borrow && (a & m) == (b & m))) f |= F_CF;
+    if (((a ^ b) & (a ^ r) & s) != 0)                        f |= F_OF;
+    if (((a ^ b ^ r) & 0x10u) != 0)                          f |= F_AF;
+    if (r == 0)                                              f |= F_ZF;
+    if (r & s)                                               f |= F_SF;
+    c->eflags = f | parity8[r & 0xFF];
 }
 
 static void flags_logic(Cpu *c, uint32_t res, int size)
 {
-    c->eflags &= ~(F_CF | F_OF | F_AF);
-    set_zsp(c, res, size);
+    uint32_t r = res & size_mask[size];
+    uint32_t f = c->eflags & ~(F_CF | F_OF | F_AF | F_ZF | F_SF | F_PF);
+
+    if (r == 0)               f |= F_ZF;
+    if (r & size_sign[size])  f |= F_SF;
+    c->eflags = f | parity8[r & 0xFF];
 }
 
 /* --------------------------------------------------------------- ModRM decode */
@@ -350,25 +356,29 @@ static uint32_t alu(Cpu *c, int op, uint32_t a, uint32_t b, int size, int *store
    being explicit about. */
 static uint32_t do_inc(Cpu *c, uint32_t a, int size)
 {
-    uint32_t r = (a + 1) & mask_of(size);
-    uint32_t keep = c->eflags & F_CF;
-    c->eflags &= ~(F_OF | F_AF);
-    if (r == sign_of(size))      c->eflags |= F_OF;
-    if ((r & 0x0Fu) == 0)        c->eflags |= F_AF;
-    set_zsp(c, r, size);
-    c->eflags = (c->eflags & ~F_CF) | keep;
+    uint32_t s = size_sign[size];
+    uint32_t r = (a + 1) & size_mask[size];
+    uint32_t f = c->eflags & ~(F_OF | F_AF | F_ZF | F_SF | F_PF);
+
+    if (r == s)           f |= F_OF;
+    if ((r & 0x0Fu) == 0) f |= F_AF;
+    if (r == 0)           f |= F_ZF;
+    if (r & s)            f |= F_SF;
+    c->eflags = f | parity8[r & 0xFF];
     return r;
 }
 
 static uint32_t do_dec(Cpu *c, uint32_t a, int size)
 {
-    uint32_t r = (a - 1) & mask_of(size);
-    uint32_t keep = c->eflags & F_CF;
-    c->eflags &= ~(F_OF | F_AF);
-    if (r == sign_of(size) - 1)  c->eflags |= F_OF;
-    if ((r & 0x0Fu) == 0x0Fu)    c->eflags |= F_AF;
-    set_zsp(c, r, size);
-    c->eflags = (c->eflags & ~F_CF) | keep;
+    uint32_t s = size_sign[size];
+    uint32_t r = (a - 1) & size_mask[size];
+    uint32_t f = c->eflags & ~(F_OF | F_AF | F_ZF | F_SF | F_PF);
+
+    if (r == s - 1)          f |= F_OF;
+    if ((r & 0x0Fu) == 0x0Fu) f |= F_AF;
+    if (r == 0)              f |= F_ZF;
+    if (r & s)               f |= F_SF;
+    c->eflags = f | parity8[r & 0xFF];
     return r;
 }
 
