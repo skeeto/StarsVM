@@ -30,6 +30,11 @@ static int      depth;
 
 int call16_depth(void) { return depth; }
 
+/* How often to note that a callback has not come back yet.  Large enough that
+   a slow but honest one stays quiet for a good while, small enough that a stuck
+   one gets named within seconds of interpreted time. */
+#define CALL16_NOTE 1000000000ull
+
 uint16_t call16_ret_selector(void) { return ret_sel; }
 
 int call16_init(void)
@@ -188,10 +193,36 @@ uint32_t call16_wndproc(uint32_t proc, uint16_t ax,
     set_reg16(c, R_AX, ax ? ax : c->seg[S_SS]);
     set_reg16(c, R_BP, (uint16_t)(reg16(c, R_SP) + 2));
 
-    /* A budget rather than no limit: a callback that never reaches the return
-       address would otherwise hang the whole program with no clue why, which is
-       exactly how a wiped return selector presented itself. */
-    r = cpu_run(c, 200000000ull);
+    /* No ceiling on a callback's instructions, and this is the second design.
+       The first gave every callback 200 million and treated exceeding it as
+       fatal, which cannot work: no instruction count distinguishes a callback
+       that will never return from one merely doing a great deal of work, both
+       being "has not come back yet", and the game does plenty of the latter.
+       Generating a turn on a large map with many players runs well past 200
+       million inside a single WM_COMMAND, so the budget ended games in
+       progress - much the worse of the two failures.
+
+       What it was for was making a callback that cannot return visible rather
+       than silent, and a periodic note does that while ending nothing.
+
+       --steps cannot be honoured here either, which was the other thing tried:
+       a stop latched inside a callback unwinds only if control returns to an
+       enclosing cpu_run, and when the callback came from a Win32 modal loop it
+       does not - the loop goes on pumping messages whose callbacks all refuse
+       to run, leaving the program alive with nothing reported.  So --steps
+       bounds the outer loop only, and its help text says so. */
+    {
+        uint64_t ran = 0;
+        for (;;) {
+            r = cpu_run(c, CALL16_NOTE);
+            if (r != CPU_STEPS) break;
+            ran += CALL16_NOTE;
+            log_msg("*** guest callback %04X:%04X has not returned after %llu"
+                    " instructions, still going\n",
+                    SEGPTR_SEL(proc), SEGPTR_OFF(proc),
+                    (unsigned long long)ran);
+        }
+    }
     depth--;
 
     /* Read the struct back before the CPU state is restored; the bytes live in
@@ -200,9 +231,6 @@ uint32_t call16_wndproc(uint32_t proc, uint16_t ax,
     if (extra && extralen)
         memcpy(extra, sel_ptr(extra_sel, extra_off), extralen);
 
-    if (r == CPU_STEPS)
-        log_msg("*** guest callback %04X:%04X ran away (no return after 200M "
-                "instructions)\n", SEGPTR_SEL(proc), SEGPTR_OFF(proc));
     if (r != CPU_RETURN) {
         if (!cpu_stop_latched())
             log_msg("*** guest callback %04X:%04X stopped: %s at %04X:%04X"
@@ -214,7 +242,7 @@ uint32_t call16_wndproc(uint32_t proc, uint16_t ax,
            returning 0 to Win32 as though nothing happened is exactly how the
            serial-number dialog vanished without trace.  Latch it instead, so no
            further guest instruction runs and one report comes out at the top. */
-        if (r == CPU_NOAPI || r == CPU_BADOP || r == CPU_FAULT || r == CPU_STEPS)
+        if (r == CPU_NOAPI || r == CPU_BADOP || r == CPU_FAULT)
             cpu_stop_latch(c, r);
         result = 0;
     } else {
