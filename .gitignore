@@ -3,6 +3,7 @@ build/
 StarsVM.exe
 StarsVM-fuzz.exe
 StarsVM-pack.exe
+StarsVM-prof.exe
 Stars-x86.exe
 
 # Generated at build time by tools/mkicon.py from the game's own
