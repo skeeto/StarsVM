@@ -130,10 +130,13 @@ halves of the format cannot drift apart without the build failing.
 `make fuzz` builds a second, separate program, `StarsVM-fuzz.exe`, out of seven
 of the same sources — the interpreter, the FPU, the selector arena, the log, and
 the thunk layer that `cpu_step` needs in order to link. It differentially tests
-the interpreter and the FPU against the host CPU — 200,000 rounds of register
-and immediate forms, including the x87 register forms, where the oracle seeds
-and dumps the whole 80-bit register stack with `FRSTOR` and `FNSAVE`. It has
-nothing to say about the game, so
+the interpreter and the FPU against the host CPU — 200,000 rounds by default,
+covering register, immediate and memory forms, integer and x87 alike. For x87
+the oracle seeds and dumps the whole 80-bit register stack with `FRSTOR` and
+`FNSAVE`; for memory operands it works out the effective address independently
+of `decode_ea` and aims the oracle at a mirror of the same byte, so the address
+arithmetic is under test rather than assumed. It has nothing to say about the
+game, so
 it is not part of the emulator, and neither is `src/fuzz.c`: its oracle works by
 writing machine code into a page it allocates `PAGE_EXECUTE_READWRITE` and then
 calls. That is the only request for executable memory anywhere in the tree, and

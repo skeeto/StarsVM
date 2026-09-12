@@ -31,11 +31,23 @@
  *    byte a 16-bit compiler would have emitted; a form 64-bit mode cannot
  *    run at all is skipped and counted, never quietly passed.
  *
- * Coverage is register and immediate forms: the ALU, shifts and rotates,
- * inc/dec, mul/div, the bit instructions, MOVZX/MOVSX, SETcc, SHLD/SHRD and the
- * decimal adjusts.  That is where flag bugs live.  Memory operands, string
- * operations and control transfer are not covered here - they are exercised by
- * running the game and by the targeted tests in tools/.
+ * Coverage is the ALU, shifts and rotates, inc/dec, mul/div, the bit
+ * instructions, MOVZX/MOVSX, SETcc, SHLD/SHRD and the decimal adjusts, in
+ * register and immediate forms - that is where flag bugs live - and the ALU
+ * again against memory.  String operations and control transfer are not covered
+ * here; they are exercised by running the game and by the targeted tests in
+ * tools/.
+ *
+ * A memory operand is the one case where the two sides cannot run the same
+ * bytes: a 16-bit ModRM means something else to a host whose address size is 32
+ * or 64 bits.  So the guest gets a real addressing form - [bx+si+disp],
+ * [bp+disp], a direct offset - and the fuzzer works out the effective address
+ * *itself*, independently of decode_ea, which is exactly what makes it a test
+ * of decode_ea; the oracle is then pointed at the mirror of that byte by
+ * absolute address.  Two windows are mirrored rather than one, because DS and
+ * SS have to be able to differ before a BP-relative form can be caught
+ * choosing the wrong default segment.  Whatever either side wrote is compared
+ * afterwards, so stores are covered as well as loads.
  *
  * The x87 register forms are covered too, and the oracle there is a different
  * shape.  fpu.c does not implement x87 arithmetic - it hands the operands to
@@ -86,6 +98,11 @@
    stored ST(0) first - top-relative, not physical - while the tag word is in
    physical order.  That asymmetry is the hardware's, and honouring it is what
    makes the TOP mapping testable rather than cancelled out. */
+/* The mirrored window.  Wide enough for an 80-bit operand and some room to
+   move it around in, small enough to compare in full every round. */
+#define MEM_WIN    64
+#define MEM_AT     0x200u          /* where it sits in each guest selector */
+
 #define FPU_IMG    108
 #define FPU_O_CW     0
 #define FPU_O_SW     4
@@ -111,6 +128,10 @@ struct fzstate {
        named fields are ever compared. */
     uint8_t  in_fpu[FPU_IMG];
     uint8_t  out_fpu[FPU_IMG];
+    /* The oracle's side of a memory operand.  [0] mirrors the guest's DS
+       window and [1] its SS window; the payload is aimed at whichever the
+       addressing form is supposed to pick. */
+    uint8_t  mem[2][MEM_WIN];
 };
 static struct fzstate fz;
 
@@ -164,6 +185,35 @@ static void eref(uint8_t op, int reg, size_t off)
         e8((uint8_t)(0x05 | (reg << 3)));         /* mod=00, r/m=101, disp32 */
         e32((uint32_t)(uintptr_t)&fz + (uint32_t)off);
     }
+}
+
+/* One instruction against the mirrored window, built into a payload buffer
+   rather than emitted into the trampoline.  A 32-bit host can name the address
+   outright; a 64-bit host cannot, so it goes through R15 like the rest of the
+   state block.  That needs REX.B, which the payload is otherwise free of - but
+   the invariant that matters is that nothing in the payload *writes* R15, and
+   naming it as a base does not. */
+static unsigned host_mem_insn(uint8_t *out, const uint8_t *opb, unsigned opn,
+                              int reg, unsigned which, unsigned off,
+                              const uint8_t *imm, unsigned immn)
+{
+    size_t at = offsetof(struct fzstate, mem) + which * MEM_WIN + off;
+    unsigned n = 0, i;
+
+    if (long_mode) out[n++] = 0x41;               /* REX.B: the base is R15 */
+    for (i = 0; i < opn; i++) out[n++] = opb[i];
+    if (long_mode) out[n++] = (uint8_t)(0x80 | (reg << 3) | 7);  /* [r15+d32] */
+    else           out[n++] = (uint8_t)(0x05 | (reg << 3));      /* [disp32]  */
+    {
+        uint32_t d = long_mode ? (uint32_t)at
+                               : (uint32_t)(uintptr_t)&fz + (uint32_t)at;
+        out[n++] = (uint8_t)d;
+        out[n++] = (uint8_t)(d >> 8);
+        out[n++] = (uint8_t)(d >> 16);
+        out[n++] = (uint8_t)(d >> 24);
+    }
+    for (i = 0; i < immn; i++) out[n++] = imm[i];
+    return n;
 }
 
 /* The stack pointer is the one register whose full width matters, so on a
@@ -512,11 +562,100 @@ struct form {
     int      want32;     /* guest operand size is 32 bits */
     uint32_t mask;       /* flags that are architecturally defined */
     unsigned cl_mod;     /* if set, force CL into [0, cl_mod) before running */
+    /* A memory operand, when mem_len is nonzero: the guest bytes already carry
+       its ModRM and displacement, and these say what the oracle should aim at.
+       mem_seg is which window the addressing form ought to choose - 0 for DS,
+       1 for SS - so picking the other one shows up as a difference. */
+    unsigned mem_len;    /* bytes of the operand, 0 when there is none */
+    unsigned mem_float;  /* 4 or 8 when the operand is converted from a float */
+    unsigned mem_off;    /* where in the window it lands */
+    unsigned mem_seg;
+    uint8_t  mem_op[2];  /* opcode bytes for the oracle's encoding */
+    unsigned mem_opn;
+    int      mem_reg;    /* ModRM reg field for the oracle */
+    uint8_t  mem_imm[4];
+    unsigned mem_immn;
     int      fpu;        /* an escape opcode: set up and compare x87 state,
                             and emit no operand-size prefix on either side,
                             since D8-DF mean the same in every mode */
     const char *what;
 };
+
+/* A 16-bit addressing form aimed at the mirrored window: writes the ModRM byte
+   and a 16-bit displacement, and records which segment the form is supposed to
+   pick.  The displacement is whatever makes the effective address land in the
+   window given the registers already drawn - working that out here, rather than
+   asking decode_ea, is what makes this a test of decode_ea. */
+static unsigned mem_modrm(struct form *f, int reg, unsigned esize, uint8_t *out)
+{
+    int rmf = (int)rnd_below(8);
+    int mod = 2;                                   /* disp16 */
+    unsigned off = rnd_below(MEM_WIN - esize + 1u);
+    uint16_t base = 0;
+    uint16_t bx = (uint16_t)fz.in_r[R_BX], bp = (uint16_t)fz.in_r[R_BP];
+    uint16_t si = (uint16_t)fz.in_r[R_SI], di = (uint16_t)fz.in_r[R_DI];
+    uint16_t disp;
+
+    f->mem_seg = 0;                                /* DS unless BP is in it */
+    switch (rmf) {
+    case 0: base = (uint16_t)(bx + si); break;
+    case 1: base = (uint16_t)(bx + di); break;
+    case 2: base = (uint16_t)(bp + si); f->mem_seg = 1; break;
+    case 3: base = (uint16_t)(bp + di); f->mem_seg = 1; break;
+    case 4: base = si; break;
+    case 5: base = di; break;
+    case 6:
+        /* mod 0 with rm 6 is the direct form, the one case here that does not
+           mean BP - so it is DS, not SS. */
+        if (rnd_below(2)) mod = 0;
+        else { base = bp; f->mem_seg = 1; }
+        break;
+    default: base = bx; break;
+    }
+
+    disp = (uint16_t)(MEM_AT + off - base);
+    out[0] = (uint8_t)((mod << 6) | (reg << 3) | rmf);
+    out[1] = (uint8_t)disp;
+    out[2] = (uint8_t)(disp >> 8);
+    f->mem_off = off;
+    f->mem_len = esize;
+    f->mem_reg = reg;
+    return 3;
+}
+
+/* Make a signalling NaN in a float memory operand quiet.
+ *
+ * This is the one operand shape where fpu.c cannot agree with the hardware, and
+ * the reason is structural rather than a mistake.  Hardware loads the operand
+ * and operates in a single instruction, so an SNaN in memory meeting a QNaN in
+ * ST(0) takes the SNaN-versus-QNaN rule, where the QNaN wins.  fpu.c widens the
+ * operand to 80 bits first, which quietens it, so by the time the division
+ * happens both are quiet and the larger-significand rule picks the other one.
+ *
+ * It takes a NaN in ST(0) *and* a signalling NaN in memory to be observable -
+ * against any ordinary value the two agree bit for bit, because quietening
+ * early and quietening late produce the same bits - and nothing a compiler
+ * emits produces either.  Fixing it would mean giving host_arith memory-operand
+ * forms so the host does load-and-operate itself, which is a restructuring of
+ * the path carrying about 5% of turn generation for a case that cannot arise.
+ * So it is recorded here and kept out of the generated operands instead.
+ */
+static void mem_quieten(uint8_t *p, unsigned n)
+{
+    if (n == 4) {
+        uint32_t v = (uint32_t)p[0] | ((uint32_t)p[1] << 8) |
+                     ((uint32_t)p[2] << 16) | ((uint32_t)p[3] << 24);
+        if ((v & 0x7F800000u) == 0x7F800000u && (v & 0x007FFFFFu))
+            p[2] |= 0x40;                          /* the quiet bit */
+    } else if (n == 8) {
+        uint32_t hi = (uint32_t)p[4] | ((uint32_t)p[5] << 8) |
+                      ((uint32_t)p[6] << 16) | ((uint32_t)p[7] << 24);
+        uint32_t lo = (uint32_t)p[0] | ((uint32_t)p[1] << 8) |
+                      ((uint32_t)p[2] << 16) | ((uint32_t)p[3] << 24);
+        if ((hi & 0x7FF00000u) == 0x7FF00000u && ((hi & 0x000FFFFFu) || lo))
+            p[6] |= 0x08;
+    }
+}
 
 /* modrm for "register, register", avoiding SP when the size is 16/32. */
 static uint8_t modrm_rr(int reg, int rm) { return (uint8_t)(0xC0 | (reg << 3) | rm); }
@@ -533,7 +672,7 @@ static void gen(struct form *f)
     reg = size8 ? (int)rnd_below(8) : rnd_reg();
     rm  = size8 ? (int)rnd_below(8) : rnd_reg();
 
-    switch (rnd_below(19)) {
+    switch (rnd_below(21)) {
     case 0: {                                     /* ALU r/m,r and r,r/m */
         int aluop = (int)rnd_below(8);
         int dir = (int)rnd_below(2);
@@ -744,6 +883,70 @@ static void gen(struct form *f)
         f->what = "cbw/cwd/sahf/lahf/flags";
         break;
     }
+    case 18: {                                    /* ALU against memory */
+        int aluop = (int)rnd_below(8);
+        int to_reg = (int)rnd_below(2);
+        /* The oracle needs REX.B to reach R15 in long mode, and any REX
+           prefix turns the 8-bit registers 4-7 from AH/CH/DH/BH into
+           SPL/BPL/SIL/DIL.  The guest means the former, so on a 64-bit host the
+           8-bit register operand stays in AL/CL/DL/BL; the 32-bit build, which
+           needs no REX, still covers the high-byte registers. */
+        int mreg = size8 ? (int)rnd_below(long_mode ? 4 : 8) : rnd_reg();
+        unsigned esize = size8 ? 1u : (f->want32 ? 4u : 2u);
+
+        f->bytes[0] = (uint8_t)((aluop << 3) | (to_reg << 1) | (size8 ? 0 : 1));
+        f->len = 1 + mem_modrm(f, mreg, esize, f->bytes + 1);
+        f->mem_op[0] = f->bytes[0];
+        f->mem_opn = 1;
+        f->what = "alu r/m,r memory";
+        break;
+    }
+
+    case 19: {                                    /* x87 against memory */
+        /* Every memory escape fpu.c implements, less four that cannot be
+           compared: FLDCW and FLDENV would take a control word out of random
+           bytes and hand it to the real host FPU, where an unmasked exception
+           faults inside this process rather than failing a round; FSTENV writes
+           four words of instruction and operand pointers that fpu.c does not
+           model; and FNSTSW m16 writes the exception flags, which are the
+           host's own accumulated noise rather than anything the guest did. */
+        /* The last column is the width the operand is converted *from* when it
+           is a float, which is what mem_quieten needs; integer and 80-bit
+           operands convert exactly and are left alone. */
+        static const struct { uint8_t op, reg, size, flt; } mf[] = {
+            { 0xD8, 0, 4, 4 }, { 0xD8, 1, 4, 4 }, { 0xD8, 2, 4, 4 },
+            { 0xD8, 3, 4, 4 }, { 0xD8, 4, 4, 4 }, { 0xD8, 5, 4, 4 },
+            { 0xD8, 6, 4, 4 }, { 0xD8, 7, 4, 4 },
+            { 0xD9, 0, 4, 4 }, { 0xD9, 2, 4, 4 }, { 0xD9, 3, 4, 4 },
+            { 0xD9, 7, 2, 0 },
+            { 0xDA, 0, 4, 0 }, { 0xDA, 1, 4, 0 }, { 0xDA, 2, 4, 0 },
+            { 0xDA, 3, 4, 0 }, { 0xDA, 4, 4, 0 }, { 0xDA, 5, 4, 0 },
+            { 0xDA, 6, 4, 0 }, { 0xDA, 7, 4, 0 },
+            { 0xDB, 0, 4, 0 }, { 0xDB, 2, 4, 0 }, { 0xDB, 3, 4, 0 },
+            { 0xDB, 5,10, 0 }, { 0xDB, 7,10, 0 },
+            { 0xDC, 0, 8, 8 }, { 0xDC, 1, 8, 8 }, { 0xDC, 2, 8, 8 },
+            { 0xDC, 3, 8, 8 }, { 0xDC, 4, 8, 8 }, { 0xDC, 5, 8, 8 },
+            { 0xDC, 6, 8, 8 }, { 0xDC, 7, 8, 8 },
+            { 0xDD, 0, 8, 8 }, { 0xDD, 2, 8, 8 }, { 0xDD, 3, 8, 8 },
+            { 0xDE, 0, 2, 0 }, { 0xDE, 1, 2, 0 }, { 0xDE, 2, 2, 0 },
+            { 0xDE, 3, 2, 0 }, { 0xDE, 4, 2, 0 }, { 0xDE, 5, 2, 0 },
+            { 0xDE, 6, 2, 0 }, { 0xDE, 7, 2, 0 },
+            { 0xDF, 0, 2, 0 }, { 0xDF, 2, 2, 0 }, { 0xDF, 3, 2, 0 },
+            { 0xDF, 5, 8, 0 }, { 0xDF, 7, 8, 0 },
+        };
+        unsigned k = rnd_below(sizeof mf / sizeof *mf);
+
+        f->fpu = 1;
+        f->want32 = 0;
+        f->bytes[0] = mf[k].op;
+        f->len = 1 + mem_modrm(f, mf[k].reg, mf[k].size, f->bytes + 1);
+        f->mem_op[0] = mf[k].op;
+        f->mem_opn = 1;
+        f->mem_float = mf[k].flt;
+        f->what = "x87 memory";
+        break;
+    }
+
     case 17: {                                    /* x87, register forms */
         /* Every register-form escape fpu.c implements, and only those: an
            encoding it does not implement stops the interpreter, which the round
@@ -871,7 +1074,7 @@ static void tally(const char **names, long *counts, const char *key)
 
 static int fuzz_run(long rounds, unsigned seed)
 {
-    uint16_t code_sel;
+    uint16_t code_sel, ds_sel, ss_sel;
     Cpu *c = &cpu;
     long i, tested = 0, skipped = 0, unrunnable = 0, failed = 0;
 
@@ -883,18 +1086,32 @@ static int fuzz_run(long rounds, unsigned seed)
     if (seed) rng_state = seed;
     if (!tramp_build(16)) return 1;
     code_sel = sel_alloc(0x10000u, SK_CODE);
-    if (!code_sel) { log_msg("fuzz: no code selector\n"); return 1; }
+    /* Two data selectors, not one: DS and SS have to be able to differ, or a
+       BP-relative form choosing the wrong default segment would land on the
+       right bytes anyway and the mistake would never show. */
+    ds_sel = sel_alloc(0x10000u, SK_DATA);
+    ss_sel = sel_alloc(0x10000u, SK_DATA);
+    if (!code_sel || !ds_sel || !ss_sel) {
+        log_msg("fuzz: no selector\n");
+        return 1;
+    }
 
     log_msg("fuzz: %ld rounds, seed %08X\n", rounds, rng_state);
 
     for (i = 0; i < rounds; i++) {
         struct form f;
         struct fpstate fs;
-        uint8_t guest[12], host[12];
+        uint8_t guest[16], host[16];
         unsigned gl = 0, hl = 0, k;
         uint32_t seed_here = rng_state;
         uint32_t gflags, hflags, diff;
         int bad = 0;
+
+        /* Before gen(), because a memory form has to work out the
+           displacement that lands the effective address in the window, and
+           that depends on what the base and index registers hold. */
+        for (k = 0; k < 8; k++) fz.in_r[k] = rnd_value();
+        fz.in_r[4] = 0;                            /* the stack is the host's */
 
         gen(&f);
         if (is_divide(&f)) { skipped++; continue; }
@@ -919,13 +1136,15 @@ static int fuzz_run(long rounds, unsigned seed)
             else if (f.want32) guest[gl++] = 0x66;
             else               host[hl++]  = 0x66;
             for (k = 0; k < f.len; k++) guest[gl++] = f.bytes[k];
-            for (k = 0; k < hn;    k++) host[hl++]  = hb[k];
+            if (f.mem_len)
+                hl += host_mem_insn(host + hl, f.mem_op, f.mem_opn, f.mem_reg,
+                                    f.mem_seg, f.mem_off, f.mem_imm, f.mem_immn);
+            else
+                for (k = 0; k < hn; k++) host[hl++] = hb[k];
         }
 
-        /* Random input state.  TF clear, IF set, and only the flags we compare
-           are seeded so a mismatch is never about a bit we do not model. */
-        for (k = 0; k < 8; k++) fz.in_r[k] = rnd_value();
-        fz.in_r[4] = 0;                            /* the stack is the host's */
+        /* TF clear, IF set, and only the flags we compare are seeded, so a
+           mismatch is never about a bit we do not model. */
         if (f.cl_mod)
             fz.in_r[1] = (fz.in_r[1] & ~0xFFu) | rnd_below(f.cl_mod);
         fz.in_flags = (rnd() & CMP_FLAGS) | F_RS | F_IF;
@@ -935,6 +1154,21 @@ static int fuzz_run(long rounds, unsigned seed)
         fz.out_flags = 0;
         if (f.fpu) { fp_gen(&fs); fp_to_image(&fs, fz.in_fpu); }
         memset(fz.out_fpu, 0, sizeof fz.out_fpu);
+        /* Both windows get the same bytes on both sides, then each side works
+           on its own copy: the oracle on fz.mem, the guest on its selectors.
+           Whatever either wrote is compared afterwards. */
+        if (f.mem_len) {
+            for (k = 0; k < MEM_WIN; k++) {
+                fz.mem[0][k] = (uint8_t)rnd();
+                fz.mem[1][k] = (uint8_t)rnd();
+            }
+            if (f.mem_float)
+                mem_quieten(fz.mem[f.mem_seg] + f.mem_off, f.mem_float);
+            for (k = 0; k < MEM_WIN; k++) {
+                sel_wr8(ds_sel, (uint16_t)(MEM_AT + k), fz.mem[0][k]);
+                sel_wr8(ss_sel, (uint16_t)(MEM_AT + k), fz.mem[1][k]);
+            }
+        }
         tramp_run(host, hl);
         hflags = (uint32_t)fz.out_flags;
 
@@ -944,9 +1178,9 @@ static int fuzz_run(long rounds, unsigned seed)
         for (k = 0; k < 8; k++) c->r32[k] = fz.in_r[k];
         c->eflags = (uint32_t)fz.in_flags;
         c->seg[S_CS] = code_sel;
-        c->seg[S_DS] = code_sel;
-        c->seg[S_ES] = code_sel;
-        c->seg[S_SS] = code_sel;
+        c->seg[S_DS] = ds_sel;
+        c->seg[S_ES] = ds_sel;
+        c->seg[S_SS] = ss_sel;
         c->eip = 0;
         for (k = 0; k < gl; k++) sel_wr8(code_sel, (uint16_t)k, guest[k]);
         sel_wr8(code_sel, (uint16_t)gl, 0xF4);     /* HLT, so a length error shows */
@@ -984,6 +1218,22 @@ static int fuzz_run(long rounds, unsigned seed)
             }
         }
         if (f.fpu && fp_compare(fz.out_fpu, c, f.what)) bad = 1;
+        if (f.mem_len) {
+            static const char *wn[2] = { "ds", "ss" };
+            unsigned w;
+            for (w = 0; w < 2; w++) {
+                uint16_t s = w ? ss_sel : ds_sel;
+                for (k = 0; k < MEM_WIN; k++) {
+                    uint8_t want = fz.mem[w][k];
+                    uint8_t got = sel_rd8(s, (uint16_t)(MEM_AT + k));
+                    if (want == got) continue;
+                    log_msg("fuzz: %s %s window +%02X: host %02X, emu %02X\n",
+                            f.what, wn[w], k, want, got);
+                    bad = 1;
+                    break;
+                }
+            }
+        }
         diff = (hflags ^ gflags) & f.mask;
         if (diff) {
             log_msg("fuzz: %s flags differ (%s): host %04X emu %04X\n",
@@ -991,6 +1241,22 @@ static int fuzz_run(long rounds, unsigned seed)
             bad = 1;
         }
         if (bad) {
+            if (f.mem_len) {
+                log_msg("       operand %s+%02X:", f.mem_seg ? "ss" : "ds",
+                        f.mem_off);
+                for (k = 0; k < f.mem_len; k++)
+                    log_msg(" %02X", fz.mem[f.mem_seg][f.mem_off + k]);
+                log_msg("\n");
+            }
+            if (f.fpu) {
+                log_msg("       st in:");
+                for (k = 0; k < FZ_LIVE; k++) {
+                    int q;
+                    log_msg(" ");
+                    for (q = 9; q >= 0; q--) log_msg("%02X", fs.st[k][q]);
+                }
+                log_msg(" top %u cw %04X\n", fs.top, fs.cw);
+            }
             log_msg("       seed %08X bytes:", seed_here);
             for (k = 0; k < gl; k++) log_msg(" %02X", guest[k]);
             if (f.alt_len) {                       /* the oracle ran other bytes */
