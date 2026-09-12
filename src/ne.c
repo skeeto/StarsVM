@@ -1,4 +1,5 @@
 #include "ne.h"
+#include "pack.h"
 #include "sel.h"
 #include "log.h"
 
@@ -159,15 +160,43 @@ int ne_open_appended(NeModule *m, const wchar_t *path)
 {
     uint8_t *whole;
     uint32_t len, at, found = 0;
+    PackInfo pi;
 
     memset(m, 0, sizeof *m);
     whole = slurp_file(path, &len);
     if (!whole) return 0;
 
-    /* Offset 0 is our own PE - it opens "MZ" too, but its e_lfanew points at
-       "PE\0\0".  Anything after that which passes looks_like_ne is the payload;
-       there is only ever one, and the scan is over a file already in the page
-       cache, so it costs nothing worth measuring. */
+    _snwprintf(m->path, sizeof m->path / sizeof *m->path - 1, L"%ls", path);
+    m->path[sizeof m->path / sizeof *m->path - 1] = 0;
+
+    /* A packed payload first, since that is what the packer produces and what
+       a release carries.  It is found by its own trailer rather than by the
+       scan below, and once decoded there is no file offset to speak of - the
+       image exists only in memory, which is why nothing downstream is allowed
+       to want one.  See src/pack.h. */
+    if (pack_find(whole, len, &pi)) {
+        uint8_t *img = malloc(pi.rawlen);
+        if (!img) {
+            log_msg("ne: no room for a %u-byte module\n", pi.rawlen);
+            free(whole);
+            return 0;
+        }
+        if (!pack_decode(whole, &pi, img)) { free(img); free(whole); return 0; }
+        free(whole);
+        m->img    = img;
+        m->imglen = pi.rawlen;
+        if (!ne_parse(m)) { free(img); m->img = NULL; return 0; }
+        log_msg("Unpacked the module appended to this executable:"
+                " %u bytes from %u\n", pi.rawlen, pi.complen);
+        return 1;
+    }
+
+    /* Otherwise a plainly appended one, which `cat` still produces and which
+       stays supported: offset 0 is our own PE - it opens "MZ" too, but its
+       e_lfanew points at "PE\0\0".  Anything after that which passes
+       looks_like_ne is the payload; there is only ever one, and the scan is
+       over a file already in the page cache, so it costs nothing worth
+       measuring. */
     for (at = 1; at + 0x40 <= len; at++) {
         if (whole[at] == 0x4D && looks_like_ne(whole, len, at)) { found = at; break; }
     }
@@ -178,8 +207,6 @@ int ne_open_appended(NeModule *m, const wchar_t *path)
     memmove(whole, whole + found, len - found);
     m->img    = whole;
     m->imglen = len - found;
-    _snwprintf(m->path, sizeof m->path / sizeof *m->path - 1, L"%ls", path);
-    m->path[sizeof m->path / sizeof *m->path - 1] = 0;
 
     if (!ne_parse(m)) { free(whole); m->img = NULL; return 0; }
     log_msg("Running the module appended to this executable at offset %u\n",

@@ -29,9 +29,11 @@
  * every source in the directory, so forgetting one shows up as a link error
  * naming the missing symbol, not as a stale object silently left behind.
  *
- * One source is missing on purpose: fuzz.c belongs to unity_fuzz.c, which
- * builds it as its own program.  It is not an omission to be tidied up - see
- * that file for why the emulator must not contain it.
+ * Two sources are missing on purpose, and neither is an omission to be tidied
+ * up: fuzz.c belongs to unity_fuzz.c and pack.c to unity_pack.c, each built as
+ * its own program.  See the head of those files for why.  Note that unpack.c is
+ * here while pack.c is not - the emulator decodes a compressed module and has
+ * no business being able to produce one.
  */
 
 #include "api_dos.c"
@@ -58,4 +60,5 @@
 #include "sel.c"
 #include "task.c"
 #include "thunk.c"
+#include "unpack.c"
 #include "winproc.c"

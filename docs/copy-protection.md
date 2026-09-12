@@ -9,7 +9,9 @@ way it got it wrong was invisible.
 
 Addresses below are `segment:offset` into `stars.exe` (2.70j, 3,153,152
 bytes). To reach a file offset, add the segment's base; `StarsVM.exe --dump`
-prints them.
+prints them. Those offsets are into the game as it ships; in a `make onefile`
+build the module is compressed, so they address the image once decompressed and
+nothing in the file itself.
 
 ## Where it lives
 

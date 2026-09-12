@@ -49,9 +49,9 @@ static void set_me(const char *argv0)
 static const char usage_text[] =
     "\n"
     "With no path, the game is taken from a module appended to this executable\n"
-    "if there is one, and otherwise from the stars.exe beside it.  So\n"
-    "    cat StarsVM.exe stars.exe > Stars-x86.exe\n"
-    "is a single self-contained program; nothing else needs installing.\n"
+    "if there is one - compressed or not - and otherwise from the stars.exe\n"
+    "beside it.  `make onefile` builds the appended, compressed form, which is a\n"
+    "single self-contained program; nothing else needs installing.\n"
     "\n"
     "  --dump          print the NE structure and exit\n"
     "  --dump-relocs   as --dump, with per-segment relocation counts\n"

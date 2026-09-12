@@ -79,11 +79,13 @@ typedef uint32_t (*NeImportFn)(const char *module, uint16_t ordinal, void *user)
 int  ne_open(NeModule *m, const wchar_t *path);
 
 /* Open an NE module that has been appended to another file - the emulator's own
-   executable, so that `cat StarsVM.exe stars.exe > Stars-x86.exe` is a
-   single self-contained program.  Finds the image by signature rather than by
-   arithmetic on our own size: nothing then depends on the toolchain's idea of
-   where our binary ends, which is not its file size (mingw leaves the COFF
-   symbol table past the last section).  Returns 0 if there is nothing appended.
+   executable, so that one file is a self-contained program.  Takes either form:
+   a compressed payload, which `make onefile` produces and which announces
+   itself with a trailer at the end of the file (see pack.h), or a plainly
+   concatenated one found by signature.  Neither depends on the toolchain's idea
+   of where our binary ends, which is not its file size (mingw leaves the COFF
+   symbol table past the last section).  Returns 0 if there is nothing
+   appended.
 
    Every offset inside the module stays relative to the image, so a payload at
    an arbitrary byte offset needs no alignment, and nothing downstream knows or

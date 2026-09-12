@@ -45,23 +45,31 @@ To build and play from source you will need:
 
 ## One file, nothing to install
 
-The emulator will run a module appended to its own executable, so the game and
-the shim can be concatenated into a single program:
+The emulator runs a module appended to its own executable, so the game and the
+shim become a single program:
 
 ```bash
-cat StarsVM.exe stars.exe >stars32.exe
+make onefile
 ```
 
-That file is all you need. The game is nearly all of it; the emulator adds a
-little over 200 KB. No DLLs, no install, no registry. `Stars.ini` is created beside it on first run,
-which is also where the game keeps its settings and its registration.
+That writes `Stars-x86.exe`, and that file is all you need — no DLLs, no
+install, no registry. `Stars.ini` is created beside it on first run, which is
+also where the game keeps its settings and its registration.
 
-It works because the payload is found by signature: the loader scans its own
-image for an MZ header whose `e_lfanew` points at a valid NE. Nothing depends
-on arithmetic over where our own binary ends — which is just as well, since
-that moves when the linker strips symbols. Alignment is not a concern either:
-every offset inside the module stays relative to the module, so the payload can
-land anywhere.
+The game is compressed on the way in: 3,153,152 bytes become 1,071,307, so the
+one file is about 1.2 MB where concatenating the two plainly gives 3.3 MB. It
+costs 68 ms of decompression at startup and about 250 lines in the emulator.
+`src/pack.h` describes the format and records what was measured to arrive at
+it, including the several plausible ideas that turned out to make the file
+bigger.
+
+A plain `cat StarsVM.exe stars.exe >Stars-x86.exe` still works and still runs.
+The loader takes whichever it is given: a compressed payload identifies itself
+by a trailer at the end of the file, and failing that the old scan looks for an
+MZ header whose `e_lfanew` points at a valid NE. Neither depends on arithmetic
+over where our own binary ends — which is just as well, since that moves when
+the linker strips symbols — and every offset inside the module stays relative
+to the module, so a plainly appended payload can still land anywhere.
 
 ## Running it
 
@@ -95,6 +103,13 @@ instruction. The individual sources are still ordinary `.c` files and each still
 compiles standalone, so `gcc -c src/cpu.c` remains available when bisecting a
 warning.
 
+`make onefile` builds `StarsVM-pack.exe` and runs it to produce the single-file
+build described above. Like the fuzzer it is a separate program, so neither the
+match finder nor the dynamic-programming parse that does the actual compressing
+is anywhere near the emulator; all it ships is the decoder. It decompresses its
+own output and compares it to the input before writing anything, so the two
+halves of the format cannot drift apart without the build failing.
+
 `make fuzz` builds a second, separate program, `StarsVM-fuzz.exe`, out of seven
 of the same sources — the interpreter, the FPU, the selector arena, the log, and
 the thunk layer that `cpu_step` needs in order to link. It differentially tests
@@ -110,8 +125,8 @@ system for a page it can both write and execute.
 No filename in the tree contains a `!`. The project is called Stars!VM, but
 GitHub will not take the character in a repository, release or artifact name,
 and it is a history expansion in an interactive shell — so the binaries are
-`StarsVM.exe` and `StarsVM-fuzz.exe`, the game is `stars.exe`, and the one file
-you might build for yourself is `Stars-x86.exe`.
+`StarsVM.exe`, `StarsVM-fuzz.exe` and `StarsVM-pack.exe`, the game is
+`stars.exe`, and the one file you build for yourself is `Stars-x86.exe`.
 
 [w64]: https://github.com/skeeto/w64devkit
 

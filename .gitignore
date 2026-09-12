@@ -2,6 +2,8 @@
 build/
 StarsVM.exe
 StarsVM-fuzz.exe
+StarsVM-pack.exe
+Stars-x86.exe
 
 # Generated at build time by tools/mkicon.py from the game's own
 # RT_GROUP_ICON.  Not checked in: it is derived, and the artwork belongs to
