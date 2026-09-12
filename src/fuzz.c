@@ -4,17 +4,27 @@
  * instruction and a random register state, run it both in the interpreter and
  * natively in a trampoline, and compare registers and flags.
  *
- * Two details make this honest rather than approximate:
+ * Three details make this honest rather than approximate:
  *
- *  - A 16-bit instruction means something different in the host's 32-bit code
- *    segment, so each generated instruction is emitted twice: the guest gets a
- *    0x66 prefix exactly when the host does not.  The core bytes are identical.
+ *  - A 16-bit instruction means something different where the default operand
+ *    size is 32 bits, which is true of the host's code segment in either mode,
+ *    so each generated instruction is emitted twice: the guest gets a 0x66
+ *    prefix exactly when the host does not.  The core bytes are the same, but
+ *    for the one exception below.
  *
  *  - Some flags are architecturally undefined for some instructions (AF after
  *    a logical op, OF after a multi-bit shift, everything but CF/OF after MUL).
  *    Each generated form carries the mask of flags that are actually defined,
  *    and only those are compared.  Comparing undefined flags would produce
  *    failures that mean nothing.
+ *
+ *  - The trampoline runs in whatever mode the host was built for, and
+ *    64-bit mode is not a superset of 32-bit: the one-byte INC/DEC reg
+ *    encodings became the REX prefixes, and the six decimal adjusts were
+ *    dropped outright.  A form 64-bit mode spells differently carries an
+ *    alternate encoding for the oracle to run, so the guest still sees the
+ *    byte a 16-bit compiler would have emitted; a form 64-bit mode cannot
+ *    run at all is skipped and counted, never quietly passed.
  *
  * Coverage is register and immediate forms: the ALU, shifts and rotates,
  * inc/dec, mul/div, the bit instructions, MOVZX/MOVSX, SETcc, SHLD/SHRD and the
@@ -27,6 +37,8 @@
 #include "sel.h"
 #include "log.h"
 
+#include <cpuid.h>
+#include <stddef.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -36,10 +48,34 @@
    the host) and IF cannot be changed from user mode. */
 #define CMP_FLAGS (F_CF | F_PF | F_AF | F_ZF | F_SF | F_OF | F_DF)
 
-struct state { uint32_t r[8]; uint32_t eflags; };
+/* The whole oracle state in one block, because the 64-bit trampoline reaches
+   all of it through a single base register - see eref() - and one base means
+   one address to materialise rather than one per access.  The flag words are
+   64 bits wide because `pushfq` and `popfq` have no narrower form; the 32-bit
+   trampoline touches only their low halves, which on a little-endian host is
+   the same dword.  saved_sp is host-sized for the same reason. */
+struct fzstate {
+    uint32_t in_r[8];
+    uint64_t in_flags;
+    uint32_t out_r[8];
+    uint64_t out_flags;
+    uint64_t saved_sp;
+};
+static struct fzstate fz;
 
-static struct state fz_in, fz_out;
-static uint32_t     fz_saved_esp;
+#define FZ_IN_R(k)  (offsetof(struct fzstate, in_r)  + 4u * (unsigned)(k))
+#define FZ_OUT_R(k) (offsetof(struct fzstate, out_r) + 4u * (unsigned)(k))
+
+/* Which mode the trampoline is emitted for.  A constant either way, so the
+   branches below fold away, but written as a value rather than an #if so that
+   both encoders are compiled - and warned about - in both builds. */
+static const int long_mode = sizeof(void *) == 8;
+
+/* LAHF and SAHF were left out of the first 64-bit implementations and came
+   back as a feature bit.  Without it they are #UD, which would take the
+   process down rather than report a mismatch, so they have to be generated
+   conditionally.  In 32-bit mode they are unconditional. */
+static int lahf_ok = 1;
 
 typedef void (*Tramp)(void);
 static uint8_t *tramp_code;
@@ -55,39 +91,55 @@ static uint8_t *emit;
 
 static void e8(uint8_t v)   { *emit++ = v; }
 static void e32(uint32_t v) { memcpy(emit, &v, 4); emit += 4; }
-static void eabs(uint8_t op, uint8_t modrm, const void *p)
+static void e64(uint64_t v) { memcpy(emit, &v, 8); emit += 8; }
+
+/* One access to the state block.  A 32-bit host can name it absolutely, with
+   the address sitting in the instruction as a bare disp32.  A 64-bit host
+   cannot: that same encoding means RIP-relative there, and the distance from
+   a VirtualAlloc'd page to a static is not guaranteed to fit in 2 GB anyway.
+   So the block is reached through R15 instead, which is safe from the payload
+   for a structural reason - naming R8-R15 requires a REX prefix, and no
+   generated payload carries one.  Keeping that true is why the one-byte
+   INC/DEC forms have to be re-encoded for the oracle; see gen(). */
+static void eref(uint8_t op, int reg, size_t off)
 {
-    e8(op); e8(modrm); e32((uint32_t)(uintptr_t)p);
+    if (long_mode) {
+        e8(0x41);                                 /* REX.B: the base is R15  */
+        e8(op);
+        e8((uint8_t)(0x80 | (reg << 3) | 7));     /* mod=10, r/m=111, disp32 */
+        e32((uint32_t)off);
+    } else {
+        e8(op);
+        e8((uint8_t)(0x05 | (reg << 3)));         /* mod=00, r/m=101, disp32 */
+        e32((uint32_t)(uintptr_t)&fz + (uint32_t)off);
+    }
+}
+
+/* The stack pointer is the one register whose full width matters, so on a
+   64-bit host it needs REX.W where the others do not. */
+static void eref_sp(uint8_t op, size_t off)
+{
+    if (long_mode) {
+        e8(0x49); e8(op); e8(0xA7); e32((uint32_t)off);   /* [r15+disp32] */
+    } else {
+        eref(op, 4, off);
+    }
 }
 
 /* Build the trampoline once.  Layout:
-     save host registers, stash esp
-     load the guest state from fz_in (esp excluded)
-     push fz_in.eflags; popfd
+     save the host's callee-saved registers, stash the stack pointer
+     load the guest state from fz.in_r (the stack pointer excluded)
+     push fz.in_flags; popf
      <instruction bytes>
-     pushfd; pop fz_out.eflags        (mov does not disturb flags, so this is first)
-     store registers to fz_out
-     restore host registers, ret                                              */
+     pushf; pop fz.out_flags          (mov does not disturb flags, so this is first)
+     store registers to fz.out_r
+     restore the host's registers, ret                                        */
 static int tramp_build(unsigned insn_max)
 {
-    static const struct { uint8_t op, modrm; int reg; } loads[] = {
-        { 0x8B, 0x05, 0 },  /* mov eax, [abs] */
-        { 0x8B, 0x0D, 1 },  /* mov ecx, [abs] */
-        { 0x8B, 0x15, 2 },  /* mov edx, [abs] */
-        { 0x8B, 0x1D, 3 },  /* mov ebx, [abs] */
-        { 0x8B, 0x2D, 5 },  /* mov ebp, [abs] */
-        { 0x8B, 0x35, 6 },  /* mov esi, [abs] */
-        { 0x8B, 0x3D, 7 },  /* mov edi, [abs] */
-    };
-    static const struct { uint8_t op, modrm; int reg; } stores[] = {
-        { 0x89, 0x05, 0 },  /* mov [abs], eax */
-        { 0x89, 0x0D, 1 },
-        { 0x89, 0x15, 2 },
-        { 0x89, 0x1D, 3 },
-        { 0x89, 0x2D, 5 },
-        { 0x89, 0x35, 6 },
-        { 0x89, 0x3D, 7 },
-    };
+    /* The guest registers, in trampoline order.  Index 4 - the stack pointer -
+       is absent: the host's own stack lives there, so it is neither loaded nor
+       stored, and rnd_reg() never generates it as an operand either. */
+    static const int gpr[7] = { 0, 1, 2, 3, 5, 6, 7 };
     unsigned i;
 
     tramp_code = VirtualAlloc(NULL, 0x1000, MEM_COMMIT, PAGE_EXECUTE_READWRITE);
@@ -97,36 +149,42 @@ static int tramp_build(unsigned insn_max)
     }
     emit = tramp_code;
 
-    e8(0x53); e8(0x55); e8(0x56); e8(0x57);       /* push ebx/ebp/esi/edi   */
-    eabs(0x89, 0x25, &fz_saved_esp);              /* mov [saved_esp], esp   */
+    /* bx/bp/si/di are callee-saved in both ABIs, and the payload writes all of
+       them.  R15 joins them on a 64-bit host, where it also carries the base. */
+    e8(0x53); e8(0x55); e8(0x56); e8(0x57);       /* push bx/bp/si/di       */
+    if (long_mode) {
+        e8(0x41); e8(0x57);                       /* push r15               */
+        e8(0x49); e8(0xBF);                       /* movabs r15, &fz        */
+        e64((uint64_t)(uintptr_t)&fz);
+    }
+    eref_sp(0x89, offsetof(struct fzstate, saved_sp));
 
-    for (i = 0; i < 7; i++)
-        eabs(loads[i].op, loads[i].modrm, &fz_in.r[loads[i].reg]);
-    eabs(0xFF, 0x35, &fz_in.eflags);              /* push [in.eflags]       */
-    e8(0x9D);                                     /* popfd                  */
+    for (i = 0; i < 7; i++) eref(0x8B, gpr[i], FZ_IN_R(gpr[i]));
+    eref(0xFF, 6, offsetof(struct fzstate, in_flags));   /* push [in_flags] */
+    e8(0x9D);                                            /* popf            */
 
     tramp_insn = emit;
     tramp_insn_max = insn_max;
     for (i = 0; i < insn_max; i++) e8(0x90);      /* room for the payload   */
 
-    e8(0x9C);                                     /* pushfd                 */
-    eabs(0x8F, 0x05, &fz_out.eflags);             /* pop [out.eflags]       */
-    for (i = 0; i < 7; i++)
-        eabs(stores[i].op, stores[i].modrm, &fz_out.r[stores[i].reg]);
-    /* The payload may have been STD, and the C ABI guarantees DF is clear on
+    e8(0x9C);                                            /* pushf           */
+    eref(0x8F, 0, offsetof(struct fzstate, out_flags));  /* pop [out_flags] */
+    for (i = 0; i < 7; i++) eref(0x89, gpr[i], FZ_OUT_R(gpr[i]));
+    /* The payload may have been STD, and both ABIs guarantee DF is clear on
        entry to and return from a function.  Leaving it set makes the compiler's
        `rep movs` run backwards - which showed up as memcpy corrupting the three
        bytes below this very slot.  Flags have already been captured above, so
        clearing DF here costs nothing. */
     e8(0xFC);                                     /* cld                    */
-    eabs(0x8B, 0x25, &fz_saved_esp);              /* mov esp, [saved_esp]   */
-    e8(0x5F); e8(0x5E); e8(0x5D); e8(0x5B);       /* pop edi/esi/ebp/ebx    */
+    eref_sp(0x8B, offsetof(struct fzstate, saved_sp));
+    if (long_mode) { e8(0x41); e8(0x5F); }        /* pop r15                */
+    e8(0x5F); e8(0x5E); e8(0x5D); e8(0x5B);       /* pop di/si/bp/bx        */
     e8(0xC3);                                     /* ret                    */
 
     tramp_len = (unsigned)(emit - tramp_code);
     memcpy(tramp_ref, tramp_code, tramp_len);
-    log_msg("fuzz: trampoline at %p, %u bytes, payload slot at +%02X\n",
-            (void *)tramp_code, tramp_len,
+    log_msg("fuzz: %d-bit trampoline at %p, %u bytes, payload slot at +%02X\n",
+            long_mode ? 64 : 32, (void *)tramp_code, tramp_len,
             (unsigned)(tramp_insn - tramp_code));
     return 1;
 }
@@ -210,6 +268,10 @@ static int rnd_reg(void) { int r = (int)rnd_below(7); return r >= 4 ? r + 1 : r;
 struct form {
     uint8_t  bytes[8];
     unsigned len;
+    uint8_t  alt[8];     /* what the oracle runs where this host spells it
+                            differently; alt_len 0 means `bytes` serves both */
+    unsigned alt_len;
+    const char *why_not;  /* non-NULL: this host cannot run it at all, and why */
     int      want32;     /* guest operand size is 32 bits */
     uint32_t mask;       /* flags that are architecturally defined */
     unsigned cl_mod;     /* if set, force CL into [0, cl_mod) before running */
@@ -282,17 +344,32 @@ static void gen(struct form *f)
         f->len = 2;
         f->what = "not/neg";
         break;
-    case 5:                                       /* INC / DEC reg */
+    case 5: {                                     /* INC / DEC */
+        int dec = (int)rnd_below(2);
         if (size8) {
             f->bytes[0] = 0xFE;
-            f->bytes[1] = modrm_rr((int)rnd_below(2), rm);
+            f->bytes[1] = modrm_rr(dec, rm);
             f->len = 2;
-        } else {
-            f->bytes[0] = (uint8_t)((rnd_below(2) ? 0x48 : 0x40) + rm);
+        } else if (rnd_below(2)) {
+            /* The one-byte 8086 form, which is what a 16-bit compiler emits and
+               so the one that matters.  Those same bytes are the REX prefixes in
+               64-bit mode, so there the oracle is handed the group-5 encoding of
+               the identical operation instead. */
+            f->bytes[0] = (uint8_t)((dec ? 0x48 : 0x40) + rm);
             f->len = 1;
+            if (long_mode) {
+                f->alt[0] = 0xFF;
+                f->alt[1] = modrm_rr(dec, rm);
+                f->alt_len = 2;
+            }
+        } else {
+            f->bytes[0] = 0xFF;                   /* group 5, the long form */
+            f->bytes[1] = modrm_rr(dec, rm);
+            f->len = 2;
         }
         f->what = "inc/dec";
         break;
+    }
     case 6: {                                     /* MUL / IMUL */
         f->bytes[0] = size8 ? 0xF6 : 0xF7;
         f->bytes[1] = modrm_rr(4 + (int)rnd_below(2), rm);
@@ -422,6 +499,8 @@ static void gen(struct form *f)
                                      0xF5, 0xF8, 0xF9, 0xFC, 0xFD };
         f->bytes[0] = o[rnd_below(sizeof o)];
         f->len = 1;
+        if (!lahf_ok && (f->bytes[0] == 0x9E || f->bytes[0] == 0x9F))
+            f->why_not = "lahf/sahf: absent on this CPU in 64-bit mode";
         f->what = "cbw/cwd/sahf/lahf/flags";
         break;
     }
@@ -434,6 +513,11 @@ static void gen(struct form *f)
             f->len = 2;
         }
         f->want32 = 0;
+        /* All six were removed in 64-bit mode, so there is no oracle for them
+           on an x64 host - they decode as #UD, which would end the process
+           rather than report a mismatch. */
+        if (long_mode)
+            f->why_not = "daa/das/aaa/aas/aam/aad: removed in 64-bit mode";
         /* Per the manual: DAA/DAS define CF, AF, SF, ZF and PF; AAA/AAS define
            only CF and AF; AAM/AAD define only SF, ZF and PF.  OF is undefined
            for all six. */
@@ -473,33 +557,34 @@ static const char *fname(uint32_t f)
     return b;
 }
 
-/* Coverage, so a run that silently stopped generating something shows up. */
+/* Coverage, so a run that silently stopped generating something shows up, and
+   the same table shape for what this host could not be asked to run.  Bucketing
+   is by pointer: every key is a string literal from gen(), so identity is the
+   cheap and exact test. */
 #define MAX_FORMS 24
 static long form_count[MAX_FORMS];
 static const char *form_name[MAX_FORMS];
+static long skip_count[MAX_FORMS];
+static const char *skip_name[MAX_FORMS];
+
+static void tally(const char **names, long *counts, const char *key)
+{
+    int s;
+    for (s = 0; s < MAX_FORMS; s++) {
+        if (!names[s]) names[s] = key;
+        if (names[s] == key) { counts[s]++; return; }
+    }
+}
 
 int fuzz_main(long rounds, unsigned seed)
 {
     uint16_t code_sel;
     Cpu *c = &cpu;
-    long i, tested = 0, skipped = 0, failed = 0;
+    long i, tested = 0, skipped = 0, unrunnable = 0, failed = 0;
 
-    /* The trampoline is emitted as 32-bit machine code against 32-bit absolute
-       addresses: eabs() writes the operand address as a bare disp32, which on
-       x86-64 both truncates the pointer and means RIP-relative rather than
-       absolute.  Running it there is a segfault, not a test result.
-
-       Porting it wants a scratch base register the guest state does not use -
-       r12, say, loaded with a movabs - plus a REX prefix on every access, and
-       fz_in/fz_out/fz_saved_esp gathered behind one base.  That is worth doing
-       deliberately rather than in passing: a fuzzer nobody trusts is worse than
-       one that says it cannot run.  Until then, note that this tests cpu.c,
-       which is host-independent C, so a 32-bit run covers the same interpreter. */
-    if (sizeof(void *) != 4) {
-        log_msg("fuzz: needs a 32-bit host; the trampoline encodes 32-bit\n"
-                "      absolute addresses.  Build with the i686 toolchain to\n"
-                "      exercise the interpreter - it is the same C either way.\n");
-        return 1;
+    if (long_mode) {
+        unsigned a, b, cx, d;
+        lahf_ok = __get_cpuid(0x80000001u, &a, &b, &cx, &d) && (cx & 1);
     }
 
     if (seed) rng_state = seed;
@@ -519,38 +604,45 @@ int fuzz_main(long rounds, unsigned seed)
 
         gen(&f);
         if (is_divide(&f)) { skipped++; continue; }
-        {   /* record coverage by form name */
-            int s;
-            for (s = 0; s < MAX_FORMS; s++) {
-                if (!form_name[s]) { form_name[s] = f.what; }
-                if (form_name[s] == f.what) { form_count[s]++; break; }
-            }
+        if (f.why_not) {
+            tally(skip_name, skip_count, f.why_not);
+            unrunnable++;
+            continue;
         }
+        tally(form_name, form_count, f.what);
 
-        /* Same core bytes; the guest is USE16 and the host USE32, so exactly one
-           of them needs the operand-size prefix. */
-        if (f.want32) guest[gl++] = 0x66;
-        else          host[hl++]  = 0x66;
-        for (k = 0; k < f.len; k++) { guest[gl++] = f.bytes[k]; host[hl++] = f.bytes[k]; }
+        /* Same core bytes; the guest is USE16 and the host USE32, which is also
+           what 64-bit mode defaults to, so exactly one of them needs the
+           operand-size prefix.  Where this host spells the instruction
+           differently the oracle runs f.alt instead: the same operation on the
+           same operands, so it still says what the guest ought to have done. */
+        {
+            const uint8_t *hb = f.alt_len ? f.alt : f.bytes;
+            unsigned hn = f.alt_len ? f.alt_len : f.len;
+            if (f.want32) guest[gl++] = 0x66;
+            else          host[hl++]  = 0x66;
+            for (k = 0; k < f.len; k++) guest[gl++] = f.bytes[k];
+            for (k = 0; k < hn;    k++) host[hl++]  = hb[k];
+        }
 
         /* Random input state.  TF clear, IF set, and only the flags we compare
            are seeded so a mismatch is never about a bit we do not model. */
-        for (k = 0; k < 8; k++) fz_in.r[k] = rnd_value();
-        fz_in.r[4] = 0;                            /* esp is the host's */
+        for (k = 0; k < 8; k++) fz.in_r[k] = rnd_value();
+        fz.in_r[4] = 0;                            /* the stack is the host's */
         if (f.cl_mod)
-            fz_in.r[1] = (fz_in.r[1] & ~0xFFu) | rnd_below(f.cl_mod);
-        fz_in.eflags = (rnd() & CMP_FLAGS) | F_RS | F_IF;
-
+            fz.in_r[1] = (fz.in_r[1] & ~0xFFu) | rnd_below(f.cl_mod);
+        fz.in_flags = (rnd() & CMP_FLAGS) | F_RS | F_IF;
 
         /* Run natively. */
-        memset(&fz_out, 0, sizeof fz_out);
+        memset(fz.out_r, 0, sizeof fz.out_r);
+        fz.out_flags = 0;
         tramp_run(host, hl);
-        hflags = fz_out.eflags;
+        hflags = (uint32_t)fz.out_flags;
 
         /* Run in the interpreter. */
         cpu_reset(c);
-        for (k = 0; k < 8; k++) c->r32[k] = fz_in.r[k];
-        c->eflags = fz_in.eflags;
+        for (k = 0; k < 8; k++) c->r32[k] = fz.in_r[k];
+        c->eflags = (uint32_t)fz.in_flags;
         c->seg[S_CS] = code_sel;
         c->seg[S_DS] = code_sel;
         c->seg[S_ES] = code_sel;
@@ -578,7 +670,7 @@ int fuzz_main(long rounds, unsigned seed)
         }
 
         for (k = 0; k < 8; k++) {
-            uint32_t want = fz_out.r[k], got = c->r32[k];
+            uint32_t want = fz.out_r[k], got = c->r32[k];
             if (k == 4) continue;                  /* esp is not compared */
             /* In 16-bit mode the upper half of a 32-bit register is untouched by
                a 16-bit operation, and the host preserves it identically, so a
@@ -600,9 +692,13 @@ int fuzz_main(long rounds, unsigned seed)
         if (bad) {
             log_msg("       seed %08X bytes:", seed_here);
             for (k = 0; k < gl; k++) log_msg(" %02X", guest[k]);
+            if (f.alt_len) {                       /* the oracle ran other bytes */
+                log_msg("  oracle:");
+                for (k = 0; k < hl; k++) log_msg(" %02X", host[k]);
+            }
             log_msg("  in: ");
-            for (k = 0; k < 8; k++) log_msg("%08X ", fz_in.r[k]);
-            log_msg("fl=%04X\n", fz_in.eflags & CMP_FLAGS);
+            for (k = 0; k < 8; k++) log_msg("%08X ", fz.in_r[k]);
+            log_msg("fl=%04X\n", (uint32_t)fz.in_flags & CMP_FLAGS);
             failed++;
             if (failed >= 25) {
                 log_msg("fuzz: stopping after 25 failures\n");
@@ -617,7 +713,13 @@ int fuzz_main(long rounds, unsigned seed)
         log_msg("fuzz: coverage by form\n");
         for (s = 0; s < MAX_FORMS && form_name[s]; s++)
             log_msg("  %-26s %ld\n", form_name[s], form_count[s]);
+        if (skip_name[0]) {
+            log_msg("fuzz: no oracle on this host, so untested\n");
+            for (s = 0; s < MAX_FORMS && skip_name[s]; s++)
+                log_msg("  %-44s %ld\n", skip_name[s], skip_count[s]);
+        }
     }
-    log_msg("fuzz: %ld tested, %ld skipped, %ld failed\n", tested, skipped, failed);
+    log_msg("fuzz: %ld tested, %ld divides skipped, %ld unrunnable, %ld failed\n",
+            tested, skipped, unrunnable, failed);
     return failed != 0;
 }

@@ -126,12 +126,12 @@ has the disassembly, the byte layout and the parts that are still not faithful.
 
 ## Known gaps
 
-- **`make fuzz` needs a 32-bit host.** The differential test builds a trampoline
-  of 32-bit machine code addressed absolutely, which on x86-64 both truncates
-  the pointer and means RIP-relative. It says so and stops rather than
-  pretending. The interpreter it tests is host-independent C, so a 32-bit run
-  covers the same ground. `src/fuzz.c` carries the diagnosis and a sketch of the
-  port next to the guard.
+- **The decimal adjusts go untested on an x64 build.** `make fuzz` runs in
+  either mode, but it works by comparing the interpreter against the host CPU,
+  and 64-bit mode deleted DAA, DAS, AAA, AAS, AAM and AAD outright — there is no
+  oracle for them there. The run counts those rounds as unrunnable rather than
+  as passes, and a 32-bit build covers them. Everything else is tested in both
+  modes.
 - **Guest-supplied paths are ANSI.** Paths the emulator owns — its own module,
   and `Stars.ini` — are wide throughout, so an installation under a directory
   the ANSI code page cannot spell works. Paths the *game* supplies still go
