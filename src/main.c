@@ -55,11 +55,6 @@ static const char usage_text[] =
     "beside it.  `make onefile` builds the appended, compressed form, which is a\n"
     "single self-contained program; nothing else needs installing.\n"
     "\n"
-    "Arguments after `--`, and any bare filename not wanted as the module\n"
-    "path, go to the game itself, which has switches of its own - notably\n"
-    "-g[N] to generate N turns from a host file and exit.  The others are\n"
-    "-a -b -d -h -m -p -s -t -w -x, documented at starsfaq.com/command.htm.\n"
-    "\n"
     "  --module PATH   load this module, ignoring any appended one\n"
     "  --dump          print the NE structure and exit\n"
     "  --dump-relocs   as --dump, with per-segment relocation counts\n"
@@ -82,7 +77,65 @@ static const char usage_text[] =
     "                  and exit (the game has 2601 2602 2611 2612 2621 2631;\n"
     "                  N = 0 plays all six, overlapping)\n"
     "  --log FILE      also write the log to FILE\n"
-    "  --help          this text\n";
+    "  --help          this text\n"
+    "\n"
+    "Everything starting with `-` before the `--` is ours, so the game's own\n"
+    "switches go after it; a bare filename may come either side.  A player,\n"
+    "host or custom race file opens straight into the game, with no splash\n"
+    "screen.  The switches Stars! parses for itself:\n"
+    "\n"
+    "  -a DEF          create a new game from a .def file\n"
+    "  -b LIST         generate turns for every game named in LIST, then exit\n"
+    "  -d[pfm] FILE    dump a player's planets, fleets and/or map, then exit\n"
+    "  -g[N] HOST      generate N turns (one by default) from a host file and\n"
+    "                  exit - the batch mode, and with --fixed-clock the way\n"
+    "                  to get a run that can be compared against another\n"
+    "  -h              ask for a password every time a turn file is opened\n"
+    "  -m              start with the music off\n"
+    "  -p PASSWORD     give the password instead of being asked for it\n"
+    "  -s              start with the battle sound effects off\n"
+    "  -t FILE         try, then exit: open the new turn if the host has made\n"
+    "                  one, or with a host file make it if every player is in\n"
+    "  -w [HOST]       wait: with a host file generate each turn as soon as\n"
+    "                  the players are all in, with a player file wait for the\n"
+    "                  host to do it.  Does not exit\n"
+    "  -x              exit Windows when the game does - nothing here.  It\n"
+    "                  asks 16-bit Windows to shut the machine down, which we\n"
+    "                  decline and treat as the quit it was already part of\n"
+    "\n"
+    "The game's help file describes them at starsfaq.com/command.htm.\n";
+
+/* The help, put somewhere it can be read - which for a GUI binary takes doing.
+   A shell gets it through its own console, borrowed for the purpose.  Started
+   from the Run box or a shortcut there is no console to borrow, so one is made
+   and held open until the reader is done: this is a page of text, and a page in
+   a message box is a page whose last third is off the bottom of the screen.  A
+   message box is still the last resort, as it is for a run that fails. */
+static void show_help(void)
+{
+    static char text[sizeof usage_text + 256];
+
+    snprintf(text, sizeof text,
+             "%s - run the 16-bit Stars! under a Win16-to-Win32 shim\n"
+             "\n"
+             "usage: %s [options] [stars.exe] [-- game arguments]\n"
+             "%s", me, me, usage_text);
+    switch (log_adopt_console(1)) {
+    case CON_ALREADY:
+        fputs(text, stdout);
+        fflush(stdout);
+        break;
+    case CON_MADE:
+        fputs(text, stdout);
+        fputs("\n[press Enter to close]\n", stdout);
+        fflush(stdout);
+        getchar();
+        break;
+    default:
+        MessageBoxA(NULL, text, me, MB_OK | MB_ICONINFORMATION);
+        break;
+    }
+}
 
 /* Our own full path.  Wide throughout: everything we go on to open ourselves -
    the module, and the Stars.ini beside it - is built from this, and
@@ -192,11 +245,7 @@ int main(int argc, char **argv)
                 return 2;
             }
         } else if (!strcmp(a, "--help") || !strcmp(a, "-h")) {
-            printf("%s - run the 16-bit Stars! under a Win16-to-Win32 shim\n"
-                   "\n"
-                   "usage: %s [options] [stars.exe] [-- game arguments]\n",
-                   me, me);
-            fputs(usage_text, stdout);
+            show_help();
             return 0;
         } else if (!strcmp(a, "--dump")) {
             do_dump = 1;
@@ -242,6 +291,11 @@ int main(int argc, char **argv)
     /* --play-wave wants the module loaded and a task, because the waves are
        resources inside it - but not the interpreter. */
     if (play_wave >= 0) do_run = 1;
+
+    /* An inspection mode is all text and exits at once, so it has --help's
+       problem and takes --help's answer: borrow the shell's console.  A run of
+       the game does not, for the reason log_open gives. */
+    if (!do_run) log_adopt_console(0);
 
     log_open(logfile);
 

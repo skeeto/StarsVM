@@ -10,22 +10,47 @@ static int   g_stdout_ok;
 int log_verbose;
 int log_console;
 
-void log_open(const char *path)
+/* Whether writes to stdout will land anywhere.  Run from a shell, or with the
+   output redirected, and there is already somewhere to write - stealing stdout
+   with CONOUT$ in that case would throw it away. */
+static int stdout_ready(void)
 {
     HANDLE out = GetStdHandle(STD_OUTPUT_HANDLE);
+    return out != NULL && out != INVALID_HANDLE_VALUE;
+}
 
-    /* Run from a shell, or with the output redirected, and there is already
-       somewhere to write - stealing stdout with CONOUT$ in that case would
-       throw it away.  Run from Explorer and there is nowhere, and this is a GUI
-       binary, so a console appears only when --console asks for one. */
-    g_stdout_ok = (out != NULL && out != INVALID_HANDLE_VALUE);
-    if (!g_stdout_ok && log_console) {
-        if (!AttachConsole(ATTACH_PARENT_PROCESS))
-            AllocConsole();
-        if (!freopen("CONOUT$", "w", stdout)) { /* nothing else we can do */ }
-        if (!freopen("CONOUT$", "w", stderr)) { }
+/* Somewhere for output to go.  This is a GUI binary, so a shell starts it
+   without waiting and hands it no handles, and anything printed goes nowhere -
+   which for --help, whose whole purpose is to be read, is the one outcome worth
+   ruling out.  Borrowing the shell's own console fixes that; conjuring one is
+   asked for separately, because a console of our own closes when we exit and
+   takes the text with it, which the caller has to know to do anything about. */
+int log_adopt_console(int conjure)
+{
+    if (g_stdout_ok || stdout_ready()) { g_stdout_ok = 1; return CON_ALREADY; }
+    if (AttachConsole(ATTACH_PARENT_PROCESS)) {
+        if (!freopen("CONOUT$", "w", stdout)) return CON_NONE;
+        if (!freopen("CONOUT$", "w", stderr)) { /* stdout is what counts */ }
         g_stdout_ok = 1;
+        return CON_ALREADY;
     }
+    if (!conjure || !AllocConsole()) return CON_NONE;
+    if (!freopen("CONOUT$", "w", stdout)) return CON_NONE;
+    if (!freopen("CONOUT$", "w", stderr)) { }
+    if (!freopen("CONIN$", "r", stdin))   { /* only a pause needs it */ }
+    g_stdout_ok = 1;
+    return CON_MADE;
+}
+
+void log_open(const char *path)
+{
+    /* Started from Explorer there is nothing to write to and nothing to borrow,
+       so a console appears only when --console asks for one.  A run of the game
+       does not borrow the shell's by itself: attaching joins that console's
+       Ctrl+C group, and a Ctrl+C typed at the prompt hours later - the prompt
+       came back the moment we started - would then kill the game. */
+    if (!g_stdout_ok) g_stdout_ok = stdout_ready();
+    if (!g_stdout_ok && log_console) log_adopt_console(1);
     if (path) g_file = fopen(path, "w");
 }
 

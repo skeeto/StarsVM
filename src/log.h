@@ -24,4 +24,11 @@ extern int log_console;                 /* --console: conjure one if needed */
    reported some other way. */
 int log_visible(void);
 
+/* Get output somewhere it can be seen, which a GUI binary otherwise cannot.
+   Takes over the console the parent shell is using, or with conjure set makes
+   one when there is none.  The answer says which, because a console of our own
+   closes when the process does - text left in it is text nobody reads. */
+enum { CON_NONE, CON_ALREADY, CON_MADE };
+int log_adopt_console(int conjure);
+
 #endif

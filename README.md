@@ -81,6 +81,17 @@ With no argument, the game is looked for in three places, in order:
 
 Stars! itself is not included and is not redistributable — supply your own copy.
 
+The game has switches of its own. Everything starting with `-` before a `--` is
+the emulator's, so the game's go after it:
+
+```bash
+StarsVM.exe -- -g10 game.hst
+```
+
+That is the game's batch mode: ten turns from a host file, then exit.
+`--help` lists the rest. One of them, `-x`, asked 16-bit Windows to shut the
+machine down when the game quit; here it does nothing.
+
 ## Building
 
 Built with [w64devkit][w64]. 32-bit is the primary target:
@@ -199,7 +210,11 @@ has the disassembly, the byte layout and the parts that are still not faithful.
 
 ## Debugging
 
-The emulator is a GUI binary, so `--console` is usually wanted alongside these:
+The emulator is a GUI binary. The modes that print and exit — `--help`,
+`--dump`, `--imports`, `--peek` — borrow the console of the shell that started
+them, or make one when there is none. The tracing modes run the game, which
+does not borrow a console it might later be killed through, so they want
+`--console` or `--log FILE`:
 
 | | |
 |---|---|
