@@ -49,7 +49,7 @@ The emulator will run a module appended to its own executable, so the game and
 the shim can be concatenated into a single program:
 
 ```bash
-cat Stars!VM.exe stars.exe >Stars!-x86.exe
+cat StarsVM.exe stars.exe >stars32.exe
 ```
 
 That file is all you need. The game is nearly all of it; the emulator adds a
@@ -94,6 +94,12 @@ where the interpreter loop reaches into the selector and thunk layers on every
 instruction. The individual sources are still ordinary `.c` files and each still
 compiles standalone, so `gcc -c src/cpu.c` remains available when bisecting a
 warning.
+
+No filename in the tree contains a `!`. The project is called Stars!VM, but
+GitHub will not take the character in a repository, release or artifact name,
+and it is a history expansion in an interactive shell — so the binary is
+`StarsVM.exe`, the game is `stars.exe`, and the one file you might build for
+yourself is `Stars-x86.exe`.
 
 [w64]: https://github.com/skeeto/w64devkit
 

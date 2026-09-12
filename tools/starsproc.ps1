@@ -28,9 +28,9 @@ function Get-StarsName {
 }
 
 # The emulator's processes, or an empty array.  Matched on ProcessName rather
-# than passed to -Name, because -Name reads its argument as a wildcard and a
-# target called Stars!VM.exe is one punctuation change away from one that is not
-# a literal.
+# than passed to -Name, because -Name reads its argument as a wildcard, and the
+# name here comes out of the Makefile: whatever TARGET says is one punctuation
+# change away from a pattern rather than a literal.
 function Get-StarsProcess {
     $name = Get-StarsName
     if ($name) {

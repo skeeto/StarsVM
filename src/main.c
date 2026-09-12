@@ -31,7 +31,7 @@ static NeModule module;
 
 /* What to call ourselves in messages.  Taken from argv[0] rather than written
    down, because the appended-module trick means the finished program is meant
-   to be renamed - Stars!-x86.exe, in the README - so any name compiled in here
+   to be renamed - Stars-x86.exe, in the README - so any name compiled in here
    is wrong for exactly the build this project recommends.  The name was written
    down in nine PowerShell tools once too, and every one of them went on
    reporting that "stars16" was not running long after nothing built under that
@@ -51,7 +51,7 @@ static const char usage_text[] =
     "\n"
     "With no path, the game is taken from a module appended to this executable\n"
     "if there is one, and otherwise from the stars.exe beside it.  So\n"
-    "    cat Stars!VM.exe stars.exe > Stars!-x86.exe\n"
+    "    cat StarsVM.exe stars.exe > Stars-x86.exe\n"
     "is a single self-contained program; nothing else needs installing.\n"
     "\n"
     "  --dump          print the NE structure and exit\n"
@@ -222,7 +222,7 @@ int main(int argc, char **argv)
     /* Three places the game can be, in order of how deliberate they are.  A
        path on the command line wins; otherwise a module appended to this
        executable, so that
-           cat Stars!VM.exe stars.exe > Stars!-x86.exe
+           cat StarsVM.exe stars.exe > Stars-x86.exe
        is a single self-contained program with nothing else to install; and
        failing that the stars.exe sitting beside us. */
     if (target) {

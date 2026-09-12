@@ -45,7 +45,14 @@ static void pstr(uint32_t segptr, const char *s, unsigned max)
 static void ini_path(const char *name, wchar_t *out, size_t n)
 {
     wchar_t wname[MAX_PATH];
-    const wchar_t *leaf = L"stars16.ini";
+    /* Only reached when the guest passes no filename at all, which Win16 took
+       as a request for WIN.INI.  Stars! never does it - it builds "Stars.ini"
+       at runtime, every time - so rather than plant a WIN.INI beside the game
+       or invent a second settings file, a nameless call lands in the one file
+       that is really there.  It is logged, because a call arriving here means
+       a filename went missing somewhere upstream, and the quiet version of
+       that is a setting which reads back wrong for no visible reason. */
+    const wchar_t *leaf = L"Stars.ini";
 
     out[0] = 0;
     if (name && name[0]) {
@@ -58,6 +65,8 @@ static void ini_path(const char *name, wchar_t *out, size_t n)
             return;
         }
         leaf = wname;
+    } else {
+        log_msg("profile: no filename given, using %s\n", log_wide(leaf));
     }
 
     /* Refuse rather than truncate.  The old code clamped the directory to half

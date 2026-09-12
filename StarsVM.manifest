@@ -1,6 +1,6 @@
 <?xml version="1.0" encoding="UTF-8" standalone="yes"?>
 <assembly xmlns="urn:schemas-microsoft-com:asm.v1" manifestVersion="1.0">
-  <assemblyIdentity type="win32" name="stars16" version="1.0.0.0"
+  <assemblyIdentity type="win32" name="StarsVM" version="1.0.0.0"
                     processorArchitecture="*"/>
   <description>Stars! 2.70j under a Win16-to-Win32 shim</description>
   <trustInfo xmlns="urn:schemas-microsoft-com:asm.v3">

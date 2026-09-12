@@ -8,7 +8,7 @@ hardware code actually is, because Stars!VM got it wrong for a while and the
 way it got it wrong was invisible.
 
 Addresses below are `segment:offset` into `stars.exe` (2.70j, 3,153,152
-bytes). To reach a file offset, add the segment's base; `Stars!VM.exe --dump`
+bytes). To reach a file offset, add the segment's base; `StarsVM.exe --dump`
 prints them.
 
 ## Where it lives

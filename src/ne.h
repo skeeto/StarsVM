@@ -80,7 +80,7 @@ typedef uint32_t (*NeImportFn)(const char *module, uint16_t ordinal, void *user)
 int  ne_open(NeModule *m, const wchar_t *path);
 
 /* Open an NE module that has been appended to another file - the emulator's own
-   executable, so that `cat Stars!VM.exe stars.exe > Stars!-x86.exe` is a
+   executable, so that `cat StarsVM.exe stars.exe > Stars-x86.exe` is a
    single self-contained program.  Finds the image by signature rather than by
    arithmetic on our own size: nothing then depends on the toolchain's idea of
    where our binary ends, which is not its file size (mingw leaves the COFF

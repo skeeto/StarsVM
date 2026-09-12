@@ -1,13 +1,13 @@
 # Build output.
 build/
-Stars!VM.exe
+StarsVM.exe
 
 # Generated at build time by tools/mkicon.py from the game's own
 # RT_GROUP_ICON.  Not checked in: it is derived, and the artwork belongs to
 # Stars!, not to this program.  A build with no stars.exe next door gets a
 # comment in place of the ICON directive and still links.
-stars16.ico
-stars16_icon.rc
+StarsVM.ico
+StarsVM_icon.rc
 
 # Logs and screenshots from driving the game.
 *.log
@@ -15,9 +15,8 @@ stars16_icon.rc
 
 __pycache__/
 
-# A Stars! installation to test against, and a copy of the game beside the
-# build so the icon step and the no-argument lookup find it.  Not ours to
-# redistribute, and neither are the saved games next to it.
-Stars!-2.70j/
+# A copy of the game beside the build, so the icon step and the no-argument
+# lookup find it, and the settings and saved games that appear next to it.  Not
+# ours to redistribute.
 stars.exe
 Stars.ini

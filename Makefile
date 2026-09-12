@@ -18,8 +18,8 @@ LDLIBS  := -luser32 -lgdi32 -lcomdlg32 -lwinmm
 
 SRCDIR  := src
 OBJDIR  := build/$(if $(CROSS),32,64)
-TARGET  := Stars!VM.exe
-RES     := $(OBJDIR)/stars16.res.o
+TARGET  := StarsVM.exe
+RES     := $(OBJDIR)/StarsVM.res.o
 
 # Both toolchains build the same file name out of different objects, so nothing
 # in the dependency graph tells one executable from the other: switching would
@@ -51,13 +51,13 @@ $(STAMP): FORCE
 
 FORCE:
 
-$(RES): stars16.rc stars16.manifest stars16_icon.rc | $(OBJDIR)
+$(RES): StarsVM.rc StarsVM.manifest StarsVM_icon.rc | $(OBJDIR)
 	$(WINDRES) -i $< -o $@
 
 # The icon comes out of the game's own resources.  Never fatal: without the
 # game next door the generated .rc is just a comment.
-stars16_icon.rc:
-	-python tools/mkicon.py "stars.exe" stars16.ico $@ StarsIco
+StarsVM_icon.rc:
+	-python tools/mkicon.py stars.exe StarsVM.ico $@ StarsIco
 	@test -f $@ || echo "/* no icon */" > $@
 
 $(OBJDIR)/unity.o: $(SRCDIR)/unity.c $(SRC) | $(OBJDIR)
@@ -74,6 +74,6 @@ fuzz: $(TARGET)
 	./$(TARGET) --fuzz
 
 clean:
-	rm -rf build $(TARGET) stars16.ico stars16_icon.rc
+	rm -rf build $(TARGET) StarsVM.ico StarsVM_icon.rc
 
 -include $(DEP)
