@@ -267,20 +267,23 @@ static uint32_t r_AllocResource(Cpu *c, Args *a)
     return gmem_alloc(MEM_MOVEABLE, size);
 }
 
-/* AccessResource hands back a DOS file handle already positioned at the data.
-   The game uses this plus _lread for the bitmaps that exceed 64 KB.
+/* AccessResource hands back a DOS handle already positioned at the data, which
+   the game reads with _lread for the bitmaps that exceed 64 KB.
 
-   This is the one place a resource offset escapes as a FILE offset rather than
-   an offset into the loaded image, so it is the one place that has to add
-   NeModule.base: when the module is appended to our own executable, the two
-   differ by however many bytes of us come first. */
+   The handle is a window onto the module image, not a reopened file.  This
+   used to be the one place a resource offset escaped as a file offset, and so
+   the one place that had to know how many bytes of us came first when the
+   module was appended to our own executable.  Reading it out of the image we
+   are already holding is shorter, and it is the only thing that can work once
+   that executable can carry the module compressed, where there is no byte
+   range to seek to at all. */
 static uint32_t r_AccessResource(Cpu *c, Args *a)
 {
     uint16_t hinst = arg_word(a);
     uint16_t h = arg_word(a);
     (void)c; (void)hinst;
     if (!h || h >= MAX_RES || !rsrc[h].used) return 0xFFFF;
-    return dos_open_at(task.exepathw, task.mod->base + rsrc[h].off);
+    return dos_open_mem(task.mod->img + rsrc[h].off, rsrc[h].len);
 }
 
 /* ---- bitmaps -------------------------------------------------------------- */

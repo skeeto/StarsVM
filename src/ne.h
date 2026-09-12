@@ -51,7 +51,6 @@ typedef struct {
     uint8_t  *img;        /* the NE image, which may be a slice of a larger file */
     uint32_t  imglen;
     uint32_t  hdr;        /* offset of the NE header within img */
-    uint32_t  base;       /* where img starts in the file it was read from     */
 
     uint16_t  flags, autodata, heap, stack, align;
     uint16_t  cseg, cmod, cmovent, expver;
@@ -87,8 +86,8 @@ int  ne_open(NeModule *m, const wchar_t *path);
    symbol table past the last section).  Returns 0 if there is nothing appended.
 
    Every offset inside the module stays relative to the image, so a payload at
-   an arbitrary byte offset needs no alignment; only NeModule.base, added back
-   by anything that reopens the file, knows the difference. */
+   an arbitrary byte offset needs no alignment, and nothing downstream knows or
+   cares where in the file it was found. */
 int  ne_open_appended(NeModule *m, const wchar_t *path);
 
 void ne_close(NeModule *m);

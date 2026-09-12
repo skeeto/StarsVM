@@ -5,9 +5,11 @@
 #include <stdint.h>
 #include <wchar.h>
 
-/* Open `path` and seek to `offset`, returning a DOS file handle (0xFFFF on
-   failure).  AccessResource needs this to hand the guest a handle positioned at
-   a resource, which is how the game reads the bitmaps that exceed 64 KB. */
-uint16_t dos_open_at(const wchar_t *path, uint32_t offset);
+/* A DOS file handle onto `len` bytes of memory, 0xFFFF if none is free.  The
+   span is borrowed, not copied, and must outlive the handle - the only caller
+   is AccessResource, handing the guest a handle onto the module image so it can
+   _lread the bitmaps that exceed 64 KB.  Read-only and sequential; nothing
+   seeks it. */
+uint16_t dos_open_mem(const uint8_t *mem, uint32_t len);
 
 #endif

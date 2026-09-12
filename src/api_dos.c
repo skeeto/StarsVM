@@ -55,40 +55,83 @@ static uint32_t dta_ptr = 0;          /* SEGPTR; defaults to PSP:0080 */
 /* ---- open file handles --------------------------------------------------- */
 
 #define MAX_FILES 64
-static HANDLE files[MAX_FILES];
 
-static int file_alloc(HANDLE h)
+/* A handle is either a real file or a window onto the module image.  The
+   second kind exists for AccessResource, which hands the game a handle to
+   resource data that it then reads with _lread: the module is already in
+   memory, so reopening the file it came from was always a detour, and once
+   that file can hold the module compressed there is no byte range in it to
+   reopen at all.
+
+   Sequential and read-only is the whole contract.  The game imports _lread
+   and _lclose and no seek of any kind, so an image window needs no more than
+   a position, and the operations that cannot apply to one say so rather than
+   pretending. */
+typedef struct {
+    HANDLE         h;      /* a real file; NULL for an image window     */
+    const uint8_t *mem;    /* an image window; NULL for a real file     */
+    uint32_t       len, pos;
+} File;
+static File files[MAX_FILES];
+
+static int file_slot(void)
 {
     int i;
     for (i = 5; i < MAX_FILES; i++)   /* 0..4 are the standard handles */
-        if (!files[i]) { files[i] = h; return i; }
-    CloseHandle(h);
+        if (!files[i].h && !files[i].mem) return i;
     return -1;
 }
 
-static HANDLE file_get(int fd)
+static int file_alloc(HANDLE h)
 {
-    return (fd >= 0 && fd < MAX_FILES) ? files[fd] : NULL;
+    int fd = file_slot();
+    if (fd < 0) { CloseHandle(h); return -1; }
+    files[fd].h = h;
+    return fd;
+}
+
+static File *file_get(int fd)
+{
+    if (fd < 0 || fd >= MAX_FILES) return NULL;
+    return (files[fd].h || files[fd].mem) ? &files[fd] : NULL;
+}
+
+static void file_release(int fd)
+{
+    if (files[fd].h) CloseHandle(files[fd].h);
+    files[fd].h = NULL;
+    files[fd].mem = NULL;
+    files[fd].len = files[fd].pos = 0;
+}
+
+/* Read from either kind of handle.  -1 on failure, which for an image window
+   cannot happen: running off the end is a short read, exactly as it would be
+   for a file. */
+static long file_read(File *f, void *dst, uint32_t want)
+{
+    DWORD got = 0;
+    if (f->mem) {
+        uint32_t n = f->len - f->pos;
+        if (n > want) n = want;
+        memcpy(dst, f->mem + f->pos, n);
+        f->pos += n;
+        return (long)n;
+    }
+    if (want && !ReadFile(f->h, dst, want, &got, NULL)) return -1;
+    return (long)got;
 }
 
 static char *guest_path(uint32_t segptr, char *buf, size_t n);
 
-/* Wide: the only caller is AccessResource reopening the module file, which is
-   a path we own rather than one the guest supplied. */
-uint16_t dos_open_at(const wchar_t *path, uint32_t offset)
+/* A DOS handle onto a span of the module image, for AccessResource. */
+uint16_t dos_open_mem(const uint8_t *mem, uint32_t len)
 {
-    HANDLE h = CreateFileW(path, GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE,
-                           NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
-    int fd;
-
-    if (h == INVALID_HANDLE_VALUE) return 0xFFFF;
-    if (SetFilePointer(h, (LONG)offset, NULL, FILE_BEGIN) ==
-        INVALID_SET_FILE_POINTER) {
-        CloseHandle(h);
-        return 0xFFFF;
-    }
-    fd = file_alloc(h);
-    return (fd < 0) ? 0xFFFF : (uint16_t)fd;
+    int fd = file_slot();
+    if (fd < 0) return 0xFFFF;
+    files[fd].mem = mem;
+    files[fd].len = len;
+    files[fd].pos = 0;
+    return (uint16_t)fd;
 }
 
 /* ---- the Win16 file API, on the same handle table ------------------------- */
@@ -162,11 +205,9 @@ static uint32_t k_OpenFile(Cpu *c, Args *a)
 static uint32_t k_lclose(Cpu *c, Args *a)
 {
     int fd = arg_word(a);
-    HANDLE h = file_get(fd);
     (void)c;
-    if (!h) return 0xFFFF;
-    CloseHandle(h);
-    files[fd] = NULL;
+    if (!file_get(fd)) return 0xFFFF;
+    file_release(fd);
     return 0;
 }
 
@@ -175,15 +216,13 @@ static uint32_t k_lread(Cpu *c, Args *a)
     int fd = arg_word(a);
     uint32_t buf = arg_long(a);
     uint16_t want = arg_word(a);
-    HANDLE h = file_get(fd);
-    DWORD got = 0;
+    File *f = file_get(fd);
+    long got;
 
     (void)c;
-    if (!h) return 0xFFFF;
-    if (want && !ReadFile(h, sel_ptr(SEGPTR_SEL(buf), SEGPTR_OFF(buf)),
-                          want, &got, NULL))
-        return 0xFFFF;
-    return got;
+    if (!f) return 0xFFFF;
+    got = file_read(f, sel_ptr(SEGPTR_SEL(buf), SEGPTR_OFF(buf)), want);
+    return (got < 0) ? 0xFFFF : (uint32_t)got;
 }
 
 static uint32_t k_lwrite(Cpu *c, Args *a)
@@ -191,12 +230,12 @@ static uint32_t k_lwrite(Cpu *c, Args *a)
     int fd = arg_word(a);
     uint32_t buf = arg_long(a);
     uint16_t want = arg_word(a);
-    HANDLE h = file_get(fd);
+    File *f = file_get(fd);
     DWORD put = 0;
 
     (void)c;
-    if (!h) return 0xFFFF;
-    if (want && !WriteFile(h, sel_ptr(SEGPTR_SEL(buf), SEGPTR_OFF(buf)),
+    if (!f || !f->h) return 0xFFFF;          /* an image window is read-only */
+    if (want && !WriteFile(f->h, sel_ptr(SEGPTR_SEL(buf), SEGPTR_OFF(buf)),
                            want, &put, NULL))
         return 0xFFFF;
     return put;
@@ -423,27 +462,26 @@ static uint32_t dos3call(Cpu *c, Args *a)
 
     case 0x3E: {                                 /* close */
         int fd = reg16(c, R_BX);
-        HANDLE h = file_get(fd);
-        if (!h) { dos_fail(c, DOSERR_BADHANDLE); return 0; }
-        CloseHandle(h);
-        files[fd] = NULL;
+        if (!file_get(fd)) { dos_fail(c, DOSERR_BADHANDLE); return 0; }
+        file_release(fd);
         return 0;
     }
 
     case 0x3F: {                                 /* read */
         int fd = reg16(c, R_BX);
-        HANDLE h = file_get(fd);
+        File *f = file_get(fd);
         uint16_t sel = c->seg[S_DS], off = reg16(c, R_DX);
         uint32_t want = reg16(c, R_CX);
-        DWORD got = 0;
+        long got;
         uint32_t limit;
 
-        if (!h) { dos_fail(c, DOSERR_BADHANDLE); return 0; }
+        if (!f) { dos_fail(c, DOSERR_BADHANDLE); return 0; }
         /* Clamp to what the destination selector can actually hold; Win16 code
            is known to pass counts larger than the buffer. */
         limit = sel_tab[SEL_INDEX(sel)].limit;
         if (off + want > limit + 1) want = limit + 1 - off;
-        if (want && !ReadFile(h, sel_ptr(sel, off), want, &got, NULL)) {
+        got = file_read(f, sel_ptr(sel, off), want);
+        if (got < 0) {
             dos_fail(c, DOSERR_ACCESS);
             return 0;
         }
@@ -453,13 +491,13 @@ static uint32_t dos3call(Cpu *c, Args *a)
 
     case 0x40: {                                 /* write */
         int fd = reg16(c, R_BX);
-        HANDLE h = file_get(fd);
+        File *f = file_get(fd);
         uint16_t sel = c->seg[S_DS], off = reg16(c, R_DX);
         uint32_t want = reg16(c, R_CX);
         DWORD put = 0;
 
-        if (!h) { dos_fail(c, DOSERR_BADHANDLE); return 0; }
-        if (want && !WriteFile(h, sel_ptr(sel, off), want, &put, NULL)) {
+        if (!f || !f->h) { dos_fail(c, DOSERR_BADHANDLE); return 0; }
+        if (want && !WriteFile(f->h, sel_ptr(sel, off), want, &put, NULL)) {
             dos_fail(c, DOSERR_ACCESS);
             return 0;
         }
@@ -474,13 +512,13 @@ static uint32_t dos3call(Cpu *c, Args *a)
 
     case 0x42: {                                 /* lseek */
         int fd = reg16(c, R_BX);
-        HANDLE h = file_get(fd);
+        File *f = file_get(fd);
         LONG lo = (LONG)(((uint32_t)reg16(c, R_CX) << 16) | reg16(c, R_DX));
         DWORD method = (al == 1) ? FILE_CURRENT : (al == 2) ? FILE_END : FILE_BEGIN;
         DWORD pos;
 
-        if (!h) { dos_fail(c, DOSERR_BADHANDLE); return 0; }
-        pos = SetFilePointer(h, lo, NULL, method);
+        if (!f || !f->h) { dos_fail(c, DOSERR_BADHANDLE); return 0; }
+        pos = SetFilePointer(f->h, lo, NULL, method);
         if (pos == INVALID_SET_FILE_POINTER) { dos_fail(c, DOSERR_ACCESS); return 0; }
         set_reg16(c, R_AX, (uint16_t)pos);
         set_reg16(c, R_DX, (uint16_t)(pos >> 16));

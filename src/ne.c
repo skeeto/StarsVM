@@ -178,7 +178,6 @@ int ne_open_appended(NeModule *m, const wchar_t *path)
     memmove(whole, whole + found, len - found);
     m->img    = whole;
     m->imglen = len - found;
-    m->base   = found;
     _snwprintf(m->path, sizeof m->path / sizeof *m->path - 1, L"%ls", path);
     m->path[sizeof m->path / sizeof *m->path - 1] = 0;
 
