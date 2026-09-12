@@ -61,6 +61,15 @@ typedef struct {
 
     int      seg_override;  /* pending segment prefix, -1 when none */
 
+    /* Where CS lands in the arena, and the selector that was true for.  Guest
+       code is fetched through this instead of through sel_ptr.  Checked rather
+       than invalidated: every path that can change CS changes seg[S_CS], and
+       a selector's base is a pure function of its value, so a stale base is
+       not expressible.  Copying a Cpu carries both, which is what makes
+       call16_wndproc's save and restore correct for free. */
+    uint8_t *cs_base;
+    uint16_t cs_cached;
+
     int      state;         /* one of the CPU_* codes            */
     uint32_t bad_cs, bad_ip;
     uint8_t  bad_op, bad_op2;

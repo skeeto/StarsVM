@@ -98,25 +98,44 @@ static uint16_t ip_of(Cpu *c) { return (uint16_t)c->eip; }
 
 static void ip_set(Cpu *c, uint16_t v) { c->eip = v; }
 
+/* Rebuild cs_base for whatever CS now holds.  Cold: once per change of CS, not
+   once per instruction.  An offset near the top of a selector reads on into the
+   next slot rather than wrapping, which is exactly what sel_rd16 did here
+   before, so nothing about that changes. */
+static void cs_refresh(Cpu *c)
+{
+    uint16_t sel = c->seg[S_CS];
+    unsigned i = SEL_INDEX(sel);
+
+    if (i == 0 || i >= SEL_SLOTS || sel_tab[i].kind == SK_FREE) {
+        sel_report_fault(sel, ip_of(c), "code");
+        c->cs_base = sel_arena;          /* the guard slot, as sel_ptr does */
+    } else {
+        c->cs_base = sel_arena + ((size_t)i << 16);
+    }
+    c->cs_cached = sel;
+}
+
 static uint8_t fetch8(Cpu *c)
 {
-    uint8_t v = sel_rd8(c->seg[S_CS], ip_of(c));
+    uint8_t v = c->cs_base[(uint16_t)c->eip];
     c->eip = (uint16_t)(c->eip + 1);
     return v;
 }
 
 static uint16_t fetch16(Cpu *c)
 {
-    uint16_t v = sel_rd16(c->seg[S_CS], ip_of(c));
+    const uint8_t *p = c->cs_base + (uint16_t)c->eip;
     c->eip = (uint16_t)(c->eip + 2);
-    return v;
+    return (uint16_t)(p[0] | (p[1] << 8));
 }
 
 static uint32_t fetch32(Cpu *c)
 {
-    uint32_t v = sel_rd32(c->seg[S_CS], ip_of(c));
+    const uint8_t *p = c->cs_base + (uint16_t)c->eip;
     c->eip = (uint16_t)(c->eip + 4);
-    return v;
+    return (uint32_t)p[0] | ((uint32_t)p[1] << 8) |
+           ((uint32_t)p[2] << 16) | ((uint32_t)p[3] << 24);
 }
 
 /* -------------------------------------------------------------------- stack */
@@ -616,6 +635,9 @@ int cpu_step(Cpu *c)
         c->state = CPU_RETURN;
         return CPU_RETURN;
     }
+    /* The cs_base test also covers a zeroed Cpu, where the selector and the
+       cached selector agree at 0 but there is no base yet. */
+    if (c->seg[S_CS] != c->cs_cached || !c->cs_base) cs_refresh(c);
 
     /* Prefixes. */
     ip0 = ip_of(c);
