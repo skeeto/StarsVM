@@ -131,7 +131,8 @@ halves of the format cannot drift apart without the build failing.
 of the same sources — the interpreter, the FPU, the selector arena, the log, and
 the thunk layer that `cpu_step` needs in order to link. It differentially tests
 the interpreter and the FPU against the host CPU — 200,000 rounds by default,
-covering register, immediate and memory forms, integer and x87 alike. For x87
+covering register, immediate, memory and string forms, integer and x87 alike.
+For x87
 the oracle seeds and dumps the whole 80-bit register stack with `FRSTOR` and
 `FNSAVE`; for memory operands it works out the effective address independently
 of `decode_ea` and aims the oracle at a mirror of the same byte, so the address

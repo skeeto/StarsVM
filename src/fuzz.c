@@ -34,9 +34,28 @@
  * Coverage is the ALU, shifts and rotates, inc/dec, mul/div, the bit
  * instructions, MOVZX/MOVSX, SETcc, SHLD/SHRD and the decimal adjusts, in
  * register and immediate forms - that is where flag bugs live - and the ALU
- * again against memory.  String operations and control transfer are not covered
- * here; they are exercised by running the game and by the targeted tests in
- * tools/.
+ * again against memory, and the string operations.
+ *
+ * A string instruction carries no ModRM, so the oracle cannot have its
+ * addressing rewritten the way a memory operand does.  It does not need it: the
+ * addressing is implicit in ESI and EDI, which the prologue already loads, so
+ * those are handed host addresses into the mirror and the host walks the very
+ * windows the guest is working in.  ES gets a window of its own, because a
+ * string instruction writes through it and cannot override it, so it has to be
+ * distinguishable from DS for the difference to show.  SI and DI are then
+ * compared as distances travelled rather than as values, which is the
+ * comparable quantity and also the interesting one.  The run is kept inside the
+ * window in whichever direction DF sends it: wrapping at the end of a selector
+ * is the guest's business, and the host has no selector to wrap in.
+ *
+ * Control transfer is not covered, and mostly should not be.  cond() has three
+ * callers - the two Jcc forms and SETcc - and SETcc is generated here across
+ * all sixteen conditions against real flags, so the condition half of every
+ * conditional branch is already tested by proxy.  What is left of a relative
+ * branch is one displacement addition.  The rest is far transfers, which change
+ * CS, which in this emulator means an arena selector with a base and a limit:
+ * the host has no equivalent to be asked about, so no amount of harness makes
+ * that differentially testable.
  *
  * A memory operand is the one case where the two sides cannot run the same
  * bytes: a 16-bit ModRM means something else to a host whose address size is 32
@@ -101,6 +120,7 @@
 /* The mirrored window.  Wide enough for an 80-bit operand and some room to
    move it around in, small enough to compare in full every round. */
 #define MEM_WIN    64
+#define MEM_WINS   3
 #define MEM_AT     0x200u          /* where it sits in each guest selector */
 
 #define FPU_IMG    108
@@ -129,9 +149,17 @@ struct fzstate {
     uint8_t  in_fpu[FPU_IMG];
     uint8_t  out_fpu[FPU_IMG];
     /* The oracle's side of a memory operand.  [0] mirrors the guest's DS
-       window and [1] its SS window; the payload is aimed at whichever the
-       addressing form is supposed to pick. */
-    uint8_t  mem[2][MEM_WIN];
+       window, [1] its SS window and [2] its ES window; the payload is aimed at
+       whichever the addressing form is supposed to pick.  ES earns a window of
+       its own because a string instruction writes through it and may not
+       override it, so it has to be distinguishable from DS to catch the
+       difference. */
+    uint8_t  mem[3][MEM_WIN];
+
+    /* SI and DI, at whatever width a pointer is here.  A string instruction
+       has the oracle walk the mirror directly, so these hold host addresses
+       for those rounds and the plain register values for every other. */
+    uint64_t in_ptr[2];
 };
 static struct fzstate fz;
 
@@ -216,16 +244,23 @@ static unsigned host_mem_insn(uint8_t *out, const uint8_t *opb, unsigned opn,
     return n;
 }
 
-/* The stack pointer is the one register whose full width matters, so on a
-   64-bit host it needs REX.W where the others do not. */
-static void eref_sp(uint8_t op, size_t off)
+/* The full-width form.  The stack pointer has always needed it; so do SI and DI
+   now that a string round hands them host addresses.  On a 32-bit host the
+   plain encoding already is full width, and a 64-bit field's low dword is the
+   pointer, so the fallback needs no special case. */
+static void eref_q(uint8_t op, int reg, size_t off)
 {
     if (long_mode) {
-        e8(0x49); e8(op); e8(0xA7); e32((uint32_t)off);   /* [r15+disp32] */
+        e8(0x49);                                        /* REX.W | REX.B   */
+        e8(op);
+        e8((uint8_t)(0x80 | (reg << 3) | 7));            /* [r15+disp32]    */
+        e32((uint32_t)off);
     } else {
-        eref(op, 4, off);
+        eref(op, reg, off);
     }
 }
+
+static void eref_sp(uint8_t op, size_t off) { eref_q(op, 4, off); }
 
 /* Build the trampoline once.  Layout:
      save the host's callee-saved registers, stash the stack pointer
@@ -260,7 +295,12 @@ static int tramp_build(unsigned insn_max)
     }
     eref_sp(0x89, offsetof(struct fzstate, saved_sp));
 
-    for (i = 0; i < 7; i++) eref(0x8B, gpr[i], FZ_IN_R(gpr[i]));
+    for (i = 0; i < 7; i++) {
+        if (gpr[i] == 6 || gpr[i] == 7) continue;        /* SI and DI below */
+        eref(0x8B, gpr[i], FZ_IN_R(gpr[i]));
+    }
+    eref_q(0x8B, 6, offsetof(struct fzstate, in_ptr));
+    eref_q(0x8B, 7, offsetof(struct fzstate, in_ptr) + 8);
     /* The whole x87 state in one instruction.  Before the flags, because
        FRSTOR does not touch EFLAGS but the order reads better this way. */
     eref(0xDD, 4, offsetof(struct fzstate, in_fpu));      /* frstor [in_fpu] */
@@ -568,6 +608,13 @@ struct form {
        1 for SS - so picking the other one shows up as a difference. */
     unsigned mem_len;    /* bytes of the operand, 0 when there is none */
     unsigned mem_float;  /* 4 or 8 when the operand is converted from a float */
+    /* A string instruction.  SI and DI reach the oracle as host pointers into
+       the mirror, so they are compared as distances travelled rather than as
+       values, and str_df says which way. */
+    int      str_op;
+    int      str_df;
+    unsigned str_n, str_esz, str_soff, str_doff;
+    uint32_t str_sbase, str_dbase;
     unsigned mem_off;    /* where in the window it lands */
     unsigned mem_seg;
     uint8_t  mem_op[2];  /* opcode bytes for the oracle's encoding */
@@ -672,7 +719,7 @@ static void gen(struct form *f)
     reg = size8 ? (int)rnd_below(8) : rnd_reg();
     rm  = size8 ? (int)rnd_below(8) : rnd_reg();
 
-    switch (rnd_below(21)) {
+    switch (rnd_below(22)) {
     case 0: {                                     /* ALU r/m,r and r,r/m */
         int aluop = (int)rnd_below(8);
         int dir = (int)rnd_below(2);
@@ -911,6 +958,39 @@ static void gen(struct form *f)
         break;
     }
 
+    case 20: {                                    /* string operations */
+        /* No ModRM to rewrite, so the oracle runs the guest's own bytes and
+           reaches the mirror through ESI and EDI instead.  The run is kept
+           inside the window in whichever direction it goes, because wrapping
+           at the end of a selector is the guest's business and the host has no
+           selector to wrap in. */
+        static const uint8_t base[] = { 0xA4, 0xA6, 0xAA, 0xAC, 0xAE };
+        unsigned which = rnd_below(sizeof base / sizeof *base);
+        int compare = base[which] == 0xA6 || base[which] == 0xAE;
+        unsigned esz = size8 ? 1u : (f->want32 ? 4u : 2u);
+        unsigned n = 1 + rnd_below(8);
+        unsigned span, room, i = 0;
+
+        if (n * esz > MEM_WIN) n = MEM_WIN / esz;
+        span = n * esz;
+        room = MEM_WIN - span + 1u;
+        f->str_df = (int)rnd_below(2);
+        f->str_soff = rnd_below(room) + (f->str_df ? span - esz : 0u);
+        f->str_doff = rnd_below(room) + (f->str_df ? span - esz : 0u);
+        f->str_n = n;
+        f->str_esz = esz;
+        f->str_op = 1;
+
+        /* REPNE only means anything to the two that compare; on the others the
+           manual reserves it, so it is not asked for. */
+        if (rnd_below(2)) f->bytes[i++] = compare && rnd_below(2) ? 0xF2 : 0xF3;
+        else              f->str_n = n = 1;        /* no prefix: one element */
+        f->bytes[i++] = (uint8_t)(base[which] + (size8 ? 0 : 1));
+        f->len = i;
+        f->what = "string";
+        break;
+    }
+
     case 19: {                                    /* x87 against memory */
         /* Every memory escape fpu.c implements, less four that cannot be
            compared: FLDCW and FLDENV would take a control word out of random
@@ -1135,7 +1215,7 @@ static void tally(const char **names, long *counts, const char *key)
 
 static int fuzz_run(long rounds, unsigned seed)
 {
-    uint16_t code_sel, ds_sel, ss_sel;
+    uint16_t code_sel, ds_sel, ss_sel, es_sel;
     Cpu *c = &cpu;
     long i, tested = 0, skipped = 0, unrunnable = 0, failed = 0;
 
@@ -1152,7 +1232,8 @@ static int fuzz_run(long rounds, unsigned seed)
        right bytes anyway and the mistake would never show. */
     ds_sel = sel_alloc(0x10000u, SK_DATA);
     ss_sel = sel_alloc(0x10000u, SK_DATA);
-    if (!code_sel || !ds_sel || !ss_sel) {
+    es_sel = sel_alloc(0x10000u, SK_DATA);
+    if (!code_sel || !ds_sel || !ss_sel || !es_sel) {
         log_msg("fuzz: no selector\n");
         return 1;
     }
@@ -1173,6 +1254,8 @@ static int fuzz_run(long rounds, unsigned seed)
            that depends on what the base and index registers hold. */
         for (k = 0; k < 8; k++) fz.in_r[k] = rnd_value();
         fz.in_r[4] = 0;                            /* the stack is the host's */
+        fz.in_ptr[0] = fz.in_r[6];
+        fz.in_ptr[1] = fz.in_r[7];
 
         gen(&f);
         if (div_faults(&f)) { skipped++; continue; }
@@ -1206,9 +1289,24 @@ static int fuzz_run(long rounds, unsigned seed)
 
         /* TF clear, IF set, and only the flags we compare are seeded, so a
            mismatch is never about a bit we do not model. */
+        if (f.str_op) {
+            /* CX counts elements, SI and DI are window offsets for the guest
+               and host addresses for the oracle. */
+            fz.in_r[R_CX] = f.str_n;
+            fz.in_r[R_SI] = MEM_AT + f.str_soff;
+            fz.in_r[R_DI] = MEM_AT + f.str_doff;
+            fz.in_ptr[0] = (uint64_t)(uintptr_t)&fz.mem[0][f.str_soff];
+            fz.in_ptr[1] = (uint64_t)(uintptr_t)&fz.mem[2][f.str_doff];
+            f.str_sbase = (uint32_t)(uintptr_t)&fz.mem[0][f.str_soff];
+            f.str_dbase = (uint32_t)(uintptr_t)&fz.mem[2][f.str_doff];
+        }
         if (f.cl_mod)
             fz.in_r[1] = (fz.in_r[1] & ~0xFFu) | rnd_below(f.cl_mod);
         fz.in_flags = (rnd() & CMP_FLAGS) | F_RS | F_IF;
+        if (f.str_op) {
+            if (f.str_df) fz.in_flags |= F_DF;
+            else          fz.in_flags &= ~(uint64_t)F_DF;
+        }
 
         /* Run natively. */
         memset(fz.out_r, 0, sizeof fz.out_r);
@@ -1218,16 +1316,18 @@ static int fuzz_run(long rounds, unsigned seed)
         /* Both windows get the same bytes on both sides, then each side works
            on its own copy: the oracle on fz.mem, the guest on its selectors.
            Whatever either wrote is compared afterwards. */
-        if (f.mem_len) {
+        if (f.mem_len || f.str_op) {
             for (k = 0; k < MEM_WIN; k++) {
                 fz.mem[0][k] = (uint8_t)rnd();
                 fz.mem[1][k] = (uint8_t)rnd();
+                fz.mem[2][k] = (uint8_t)rnd();
             }
             if (f.mem_float)
                 mem_quieten(fz.mem[f.mem_seg] + f.mem_off, f.mem_float);
             for (k = 0; k < MEM_WIN; k++) {
                 sel_wr8(ds_sel, (uint16_t)(MEM_AT + k), fz.mem[0][k]);
                 sel_wr8(ss_sel, (uint16_t)(MEM_AT + k), fz.mem[1][k]);
+                sel_wr8(es_sel, (uint16_t)(MEM_AT + k), fz.mem[2][k]);
             }
         }
         tramp_run(host, hl);
@@ -1240,7 +1340,7 @@ static int fuzz_run(long rounds, unsigned seed)
         c->eflags = (uint32_t)fz.in_flags;
         c->seg[S_CS] = code_sel;
         c->seg[S_DS] = ds_sel;
-        c->seg[S_ES] = ds_sel;
+        c->seg[S_ES] = es_sel;
         c->seg[S_SS] = ss_sel;
         c->eip = 0;
         for (k = 0; k < gl; k++) sel_wr8(code_sel, (uint16_t)k, guest[k]);
@@ -1267,6 +1367,20 @@ static int fuzz_run(long rounds, unsigned seed)
         for (k = 0; k < 8; k++) {
             uint32_t want = fz.out_r[k], got = c->r32[k];
             if (k == 4) continue;                  /* esp is not compared */
+            if (f.str_op && (k == 6 || k == 7)) {
+                /* The oracle walked host addresses and the guest walked window
+                   offsets, so only the distance travelled is comparable - and
+                   it is the thing worth comparing. */
+                uint32_t hb = (k == 6) ? f.str_sbase : f.str_dbase;
+                uint32_t gb = MEM_AT + (k == 6 ? f.str_soff : f.str_doff);
+                int32_t hd = (int32_t)(want - hb), gd = (int32_t)(got - gb);
+                if (hd != gd) {
+                    log_msg("fuzz: %s %s moved %ld, emu %ld\n", f.what,
+                            k == 6 ? "si" : "di", (long)hd, (long)gd);
+                    bad = 1;
+                }
+                continue;
+            }
             /* In 16-bit mode the upper half of a 32-bit register is untouched by
                a 16-bit operation, and the host preserves it identically, so a
                full 32-bit comparison is correct. */
@@ -1279,11 +1393,11 @@ static int fuzz_run(long rounds, unsigned seed)
             }
         }
         if (f.fpu && fp_compare(fz.out_fpu, c, f.what)) bad = 1;
-        if (f.mem_len) {
-            static const char *wn[2] = { "ds", "ss" };
+        if (f.mem_len || f.str_op) {
+            static const char *wn[MEM_WINS] = { "ds", "ss", "es" };
             unsigned w;
-            for (w = 0; w < 2; w++) {
-                uint16_t s = w ? ss_sel : ds_sel;
+            for (w = 0; w < MEM_WINS; w++) {
+                uint16_t s = w == 0 ? ds_sel : w == 1 ? ss_sel : es_sel;
                 for (k = 0; k < MEM_WIN; k++) {
                     uint8_t want = fz.mem[w][k];
                     uint8_t got = sel_rd8(s, (uint16_t)(MEM_AT + k));
