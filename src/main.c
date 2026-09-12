@@ -14,7 +14,6 @@
 #include <windows.h>
 
 void imp_dump_table(void);
-int  fuzz_main(long rounds, unsigned seed);
 int  call16_init(void);
 void api_kernel_register(void);
 void api_dos_register(void);
@@ -108,9 +107,6 @@ int main(int argc, char **argv)
     int do_dump = 0, do_imports = 0, do_load = 0, do_run = 0, verbose = 0;
     uint64_t steps = 0;
     long trace_cpu = 0;
-    int do_fuzz = 0;
-    long fuzz_rounds = 200000;
-    unsigned fuzz_seed = 0;
     long play_wave = -1;
     struct { unsigned seg, off, len; } peek[8];
     int npeek = 0;
@@ -145,12 +141,6 @@ int main(int argc, char **argv)
             do_load = 1;
         } else if (!strcmp(a, "--run")) {
             do_run = 1;
-        } else if (!strcmp(a, "--fuzz")) {
-            do_fuzz = 1;
-        } else if (!strcmp(a, "--fuzz-seed") && i + 1 < argc) {
-            fuzz_seed = (unsigned)strtoul(argv[++i], NULL, 0);
-        } else if (!strcmp(a, "--fuzz-rounds") && i + 1 < argc) {
-            fuzz_rounds = strtol(argv[++i], NULL, 0);
         } else if (!strcmp(a, "--play-wave") && i + 1 < argc) {
             play_wave = strtol(argv[++i], NULL, 0);
         } else if (!strcmp(a, "--trace-paint")) {
@@ -195,7 +185,7 @@ int main(int argc, char **argv)
 
     /* Double-clicked, or run with nothing but a path: play the game.  The
        inspection modes are what needs asking for, not the ordinary one. */
-    if (!do_dump && !do_imports && !do_load && !do_fuzz && npeek == 0)
+    if (!do_dump && !do_imports && !do_load && npeek == 0)
         do_run = 1;
 
     /* --play-wave wants the module loaded and a task, because the waves are
@@ -207,12 +197,6 @@ int main(int argc, char **argv)
     if (!sel_init()) return 1;
     if (!thunk_init()) return 1;
     if (!call16_init()) return 1;
-
-    if (do_fuzz) {
-        int rc = fuzz_main(fuzz_rounds, fuzz_seed);
-        log_close();
-        return rc;
-    }
 
     if (do_imports) {
         imp_dump_table();

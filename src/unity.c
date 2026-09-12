@@ -28,6 +28,10 @@
  * Adding a file to src/ requires adding a line here.  The Makefile depends on
  * every source in the directory, so forgetting one shows up as a link error
  * naming the missing symbol, not as a stale object silently left behind.
+ *
+ * One source is missing on purpose: fuzz.c belongs to unity_fuzz.c, which
+ * builds it as its own program.  It is not an omission to be tidied up - see
+ * that file for why the emulator must not contain it.
  */
 
 #include "api_dos.c"
@@ -42,7 +46,6 @@
 #include "disasm.c"
 #include "dlg.c"
 #include "fpu.c"
-#include "fuzz.c"
 #include "handle.c"
 #include "heap.c"
 #include "imports.c"

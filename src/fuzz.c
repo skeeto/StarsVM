@@ -1,5 +1,10 @@
 /* fuzz.c - differential test of the interpreter against the host CPU.
  *
+ * This is a program of its own, built by unity_fuzz.c and not part of the
+ * emulator: the trampoline below asks for a writable-executable page, which is
+ * not a thing a game should be seen doing, and none of this has anything to say
+ * about Stars! anyway.  `make fuzz` builds and runs it.
+ *
  * The host is x86, so it is the best possible oracle: generate a random
  * instruction and a random register state, run it both in the interpreter and
  * natively in a trampoline, and compare registers and flags.
@@ -576,7 +581,7 @@ static void tally(const char **names, long *counts, const char *key)
     }
 }
 
-int fuzz_main(long rounds, unsigned seed)
+static int fuzz_run(long rounds, unsigned seed)
 {
     uint16_t code_sel;
     Cpu *c = &cpu;
@@ -722,4 +727,70 @@ int fuzz_main(long rounds, unsigned seed)
     log_msg("fuzz: %ld tested, %ld divides skipped, %ld unrunnable, %ld failed\n",
             tested, skipped, unrunnable, failed);
     return failed != 0;
+}
+
+
+/* ------------------------------------------------------------------ the driver */
+
+/* Being a console program, the report needs no --console: GetStdHandle succeeds,
+   so log_open finds stdout already there.  The name comes from argv[0] for the
+   same reason the emulator's does - nothing in this tree writes its own name
+   down. */
+static const char *prog = "fuzz";
+
+static const char driver_usage[] =
+    "\n"
+    "Generates a random instruction and a random register state, runs each both\n"
+    "in the interpreter and natively on this CPU, and compares registers and\n"
+    "flags.  A mismatch prints the seed that produced it, so it can be replayed\n"
+    "on its own.\n"
+    "\n"
+    "  --rounds N   instructions to test (default 200000)\n"
+    "  --seed N     start the generator here instead of at its fixed default,\n"
+    "               which is what a seed printed by a failure is for\n"
+    "  --log FILE   also write the report to FILE\n"
+    "  --help       this text\n";
+
+int main(int argc, char **argv)
+{
+    long rounds = 200000;
+    unsigned seed = 0;
+    const char *logfile = NULL;
+    int i, rc;
+
+    if (argv[0] && argv[0][0]) {
+        const char *p;
+        prog = argv[0];
+        for (p = argv[0]; *p; p++)
+            if (*p == '\\' || *p == '/' || *p == ':') prog = p + 1;
+    }
+
+    for (i = 1; i < argc; i++) {
+        const char *a = argv[i];
+        if (!strcmp(a, "--rounds") && i + 1 < argc) {
+            rounds = strtol(argv[++i], NULL, 0);
+        } else if (!strcmp(a, "--seed") && i + 1 < argc) {
+            seed = (unsigned)strtoul(argv[++i], NULL, 0);
+        } else if (!strcmp(a, "--log") && i + 1 < argc) {
+            logfile = argv[++i];
+        } else if (!strcmp(a, "--help") || !strcmp(a, "-h")) {
+            printf("usage: %s [--rounds N] [--seed N] [--log FILE]\n", prog);
+            fputs(driver_usage, stdout);
+            return 0;
+        } else {
+            fprintf(stderr, "%s: unknown option %s\n", prog, a);
+            return 2;
+        }
+    }
+
+    /* Both of these are things the emulator's main() happens to have done long
+       before it reaches the fuzzer, so doing without them here is not an
+       option: log_msg writes nowhere until log_open has gone looking for a
+       handle, and sel_alloc has no arena to carve up until sel_init. */
+    log_open(logfile);
+    if (!sel_init()) { log_close(); return 1; }
+
+    rc = fuzz_run(rounds, seed);
+    log_close();
+    return rc;
 }

@@ -23,8 +23,8 @@ What is in the box:
 
 - a 16-bit x86 interpreter (`src/cpu.c`) covering 8086/80186/80286 plus the 386
   additions a 16-bit MS C compiler emits, differentially tested against the host
-  CPU by `make fuzz`.  An encoding it does not understand stops the machine
-  rather than guessing
+  CPU by `make fuzz`, which builds and runs a separate program for the purpose.
+  An encoding it does not understand stops the machine rather than guessing
 - an x87 FPU emulator (`src/fpu.c`), which the game's C runtime requires
 - an NE (New Executable) loader: segments, relocations, resources, the entry
   table
@@ -95,11 +95,23 @@ instruction. The individual sources are still ordinary `.c` files and each still
 compiles standalone, so `gcc -c src/cpu.c` remains available when bisecting a
 warning.
 
+`make fuzz` builds a second, separate program, `StarsVM-fuzz.exe`, out of seven
+of the same sources — the interpreter, the FPU, the selector arena, the log, and
+the thunk layer that `cpu_step` needs in order to link. It differentially tests
+the interpreter against the host CPU and has nothing to say about the game, so
+it is not part of the emulator, and neither is `src/fuzz.c`: its oracle works by
+writing machine code into a page it allocates `PAGE_EXECUTE_READWRITE` and then
+calls. That is the only request for executable memory anywhere in the tree, and
+keeping it in its own program means the emulator makes none at all — the
+selector arena is reserved `PAGE_NOACCESS` and committed `PAGE_READWRITE`,
+because guest code is interpreted rather than run. `StarsVM.exe` never asks the
+system for a page it can both write and execute.
+
 No filename in the tree contains a `!`. The project is called Stars!VM, but
 GitHub will not take the character in a repository, release or artifact name,
-and it is a history expansion in an interactive shell — so the binary is
-`StarsVM.exe`, the game is `stars.exe`, and the one file you might build for
-yourself is `Stars-x86.exe`.
+and it is a history expansion in an interactive shell — so the binaries are
+`StarsVM.exe` and `StarsVM-fuzz.exe`, the game is `stars.exe`, and the one file
+you might build for yourself is `Stars-x86.exe`.
 
 [w64]: https://github.com/skeeto/w64devkit
 
@@ -132,7 +144,7 @@ has the disassembly, the byte layout and the parts that are still not faithful.
 
 ## Known gaps
 
-- **The decimal adjusts go untested on an x64 build.** `make fuzz` runs in
+- **The decimal adjusts go untested on an x64 build.** The fuzzer runs in
   either mode, but it works by comparing the interpreter against the host CPU,
   and 64-bit mode deleted DAA, DAS, AAA, AAS, AAM and AAD outright — there is no
   oracle for them there. The run counts those rounds as unrunnable rather than
