@@ -113,6 +113,17 @@ is no music data anywhere to substitute. `mciSendCommand` reports "no such
 device", which makes the game clear its music bit and stop asking. That is what
 it did on a machine with no CD in 1995.
 
+## Copy protection
+
+Stars! stamps each submitted turn file with your serial code and an eleven-byte
+fingerprint of the machine, and a host penalises one serial appearing under two
+different fingerprints. The fingerprint is the volume label, label timestamp and
+size of the drives at C: and D:. Stars!VM reported the wrong drive-type numbers
+to the guest for a while, which silently reduced that fingerprint to a constant
+— the same on every machine — and fixing it invalidates registrations made by
+older builds, so the game asks for the serial code once more. `docs/copy-protection.md`
+has the disassembly, the byte layout and the parts that are still not faithful.
+
 ## Known gaps
 
 - **`make fuzz` needs a 32-bit host.** The differential test builds a trampoline

@@ -272,6 +272,31 @@ static void put_dta_result(uint32_t dta, const WIN32_FIND_DATAA *fd)
     sel_wr8(sel, (uint16_t)(off + DTA_NAME + i), 0);
 }
 
+/* DOS answers a search for the volume-label attribute with the label itself,
+   reported as though it were a directory entry.  Win32 has no such entry to
+   hand back: GetVolumeInformation is the only route to the name, and the
+   label's FAT timestamp is not reachable through Win32 at all, so the date
+   and time fields stay zero.  The game folds both halves into its machine
+   fingerprint, so the name half varies per machine here and the timestamp
+   half does not - see docs/copy-protection.md. */
+static void put_dta_label(uint32_t dta, const char *label)
+{
+    uint16_t sel = SEGPTR_SEL(dta), off = SEGPTR_OFF(dta);
+    unsigned i;
+
+    sel_wr8 (sel, (uint16_t)(off + DTA_FILEATTR), DOSATTR_LABEL);
+    sel_wr16(sel, (uint16_t)(off + DTA_TIME), 0);
+    sel_wr16(sel, (uint16_t)(off + DTA_DATE), 0);
+    sel_wr32(sel, (uint16_t)(off + DTA_SIZE), 0);
+    for (i = 0; i < 12 && label[i]; i++)
+        sel_wr8(sel, (uint16_t)(off + DTA_NAME + i), (uint8_t)label[i]);
+    sel_wr8(sel, (uint16_t)(off + DTA_NAME + i), 0);
+    /* No find handle is allocated: a label search has exactly one result.
+       Clear the cookie so a find-next behind it fails cleanly rather than
+       walking whatever search used this DTA last. */
+    sel_wr32(sel, (uint16_t)(off + DTA_COOKIE), 0);
+}
+
 /* ---- the dispatcher ------------------------------------------------------ */
 
 static uint32_t dos3call(Cpu *c, Args *a)
@@ -328,8 +353,12 @@ static uint32_t dos3call(Cpu *c, Args *a)
 
     case 0x36: {                                 /* get free disk space */
         DWORD spc = 0, bps = 0, freec = 0, totalc = 0;
+        unsigned dl = (unsigned)(reg16(c, R_DX) & 0xFF);
         char root[4];
-        root[0] = (char)('A' + (al ? al - 1 : 2));
+        /* DL, not AL: 0 means the default drive, then 1 = A.  Reading AL
+           here asked Win32 about a drive named by whatever was left in it,
+           so this handler had never once succeeded. */
+        root[0] = (char)('A' + (dl ? dl - 1 : 2));
         root[1] = ':'; root[2] = '\\'; root[3] = 0;
         if (!GetDiskFreeSpaceA(root, &spc, &bps, &freec, &totalc)) {
             set_reg16(c, R_AX, 0xFFFF);
@@ -513,11 +542,41 @@ static uint32_t dos3call(Cpu *c, Args *a)
 
     case 0x4E: {                                 /* find first */
         uint32_t dta = current_dta(c);
+        uint16_t cx = reg16(c, R_CX);
         WIN32_FIND_DATAA fd;
         HANDLE h;
         int slot;
 
         guest_path(SEGPTR(c->seg[S_DS], reg16(c, R_DX)), path, sizeof path);
+
+        /* An attribute of exactly the volume-label bit is how DOS is asked
+           for a volume label, and it is how the game reads the one its
+           machine fingerprint hashes.  FindFirstFile never reports a label,
+           so that search has to be answered elsewhere.  Only the bare bit is
+           redirected: with other bits set the caller wants files as well, and
+           those searches keep the ordinary path. */
+        if (cx == DOSATTR_LABEL) {
+            char vol[4], label[MAX_PATH];
+            const char *rootp = NULL;
+
+            if (path[0] && path[1] == ':') {
+                vol[0] = path[0];
+                vol[1] = ':';
+                vol[2] = '\\';
+                vol[3] = 0;
+                rootp = vol;
+            }
+            if (!GetVolumeInformationA(rootp, label, sizeof label,
+                                       NULL, NULL, NULL, NULL, 0)
+                || !label[0]) {
+                dos_fail(c, DOSERR_FILENOTFOUND);
+                return 0;
+            }
+            put_dta_label(dta, label);
+            set_reg16(c, R_AX, 0);
+            return 0;
+        }
+
         for (slot = 0; slot < MAX_FINDS; slot++) if (!finds[slot].used) break;
         if (slot == MAX_FINDS) { dos_fail(c, DOSERR_TOOMANYFILES); return 0; }
 

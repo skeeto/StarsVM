@@ -121,14 +121,17 @@ static uint32_t k_GetDriveType(Cpu *c, Args *a)
     root[2] = '\\';
     root[3] = 0;
     t = GetDriveTypeA(root);
-    /* Win16 values: 0 does not exist, 1 removable, 2 fixed, 3 remote. */
-    switch (t) {
-    case DRIVE_REMOVABLE: return 1;
-    case DRIVE_FIXED:     return 2;
-    case DRIVE_REMOTE:    return 3;
-    case DRIVE_CDROM:     return 1;
-    default:              return 0;
-    }
+    /* Win16 numbered these the way Win32 later kept them - removable 2,
+       fixed 3, remote 4 - and differed in only two places: MSCDEX reached a
+       CD-ROM through the network redirector, so one reports remote, and a
+       root that is not there is merely unknown.  Both are load-bearing.  The
+       game's machine fingerprint (see docs/copy-protection.md) runs only for
+       a drive reporting 3, which on Win16 is an ordinary hard disk; an
+       off-by-one here reports every hard disk as removable instead, and
+       leaves the fingerprint reading a compile-time constant. */
+    if (t == DRIVE_CDROM) t = DRIVE_REMOTE;
+    else if (t == DRIVE_NO_ROOT_DIR) t = DRIVE_UNKNOWN;
+    return t;
 }
 
 static uint32_t k_FatalExit(Cpu *c, Args *a)
