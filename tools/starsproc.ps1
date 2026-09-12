@@ -16,7 +16,7 @@
 # The Makefile is the single source of truth for what gets built.  Returns the
 # base name a process would carry (no .exe), or $null if it cannot be read.
 function Get-StarsName {
-    $mk = Join-Path (Split-Path $PSScriptRoot -Parent) 'Makefile'
+    $mk = Join-Path (Split-Path $PSScriptRoot -Parent) 'GNUmakefile'
     if (Test-Path $mk) {
         $m = Select-String -Path $mk -Pattern '^\s*TARGET\s*:?=\s*(\S.*?)\s*$' |
              Select-Object -First 1
