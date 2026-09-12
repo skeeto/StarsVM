@@ -12,7 +12,7 @@ CROSS   := i686-w64-mingw32-
 CC      := $(CROSS)gcc
 WINDRES := $(CROSS)windres
 CFLAGS  := -std=c11 -Oz -g -Wall -Wextra -Wshadow -Wstrict-prototypes \
-           -Wno-unused-parameter -MMD -MP
+           -Wno-unused-parameter -MMD -MP -D__USE_MINGW_ANSI_STDIO=0
 LDFLAGS := -mwindows -s
 LDLIBS  := -luser32 -lgdi32 -lcomdlg32 -lwinmm
 
