@@ -14,7 +14,7 @@
 CROSS   := i686-w64-mingw32-
 CC      := $(CROSS)gcc
 WINDRES := $(CROSS)windres
-CFLAGS  := -std=c11 -Oz -g -Wall -Wextra -Wshadow -Wstrict-prototypes \
+CFLAGS  := -std=c11 -O3 -g -Wall -Wextra -Wshadow -Wstrict-prototypes \
            -Wno-unused-parameter -MMD -MP -D__USE_MINGW_ANSI_STDIO=0
 LDFLAGS := -mwindows -s
 LDLIBS  := -luser32 -lgdi32 -lcomdlg32 -lwinmm
@@ -80,13 +80,17 @@ StarsVM_icon.rc:
 	-python tools/mkicon.py stars.exe StarsVM.ico $@ StarsIco
 	@test -f $@ || echo "/* no icon */" > $@
 
-$(OBJDIR)/unity.o: $(SRCDIR)/unity.c $(SRC) | $(OBJDIR)
+# Each object depends on this makefile as well as on the sources, because
+# CFLAGS lives here: without it, changing the optimisation level leaves `make`
+# with nothing to do.  Four levels once timed within 0.3% of each other and
+# produced byte-identical executables, which is what that looks like.
+$(OBJDIR)/unity.o: $(SRCDIR)/unity.c $(SRC) GNUmakefile | $(OBJDIR)
 	$(CC) $(CFLAGS) -c -o $@ $<
 
-$(FOBJ): $(SRCDIR)/unity_fuzz.c $(SRC) | $(OBJDIR)
+$(FOBJ): $(SRCDIR)/unity_fuzz.c $(SRC) GNUmakefile | $(OBJDIR)
 	$(CC) $(CFLAGS) -c -o $@ $<
 
-$(POBJ): $(SRCDIR)/unity_pack.c $(SRC) | $(OBJDIR)
+$(POBJ): $(SRCDIR)/unity_pack.c $(SRC) GNUmakefile | $(OBJDIR)
 	$(CC) $(CFLAGS) -c -o $@ $<
 
 # Console programs, so their output needs no --console, and unstripped, because

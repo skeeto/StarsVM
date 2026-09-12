@@ -97,11 +97,28 @@ make CROSS=
 
 Both produce a working emulator. The build is a unity build — `src/unity.c`
 includes every other source, and the Makefile compiles only that — so the
-compiler sees the whole program at once, which is worth having under `-Oz`
-where the interpreter loop reaches into the selector and thunk layers on every
-instruction. The individual sources are still ordinary `.c` files and each still
-compiles standalone, so `gcc -c src/cpu.c` remains available when bisecting a
-warning.
+compiler sees the whole program at once, which matters because the interpreter
+loop reaches into the selector and thunk layers on every instruction. The
+individual sources are still ordinary `.c` files and each still compiles
+standalone, so `gcc -c src/cpu.c` remains available when bisecting a warning.
+
+It is built `-O3`, which is a deliberate reversal. The emulator was built `-Oz`
+for a long time, and on an 888-line dispatch switch whose every helper is a
+`static` function and whose memory accessors are `static inline` in a header,
+optimising for size cost about a third of its speed. Measured on ten generated
+turns of a Huge, packed, 16-player game:
+
+| | rate | executable |
+|---|---|---|
+| `-Oz` | 49.4 M instructions/s | 148 KB |
+| `-Os` | 50.5 M/s | 150 KB |
+| `-O2` | 74.6 M/s | 267 KB |
+| `-O3` | 82.9 M/s | 343 KB |
+
+All four generate byte-identical turn files, so that is one emulator built four
+ways rather than four emulators. `-O3` costs 195 KB over `-Oz` — about a sixth
+of the packed one-file build — and buys 1.68x. `-O2` is the smaller binary for
+most of the gain, if that trade is ever wanted.
 
 `make onefile` builds `StarsVM-pack.exe` and runs it to produce the single-file
 build described above. Like the fuzzer it is a separate program, so neither the
