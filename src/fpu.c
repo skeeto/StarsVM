@@ -208,11 +208,18 @@ static long double host_unary(Cpu *c, int code, long double a, long double b,
         __asm__ volatile ("fldt %1\n\tfchs\n\tfnstsw %0\n\tfstpt %1"
                           : "=a"(sw), "+m"(r) : : "st");
         break;
-    case U_TAN:   /* FPTAN: replaces ST with tan(ST) then pushes 1.0 */
-        __asm__ volatile ("fldcw %3\n\tfldt %1\n\tfptan\n\tfnstsw %0\n\t"
-                          "fstpt %2\n\tfstpt %1"
-                          : "=a"(sw), "+m"(r), "=m"(*second) : "m"(cw) : "st", "st(1)");
-        *pushed = 1;
+    case U_TAN:
+        /* FPTAN replaces ST with tan(ST) and pushes 1.0 - but only if the
+           argument is in range.  Outside it, C2 comes back set and the stack is
+           left exactly as it was.  Popping twice regardless therefore underflowed
+           the host's own stack and returned the indefinite, so the second pop is
+           conditional and the caller is told whether a push happened. */
+        __asm__ volatile ("fldcw %3\n\tfldt %1\n\tfptan\n\tfnstsw %%ax\n\t"
+                          "testb $0x04, %%ah\n\tjnz 1f\n\tfstpt %2\n\t"
+                          "1:\tfstpt %1"
+                          : "=a"(sw), "+m"(r), "=m"(*second) : "m"(cw)
+                          : "st", "st(1)", "cc");
+        *pushed = (sw & SW_C2) == 0;
         break;
     case U_ATAN:  /* FPATAN: atan(ST(1)/ST(0)), pops one */
         __asm__ volatile ("fldcw %3\n\tfldt %2\n\tfldt %1\n\tfpatan\n\t"
@@ -267,6 +274,34 @@ static long double host_unary(Cpu *c, int code, long double a, long double b,
 }
 
 /* ------------------------------------------------------- memory load and store */
+
+/* The constants from the host's own instructions rather than from C literals.
+   Two reasons, and the fuzzer found both at once: the exact 64-bit significands
+   are the hardware's to define, and the hardware rounds them by the current
+   rounding mode, which a literal written once cannot do.  Five of the seven
+   differed in the last byte. */
+static long double host_const(uint16_t cw, int which)
+{
+    long double v;
+
+    switch (which) {
+    case 0: __asm__ volatile ("fldcw %1\n\tfld1\n\tfstpt %0"
+                              : "=m"(v) : "m"(cw) : "st"); break;
+    case 1: __asm__ volatile ("fldcw %1\n\tfldl2t\n\tfstpt %0"
+                              : "=m"(v) : "m"(cw) : "st"); break;
+    case 2: __asm__ volatile ("fldcw %1\n\tfldl2e\n\tfstpt %0"
+                              : "=m"(v) : "m"(cw) : "st"); break;
+    case 3: __asm__ volatile ("fldcw %1\n\tfldpi\n\tfstpt %0"
+                              : "=m"(v) : "m"(cw) : "st"); break;
+    case 4: __asm__ volatile ("fldcw %1\n\tfldlg2\n\tfstpt %0"
+                              : "=m"(v) : "m"(cw) : "st"); break;
+    case 5: __asm__ volatile ("fldcw %1\n\tfldln2\n\tfstpt %0"
+                              : "=m"(v) : "m"(cw) : "st"); break;
+    default: __asm__ volatile ("fldcw %1\n\tfldz\n\tfstpt %0"
+                              : "=m"(v) : "m"(cw) : "st"); break;
+    }
+    return v;
+}
 
 static long double load_f32(uint16_t sel, uint16_t off)
 {
@@ -541,7 +576,10 @@ int fpu_exec(Cpu *c, uint8_t op, uint8_t modrm, int is_reg,
             return 1;
         }
         case 2: if (rm == 0) return 1; return 0;                      /* FNOP      */
-        case 3: fpu_discard(c); return 1;                             /* FSTP ST(i)*/
+        /* Copy then pop, which is what DD /3 below has always done.  This
+           form only popped, so `fstp st(2)` discarded ST(0) and left ST(2)
+           alone. */
+        case 3: ld_set(c, rm, ld_get(c, 0)); fpu_discard(c); return 1; /* FSTP ST(i)*/
         case 4: {
             int pushed;
             long double a = ld_get(c, 0), second = 0;
@@ -554,16 +592,10 @@ int fpu_exec(Cpu *c, uint8_t op, uint8_t modrm, int is_reg,
             }
         }
         case 5:                                                        /* constants */
-            switch (rm) {
-            case 0: fpu_push(c, 1.0L); return 1;                       /* FLD1     */
-            case 1: fpu_push(c, 3.3219280948873623478703194294894L); return 1; /* L2T */
-            case 2: fpu_push(c, 1.4426950408889634073599246810019L); return 1; /* L2E */
-            case 3: fpu_push(c, 3.1415926535897932384626433832795L); return 1; /* PI  */
-            case 4: fpu_push(c, 0.3010299956639811952137388947245L); return 1; /* LG2 */
-            case 5: fpu_push(c, 0.6931471805599453094172321214582L); return 1; /* LN2 */
-            case 6: fpu_push(c, 0.0L); return 1;                       /* FLDZ     */
-            default: return 0;
-            }
+            /* FLD1 L2T L2E PI LG2 LN2 Z, in encoding order. */
+            if (rm > 6) return 0;
+            fpu_push(c, host_const(cw, rm));
+            return 1;
         case 6: {                                                      /* FPxx     */
             int pushed = 0;
             long double a = ld_get(c, 0), second = 0, r;
@@ -573,7 +605,9 @@ int fpu_exec(Cpu *c, uint8_t op, uint8_t modrm, int is_reg,
             case 1: r = host_unary(c, U_YL2X, a, ld_get(c, 1), &second, &pushed);
                     fpu_discard(c); ld_set(c, 0, r); return 1;
             case 2: r = host_unary(c, U_TAN, a, 0, &second, &pushed);
-                    ld_set(c, 0, r); fpu_push(c, second); return 1;
+                    ld_set(c, 0, r);
+                    if (pushed) fpu_push(c, second);   /* not when out of range */
+                    return 1;
             case 3: r = host_unary(c, U_ATAN, a, ld_get(c, 1), &second, &pushed);
                     fpu_discard(c); ld_set(c, 0, r); return 1;
             case 4: r = host_unary(c, U_XTRACT, a, 0, &second, &pushed);
