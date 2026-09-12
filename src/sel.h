@@ -41,6 +41,14 @@ typedef struct {
 extern uint8_t *sel_arena;
 extern SelDesc  sel_tab[SEL_SLOTS];
 
+/* Nonzero where sel_tab[i].kind is not SK_FREE.  It says nothing sel_tab does
+   not, and exists only so the check in sel_ptr - which every guest read and
+   write pays - touches one byte in a 4 KB array rather than one field of an
+   8-byte descriptor in a 32 KB one.  Around 45 selectors are live at a time, so
+   in this form they share a single cache line.  Maintained by sel_alloc and
+   sel_free, which are the only two places kind changes. */
+extern uint8_t  sel_live[SEL_SLOTS];
+
 int      sel_init(void);
 void     sel_shutdown(void);
 
@@ -55,13 +63,15 @@ void sel_report_fault(uint16_t sel, uint16_t off, const char *what);
 
 /* Translate a far pointer.  Never returns NULL: an invalid selector resolves to
    a quarantined guard page slot so a bad access is loud but contained. */
+/* Out of line and out of the way: having the report inside sel_ptr was what
+   gave the fast path a stack frame.  Index 0 is never allocated, so returning
+   the guard slot keeps a bad access contained. */
+uint8_t *sel_bad(uint16_t sel, uint16_t off);
+
 static inline uint8_t *sel_ptr(uint16_t sel, uint16_t off)
 {
     unsigned i = SEL_INDEX(sel);
-    if (i == 0 || i >= SEL_SLOTS || sel_tab[i].kind == SK_FREE) {
-        sel_report_fault(sel, off, "translate");
-        return sel_arena; /* index 0 is never allocated; reads there are zero */
-    }
+    if (i >= SEL_SLOTS || !sel_live[i]) return sel_bad(sel, off);
     return sel_arena + ((size_t)i << 16) + off;
 }
 

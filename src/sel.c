@@ -6,6 +6,7 @@
 
 uint8_t *sel_arena;
 SelDesc  sel_tab[SEL_SLOTS];
+uint8_t  sel_live[SEL_SLOTS];   /* index 0 stays zero, which is the null check */
 int      sel_fault;
 
 static unsigned sel_next = 1;   /* index 0 stays permanently invalid */
@@ -74,6 +75,7 @@ uint16_t sel_alloc(uint32_t size, int kind)
         d->kind  = (uint8_t)kind;
         d->count = (uint8_t)count;
         d->head  = (uint8_t)(i == 0);
+        sel_live[start + i] = 1;
     }
     if (start + count > sel_next) sel_next = start + count;
     return SEL_MAKE(start);
@@ -85,9 +87,17 @@ void sel_free(uint16_t sel)
     if (i == 0 || i >= SEL_SLOTS || sel_tab[i].kind == SK_FREE) return;
     n = sel_tab[i].count ? sel_tab[i].count : 1;
     VirtualFree(sel_arena + ((size_t)i << 16), (size_t)n * SEL_SLOT, MEM_DECOMMIT);
-    for (k = 0; k < n && i + k < SEL_SLOTS; k++)
+    for (k = 0; k < n && i + k < SEL_SLOTS; k++) {
         memset(&sel_tab[i + k], 0, sizeof sel_tab[0]);
+        sel_live[i + k] = 0;
+    }
     if (i < sel_next) sel_next = i;
+}
+
+uint8_t *sel_bad(uint16_t sel, uint16_t off)
+{
+    sel_report_fault(sel, off, "translate");
+    return sel_arena;
 }
 
 void sel_report_fault(uint16_t sel, uint16_t off, const char *what)
