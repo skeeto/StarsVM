@@ -232,17 +232,33 @@ uint32_t call16_wndproc(uint32_t proc, uint16_t ax,
         memcpy(extra, sel_ptr(extra_sel, extra_off), extralen);
 
     if (r != CPU_RETURN) {
-        if (!cpu_stop_latched())
-            log_msg("*** guest callback %04X:%04X stopped: %s at %04X:%04X"
-                    " (op %02X %02X)\n",
-                    SEGPTR_SEL(proc), SEGPTR_OFF(proc), cpu_state_name(r),
-                    c->bad_cs, c->bad_ip, c->bad_op, c->bad_op2);
+        /* A halt is the program saying it is finished, so it gets a plain line:
+           the location and opcode below belong to a fault and would be read as
+           one, and for a halt they are zero anyway. */
+        if (!cpu_stop_latched()) {
+            if (r == CPU_HALT)
+                log_msg("guest callback %04X:%04X ended the program\n",
+                        SEGPTR_SEL(proc), SEGPTR_OFF(proc));
+            else
+                log_msg("*** guest callback %04X:%04X stopped: %s at %04X:%04X"
+                        " (op %02X %02X)\n",
+                        SEGPTR_SEL(proc), SEGPTR_OFF(proc), cpu_state_name(r),
+                        c->bad_cs, c->bad_ip, c->bad_op, c->bad_op2);
+        }
         /* The host frames between here and the interpreter - DispatchMessage, a
-           modal dialog loop - have no way to carry a failure back out, and
+           modal dialog loop - have no way to carry a stop back out, and
            returning 0 to Win32 as though nothing happened is exactly how the
            serial-number dialog vanished without trace.  Latch it instead, so no
-           further guest instruction runs and one report comes out at the top. */
-        if (r == CPU_NOAPI || r == CPU_BADOP || r == CPU_FAULT)
+           further guest instruction runs and one report comes out at the top.
+
+           A halt is latched for the same reason, and its absence is how -x
+           hung: the guest asks to exit Windows from inside a window procedure,
+           we halt, and the restore below puts CPU_RUNNING back - leaving the
+           process pumping messages for a program that had already ended.  Every
+           halt means the program is over, whichever way it said so (DOS
+           terminate, FatalExit, FatalAppExit, ExitWindows, HLT), so there is no
+           such thing as one to resume from. */
+        if (r == CPU_HALT || r == CPU_NOAPI || r == CPU_BADOP || r == CPU_FAULT)
             cpu_stop_latch(c, r);
         result = 0;
     } else {
