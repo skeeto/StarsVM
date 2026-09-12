@@ -319,19 +319,23 @@ static uint32_t k_MakeProcInstance(Cpu *c, Args *a)
         thunk_seg = sel_alloc(0x1000, SK_CODE);
         if (!thunk_seg) return proc;
     }
-    if (thunk_next + 6 > 0x1000) {
+    /* Eight bytes: mov ax,imm16 then jmp far.  The guard and the advance both
+       said six, which is what the stub was before the far jump joined it, so
+       the last one in the arena wrote two bytes past the 0x1000 asked for -
+       harmless only because sel_alloc commits a whole 64 KB slot, and only
+       reachable after 512 stubs, which is far more than the game makes. */
+    if (thunk_next + 8 > 0x1000) {
         log_msg("MakeProcInstance: out of thunk slots\n");
         return proc;
     }
     off = thunk_next;
-    thunk_next = (uint16_t)(thunk_next + 6);
+    thunk_next = (uint16_t)(off + 8);
 
     sel_wr8 (thunk_seg, off, 0xB8);                       /* mov ax, inst   */
     sel_wr16(thunk_seg, (uint16_t)(off + 1), inst ? inst : task.hinstance);
     sel_wr8 (thunk_seg, (uint16_t)(off + 3), 0xEA);       /* jmp far proc   */
     sel_wr16(thunk_seg, (uint16_t)(off + 4), SEGPTR_OFF(proc));
     sel_wr16(thunk_seg, (uint16_t)(off + 6), SEGPTR_SEL(proc));
-    thunk_next = (uint16_t)(off + 8);
     return SEGPTR(thunk_seg, off);
 }
 
