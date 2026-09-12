@@ -62,12 +62,26 @@ static void set_tag(Cpu *c, int p, int t)
     c->fpu_tw = (uint16_t)((c->fpu_tw & ~(3u << (p * 2))) | ((unsigned)t << (p * 2)));
 }
 
-/* Read ST(i) into a host long double. */
+/* True for +0 and -0: a zero exponent with a zero significand.  A denormal has
+   the zero exponent but a significand, so it is correctly not zero here.  This
+   replaces comparing against 0.0L, which pulled the value back into the FPU
+   just to ask. */
+static int f80_zero(const uint8_t *b)
+{
+    int i;
+
+    if ((((unsigned)b[9] << 8 | b[8]) & 0x7FFFu) != 0) return 0;
+    for (i = 0; i < 8; i++) if (b[i]) return 0;
+    return 1;
+}
+
+/* Read ST(i) into a host long double.  F80 already holds the host's 80-bit
+   layout, so fldt/fstpt here was an expensive way to copy ten bytes. */
 static long double ld_get(Cpu *c, int i)
 {
-    long double v;
-    const uint8_t *src = c->st[phys(c, i)].b;
-    __asm__ volatile ("fldt %1\n\tfstpt %0" : "=m"(v) : "m"(*src) : "st");
+    long double v = 0;
+
+    memcpy(&v, c->st[phys(c, i)].b, 10);
     return v;
 }
 
@@ -76,8 +90,9 @@ static void ld_set(Cpu *c, int i, long double v)
 {
     int p = phys(c, i);
     uint8_t *dst = c->st[p].b;
-    __asm__ volatile ("fldt %1\n\tfstpt %0" : "=m"(*dst) : "m"(v) : "st");
-    set_tag(c, p, (v == 0.0L) ? TAG_ZERO : TAG_VALID);
+
+    memcpy(dst, &v, 10);
+    set_tag(c, p, f80_zero(dst) ? TAG_ZERO : TAG_VALID);
 }
 
 static void fpu_push(Cpu *c, long double v)
@@ -261,12 +276,38 @@ static long double load_f32(uint16_t sel, uint16_t off)
     return (long double)f;
 }
 
+/* One translation instead of eight or ten.  An access that runs off the end of
+   a selector keeps the byte path, where the offset wraps inside the selector as
+   16-bit addressing does. */
+static void fpu_mem_read(uint16_t sel, uint16_t off, uint8_t *dst, unsigned n)
+{
+    unsigned i;
+
+    if ((uint32_t)off + n <= 0x10000u) {
+        memcpy(dst, sel_ptr(sel, off), n);
+        return;
+    }
+    for (i = 0; i < n; i++) dst[i] = sel_rd8(sel, (uint16_t)(off + i));
+}
+
+static void fpu_mem_write(uint16_t sel, uint16_t off, const uint8_t *src,
+                          unsigned n)
+{
+    unsigned i;
+
+    if ((uint32_t)off + n <= 0x10000u) {
+        memcpy(sel_ptr(sel, off), src, n);
+        return;
+    }
+    for (i = 0; i < n; i++) sel_wr8(sel, (uint16_t)(off + i), src[i]);
+}
+
 static long double load_f64(uint16_t sel, uint16_t off)
 {
     double d;
     uint8_t b[8];
-    int i;
-    for (i = 0; i < 8; i++) b[i] = sel_rd8(sel, (uint16_t)(off + i));
+
+    fpu_mem_read(sel, off, b, 8);
     memcpy(&d, b, 8);
     return (long double)d;
 }
@@ -274,10 +315,10 @@ static long double load_f64(uint16_t sel, uint16_t off)
 static long double load_f80(uint16_t sel, uint16_t off)
 {
     uint8_t b[10];
-    long double v;
-    int i;
-    for (i = 0; i < 10; i++) b[i] = sel_rd8(sel, (uint16_t)(off + i));
-    __asm__ volatile ("fldt %1\n\tfstpt %0" : "=m"(v) : "m"(*b) : "st");
+    long double v = 0;
+
+    fpu_mem_read(sel, off, b, 10);
+    memcpy(&v, b, 10);
     return v;
 }
 
@@ -295,19 +336,18 @@ static void store_f64(uint16_t sel, uint16_t off, long double v, uint16_t cw)
 {
     double d;
     uint8_t b[8];
-    int i;
     __asm__ volatile ("fldcw %2\n\tfldt %1\n\tfstpl %0"
                       : "=m"(d) : "m"(v), "m"(cw) : "st");
     memcpy(b, &d, 8);
-    for (i = 0; i < 8; i++) sel_wr8(sel, (uint16_t)(off + i), b[i]);
+    fpu_mem_write(sel, off, b, 8);
 }
 
 static void store_f80(uint16_t sel, uint16_t off, long double v)
 {
     uint8_t b[10];
-    int i;
-    __asm__ volatile ("fldt %1\n\tfstpt %0" : "=m"(*b) : "m"(v) : "st");
-    for (i = 0; i < 10; i++) sel_wr8(sel, (uint16_t)(off + i), b[i]);
+
+    memcpy(b, &v, 10);
+    fpu_mem_write(sel, off, b, 10);
 }
 
 /* Integer conversions go through the host too, so the guest rounding mode in the
