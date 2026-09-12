@@ -36,6 +36,35 @@
  * decimal adjusts.  That is where flag bugs live.  Memory operands, string
  * operations and control transfer are not covered here - they are exercised by
  * running the game and by the targeted tests in tools/.
+ *
+ * The x87 register forms are covered too, and the oracle there is a different
+ * shape.  fpu.c does not implement x87 arithmetic - it hands the operands to
+ * the host's real FPU and stores the result back - so comparing results is
+ * nearly tautological, and that is the good news: both sides are the same
+ * silicon, so rounding, precision and the transcendentals agree by
+ * construction, with no tolerance to invent.  What is genuinely under test is
+ * everything around the arithmetic: operand order (fsub against fsubr is the
+ * classic bug), the register stack and TOP, the tag word, the condition codes,
+ * the control word reaching the host, and the decode of eight escape opcodes.
+ * FRSTOR and FNSAVE in the trampoline move the whole x87 state at once, which
+ * is the only way to set TOP and the tag word arbitrarily.
+ *
+ * Three things are deliberately outside that comparison, because fpu.c does not
+ * model them and a failure would say nothing new:
+ *
+ *  - the exception flags, SF, ES and B.  Nothing issues fnclex on the host and
+ *    fpu.c assigns the host status word rather than or-ing it, so those bits
+ *    are the host's own accumulated noise.
+ *  - the tag word beyond empty against live.  TAG_SPEC is never written, so
+ *    NaNs, infinities and denormals are all tagged valid.
+ *  - stack underflow.  fpu_discard never checks the tag, so popping an empty
+ *    register silently rotates TOP; the generated state keeps four registers
+ *    live and four empty so no single instruction can reach either end.
+ *
+ * Only encodings fpu.c implements are generated: an unimplemented one stops the
+ * interpreter, which would be reported as a failure rather than as the gap it
+ * is.  Absent, if ever wanted: FPREM1, FSINCOS, FUCOMPP, FSAVE/FRSTOR,
+ * FBLD/FBSTP, FISTTP, DC /2 /3, DD /1 /6 /7, DE /2, and all of DF but E0.
  */
 
 #include "cpu.h"
@@ -53,6 +82,16 @@
    the host) and IF cannot be changed from user mode. */
 #define CMP_FLAGS (F_CF | F_PF | F_AF | F_ZF | F_SF | F_OF | F_DF)
 
+/* An FNSAVE image, and where the parts we care about sit in it.  Registers are
+   stored ST(0) first - top-relative, not physical - while the tag word is in
+   physical order.  That asymmetry is the hardware's, and honouring it is what
+   makes the TOP mapping testable rather than cancelled out. */
+#define FPU_IMG    108
+#define FPU_O_CW     0
+#define FPU_O_SW     4
+#define FPU_O_TW     8
+#define FPU_O_ST    28
+
 /* The whole oracle state in one block, because the 64-bit trampoline reaches
    all of it through a single base register - see eref() - and one base means
    one address to materialise rather than one per access.  The flag words are
@@ -65,6 +104,13 @@ struct fzstate {
     uint32_t out_r[8];
     uint64_t out_flags;
     uint64_t saved_sp;
+    /* FNSAVE/FRSTOR images.  108 bytes is the 32-bit protected-mode layout,
+       which is what the trampoline runs in either mode: control word at 0,
+       status at 4, tag at 8, then four words of instruction and operand
+       pointers we do not model, then the eight registers at 28.  Only the
+       named fields are ever compared. */
+    uint8_t  in_fpu[FPU_IMG];
+    uint8_t  out_fpu[FPU_IMG];
 };
 static struct fzstate fz;
 
@@ -165,6 +211,9 @@ static int tramp_build(unsigned insn_max)
     eref_sp(0x89, offsetof(struct fzstate, saved_sp));
 
     for (i = 0; i < 7; i++) eref(0x8B, gpr[i], FZ_IN_R(gpr[i]));
+    /* The whole x87 state in one instruction.  Before the flags, because
+       FRSTOR does not touch EFLAGS but the order reads better this way. */
+    eref(0xDD, 4, offsetof(struct fzstate, in_fpu));      /* frstor [in_fpu] */
     eref(0xFF, 6, offsetof(struct fzstate, in_flags));   /* push [in_flags] */
     e8(0x9D);                                            /* popf            */
 
@@ -174,6 +223,9 @@ static int tramp_build(unsigned insn_max)
 
     e8(0x9C);                                            /* pushf           */
     eref(0x8F, 0, offsetof(struct fzstate, out_flags));  /* pop [out_flags] */
+    /* FNSAVE also reinitialises the FPU, which is the tidy thing to leave
+       behind: the emulator's own host x87 state is not ours to disturb. */
+    eref(0xDD, 6, offsetof(struct fzstate, out_fpu));     /* fnsave [out_fpu] */
     for (i = 0; i < 7; i++) eref(0x89, gpr[i], FZ_OUT_R(gpr[i]));
     /* The payload may have been STD, and both ABIs guarantee DF is clear on
        entry to and return from a function.  Leaving it set makes the compiler's
@@ -270,6 +322,186 @@ static uint32_t rnd_value(void)
    destroy it. */
 static int rnd_reg(void) { int r = (int)rnd_below(7); return r >= 4 ? r + 1 : r; }
 
+/* ---- x87 ----------------------------------------------------------------
+ *
+ * The generated state is described logically - ST(0) through ST(7) and a TOP -
+ * and both sides are built from that one description.  The logical-to-physical
+ * mapping is spelled out here rather than borrowed from fpu.c's phys(), so a
+ * bug in phys() cannot cancel itself out by being used on both sides.
+ *
+ * Four registers are live and four are empty, whatever TOP is.  That is enough
+ * for any single instruction to push once or pop twice without reaching an end
+ * of the stack: overflow is only approximated by fpu.c and underflow is not
+ * modelled at all, so neither belongs in a comparison yet.
+ */
+#define FZ_LIVE 4
+
+struct fpstate {
+    uint8_t  st[8][10];         /* ST(0) first, not physical */
+    uint8_t  tag[8];            /* ditto, TAG_* values       */
+    unsigned top;
+    uint16_t cw;
+};
+
+/* An interesting 80-bit value.  Extremes and special encodings far more often
+   than noise, for the same reason rnd_value prefers them. */
+static void f80_make(uint8_t *b)
+{
+    static const struct { uint16_t se; uint64_t m; } pat[] = {
+        { 0x0000, 0x0000000000000000ull },   /* +0            */
+        { 0x8000, 0x0000000000000000ull },   /* -0            */
+        { 0x3FFF, 0x8000000000000000ull },   /* +1            */
+        { 0xBFFF, 0x8000000000000000ull },   /* -1            */
+        { 0x4000, 0x8000000000000000ull },   /* +2            */
+        { 0x3FFE, 0x8000000000000000ull },   /* +0.5          */
+        { 0x4000, 0xC90FDAA22168C235ull },   /* pi            */
+        { 0x7FFF, 0x8000000000000000ull },   /* +inf          */
+        { 0xFFFF, 0x8000000000000000ull },   /* -inf          */
+        { 0x7FFF, 0xC000000000000000ull },   /* QNaN          */
+        { 0x7FFF, 0xA000000000000000ull },   /* SNaN          */
+        { 0x0000, 0x0000000000000001ull },   /* denormal      */
+        { 0x7FFE, 0xFFFFFFFFFFFFFFFFull },   /* max normal    */
+        { 0x0001, 0x8000000000000000ull },   /* min normal    */
+        { 0x4005, 0xFA00000000000000ull },   /* 125           */
+        { 0x400C, 0x9C40000000000000ull },   /* 10000         */
+    };
+    uint64_t m;
+    uint16_t se;
+    int i;
+
+    if (rnd_below(8) == 0) {                  /* sometimes just noise */
+        se = (uint16_t)rnd();
+        m  = ((uint64_t)rnd() << 32) | rnd();
+    } else {
+        unsigned k = rnd_below(sizeof pat / sizeof *pat);
+        se = pat[k].se;
+        m  = pat[k].m;
+    }
+    for (i = 0; i < 8; i++) b[i] = (uint8_t)(m >> (i * 8));
+    b[8] = (uint8_t)se;
+    b[9] = (uint8_t)(se >> 8);
+}
+
+static void fp_gen(struct fpstate *s)
+{
+    unsigned i;
+
+    s->top = rnd_below(8);
+    /* Rounding and precision vary; the six exception masks never come off.
+       An unmasked control word does not fail a round - fpu.c hands it to the
+       real host FPU, which then faults inside this process. */
+    s->cw = (uint16_t)(0x007Fu | (rnd_below(4) << 8) | (rnd_below(4) << 10));
+    for (i = 0; i < 8; i++) {
+        if (i < FZ_LIVE) {
+            f80_make(s->st[i]);
+            s->tag[i] = 0;                    /* TAG_VALID; fpu.c retags */
+        } else {
+            memset(s->st[i], 0, 10);
+            s->tag[i] = 3;                    /* TAG_EMPTY */
+        }
+    }
+}
+
+/* The FNSAVE image the oracle is seeded from. */
+static void fp_to_image(const struct fpstate *s, uint8_t *img)
+{
+    unsigned i;
+
+    memset(img, 0, FPU_IMG);
+    img[FPU_O_CW] = (uint8_t)s->cw;
+    img[FPU_O_CW + 1] = (uint8_t)(s->cw >> 8);
+    img[FPU_O_SW] = 0;
+    img[FPU_O_SW + 1] = (uint8_t)(s->top << 3);        /* TOP is bits 11-13 */
+    {
+        uint16_t tw = 0;
+        for (i = 0; i < 8; i++)
+            tw |= (uint16_t)((unsigned)s->tag[i] << (((s->top + i) & 7) * 2));
+        img[FPU_O_TW] = (uint8_t)tw;
+        img[FPU_O_TW + 1] = (uint8_t)(tw >> 8);
+    }
+    for (i = 0; i < 8; i++)
+        memcpy(img + FPU_O_ST + i * 10, s->st[i], 10);
+}
+
+/* The same state, into the interpreter. */
+static void fp_to_cpu(const struct fpstate *s, Cpu *c)
+{
+    unsigned i;
+
+    c->fpu_cw = s->cw;
+    c->fpu_sw = 0;
+    c->fpu_top = (uint8_t)s->top;
+    c->fpu_tw = 0;
+    for (i = 0; i < 8; i++) {
+        unsigned p = (s->top + i) & 7;
+        memcpy(c->st[p].b, s->st[i], 10);
+        c->fpu_tw = (uint16_t)(c->fpu_tw | ((unsigned)s->tag[i] << (p * 2)));
+    }
+}
+
+/* The condition codes, which is what the guest branches on and what the host
+   genuinely decides.  The exception flags are deliberately absent: nothing
+   issues fnclex on the host, and fpu.c assigns the host status word rather than
+   or-ing it, so those bits are the host's own accumulated noise rather than
+   anything the guest computed. */
+#define FP_CC 0x4700u
+
+static uint16_t img16(const uint8_t *img, unsigned off)
+{
+    return (uint16_t)(img[off] | ((unsigned)img[off + 1] << 8));
+}
+
+/* Compare the oracle's FNSAVE image against the interpreter, both read as
+   ST(0)-first so that TOP is part of what is being checked rather than part of
+   how it is read. */
+static int fp_compare(const uint8_t *img, Cpu *c, const char *what)
+{
+    unsigned htop = (img16(img, FPU_O_SW) >> 11) & 7;
+    unsigned gtop = c->fpu_top;
+    uint16_t htw = img16(img, FPU_O_TW), hcw = img16(img, FPU_O_CW);
+    uint16_t hsw = img16(img, FPU_O_SW);
+    uint16_t gsw = (uint16_t)((c->fpu_sw & ~0x3800u) | (gtop << 11));
+    int bad = 0, i;
+
+    if (htop != gtop) {
+        log_msg("fuzz: %s top: host %u, emu %u\n", what, htop, gtop);
+        bad = 1;
+    }
+    if (hcw != c->fpu_cw) {
+        log_msg("fuzz: %s cw: host %04X, emu %04X\n", what, hcw, c->fpu_cw);
+        bad = 1;
+    }
+    if ((hsw ^ gsw) & FP_CC) {
+        log_msg("fuzz: %s condition codes: host %04X, emu %04X\n",
+                what, hsw & FP_CC, gsw & FP_CC);
+        bad = 1;
+    }
+    for (i = 0; i < 8; i++) {
+        unsigned hp = (htop + (unsigned)i) & 7, gp = (gtop + (unsigned)i) & 7;
+        int hempty = ((htw >> (hp * 2)) & 3) == 3;
+        int gempty = ((c->fpu_tw >> (gp * 2)) & 3) == 3;
+        /* Only empty against non-empty: fpu.c never writes TAG_SPEC, so the
+           valid/zero/special distinction is not one it can be held to yet. */
+        if (hempty != gempty) {
+            log_msg("fuzz: %s st(%d) %s on the host, %s in the emu\n", what, i,
+                    hempty ? "empty" : "live", gempty ? "empty" : "live");
+            bad = 1;
+            continue;
+        }
+        if (hempty) continue;
+        if (memcmp(img + FPU_O_ST + (unsigned)i * 10, c->st[gp].b, 10)) {
+            int k;
+            log_msg("fuzz: %s st(%d): host", what, i);
+            for (k = 9; k >= 0; k--) log_msg(" %02X", img[FPU_O_ST + i * 10 + k]);
+            log_msg(", emu");
+            for (k = 9; k >= 0; k--) log_msg(" %02X", c->st[gp].b[k]);
+            log_msg("\n");
+            bad = 1;
+        }
+    }
+    return bad;
+}
+
 struct form {
     uint8_t  bytes[8];
     unsigned len;
@@ -280,6 +512,9 @@ struct form {
     int      want32;     /* guest operand size is 32 bits */
     uint32_t mask;       /* flags that are architecturally defined */
     unsigned cl_mod;     /* if set, force CL into [0, cl_mod) before running */
+    int      fpu;        /* an escape opcode: set up and compare x87 state,
+                            and emit no operand-size prefix on either side,
+                            since D8-DF mean the same in every mode */
     const char *what;
 };
 
@@ -298,7 +533,7 @@ static void gen(struct form *f)
     reg = size8 ? (int)rnd_below(8) : rnd_reg();
     rm  = size8 ? (int)rnd_below(8) : rnd_reg();
 
-    switch (rnd_below(18)) {
+    switch (rnd_below(19)) {
     case 0: {                                     /* ALU r/m,r and r,r/m */
         int aluop = (int)rnd_below(8);
         int dir = (int)rnd_below(2);
@@ -509,6 +744,59 @@ static void gen(struct form *f)
         f->what = "cbw/cwd/sahf/lahf/flags";
         break;
     }
+    case 17: {                                    /* x87, register forms */
+        /* Every register-form escape fpu.c implements, and only those: an
+           encoding it does not implement stops the interpreter, which the round
+           loop would report as a failure rather than as the gap it is.  The
+           gaps are listed in the header comment.
+           The second byte of a `withst` entry has the register number or-ed in;
+           only the live ones, because reading an empty register is the
+           unmodelled stack-underflow case where fpu.c returns the stored bytes
+           and the hardware returns the indefinite QNaN. */
+        static const uint8_t withst[][2] = {
+            { 0xD8, 0xC0 }, { 0xD8, 0xC8 }, { 0xD8, 0xD0 }, { 0xD8, 0xD8 },
+            { 0xD8, 0xE0 }, { 0xD8, 0xE8 }, { 0xD8, 0xF0 }, { 0xD8, 0xF8 },
+            { 0xDC, 0xC0 }, { 0xDC, 0xC8 }, { 0xDC, 0xE0 }, { 0xDC, 0xE8 },
+            { 0xDC, 0xF0 }, { 0xDC, 0xF8 },
+            { 0xDE, 0xC0 }, { 0xDE, 0xC8 }, { 0xDE, 0xE0 }, { 0xDE, 0xE8 },
+            { 0xDE, 0xF0 }, { 0xDE, 0xF8 },
+            { 0xD9, 0xC0 }, { 0xD9, 0xC8 }, { 0xD9, 0xD8 },
+            { 0xDD, 0xC0 }, { 0xDD, 0xD0 }, { 0xDD, 0xD8 },
+            { 0xDD, 0xE0 }, { 0xDD, 0xE8 },
+        };
+        static const uint8_t fixed[][2] = {
+            { 0xD9, 0xD0 },                                    /* FNOP      */
+            { 0xD9, 0xE0 }, { 0xD9, 0xE1 },                    /* FCHS FABS */
+            { 0xD9, 0xE4 }, { 0xD9, 0xE5 },                    /* FTST FXAM */
+            { 0xD9, 0xE8 }, { 0xD9, 0xE9 }, { 0xD9, 0xEA },
+            { 0xD9, 0xEB }, { 0xD9, 0xEC }, { 0xD9, 0xED },
+            { 0xD9, 0xEE },                                    /* constants */
+            { 0xD9, 0xF0 }, { 0xD9, 0xF1 }, { 0xD9, 0xF2 },
+            { 0xD9, 0xF3 }, { 0xD9, 0xF4 },
+            { 0xD9, 0xF6 }, { 0xD9, 0xF7 },                    /* FDEC/FINCSTP */
+            { 0xD9, 0xF8 }, { 0xD9, 0xF9 }, { 0xD9, 0xFA },
+            { 0xD9, 0xFC }, { 0xD9, 0xFD }, { 0xD9, 0xFE },
+            { 0xD9, 0xFF },
+            { 0xDE, 0xD9 },                                    /* FCOMPP    */
+            { 0xDF, 0xE0 },                                    /* FNSTSW AX */
+        };
+        f->fpu = 1;
+        f->want32 = 0;
+        f->len = 2;
+        if (rnd_below(2)) {
+            unsigned k = rnd_below(sizeof withst / sizeof *withst);
+            f->bytes[0] = withst[k][0];
+            f->bytes[1] = (uint8_t)(withst[k][1] | rnd_below(FZ_LIVE));
+            f->what = "x87 st(i)";
+        } else {
+            unsigned k = rnd_below(sizeof fixed / sizeof *fixed);
+            f->bytes[0] = fixed[k][0];
+            f->bytes[1] = fixed[k][1];
+            f->what = "x87 unary/const";
+        }
+        break;
+    }
+
     default: {                                    /* decimal adjust */
         static const uint8_t o[] = { 0x27, 0x2F, 0x37, 0x3F, 0xD4, 0xD5 };
         f->bytes[0] = o[rnd_below(sizeof o)];
@@ -566,7 +854,7 @@ static const char *fname(uint32_t f)
    the same table shape for what this host could not be asked to run.  Bucketing
    is by pointer: every key is a string literal from gen(), so identity is the
    cheap and exact test. */
-#define MAX_FORMS 24
+#define MAX_FORMS 40
 static long form_count[MAX_FORMS];
 static const char *form_name[MAX_FORMS];
 static long skip_count[MAX_FORMS];
@@ -601,6 +889,7 @@ static int fuzz_run(long rounds, unsigned seed)
 
     for (i = 0; i < rounds; i++) {
         struct form f;
+        struct fpstate fs;
         uint8_t guest[12], host[12];
         unsigned gl = 0, hl = 0, k;
         uint32_t seed_here = rng_state;
@@ -624,8 +913,11 @@ static int fuzz_run(long rounds, unsigned seed)
         {
             const uint8_t *hb = f.alt_len ? f.alt : f.bytes;
             unsigned hn = f.alt_len ? f.alt_len : f.len;
-            if (f.want32) guest[gl++] = 0x66;
-            else          host[hl++]  = 0x66;
+            /* D8-DF mean the same in every mode, so an escape needs no prefix
+               on either side - and would be told nothing by one. */
+            if (f.fpu)         { /* neither */ }
+            else if (f.want32) guest[gl++] = 0x66;
+            else               host[hl++]  = 0x66;
             for (k = 0; k < f.len; k++) guest[gl++] = f.bytes[k];
             for (k = 0; k < hn;    k++) host[hl++]  = hb[k];
         }
@@ -641,11 +933,14 @@ static int fuzz_run(long rounds, unsigned seed)
         /* Run natively. */
         memset(fz.out_r, 0, sizeof fz.out_r);
         fz.out_flags = 0;
+        if (f.fpu) { fp_gen(&fs); fp_to_image(&fs, fz.in_fpu); }
+        memset(fz.out_fpu, 0, sizeof fz.out_fpu);
         tramp_run(host, hl);
         hflags = (uint32_t)fz.out_flags;
 
         /* Run in the interpreter. */
         cpu_reset(c);
+        if (f.fpu) fp_to_cpu(&fs, c);
         for (k = 0; k < 8; k++) c->r32[k] = fz.in_r[k];
         c->eflags = (uint32_t)fz.in_flags;
         c->seg[S_CS] = code_sel;
@@ -688,6 +983,7 @@ static int fuzz_run(long rounds, unsigned seed)
                 bad = 1;
             }
         }
+        if (f.fpu && fp_compare(fz.out_fpu, c, f.what)) bad = 1;
         diff = (hflags ^ gflags) & f.mask;
         if (diff) {
             log_msg("fuzz: %s flags differ (%s): host %04X emu %04X\n",

@@ -20,12 +20,13 @@
  * stops.  Nothing here touches task.h, heap.h, handle.h, ne.h or res.h - there
  * is no module registry, no window, no game.
  *
- * fpu.c, thunk.c and imports.c are ballast: cpu_step needs fpu_exec,
- * thunk_dispatch and thunk_selector to link, but the fuzzer generates neither
- * escape opcodes nor control transfer, so none of them ever runs.  They are
- * linked rather than stubbed on purpose - the whole point is that the cpu.c
- * under test is byte-for-byte the cpu.c the emulator runs, and a stub is a
- * second implementation to get wrong.
+ * thunk.c and imports.c are ballast: cpu_step needs thunk_dispatch and
+ * thunk_selector to link, but the fuzzer generates no control transfer, so
+ * neither ever runs.  fpu.c used to be ballast too and is not any more - the
+ * escape opcodes are generated now, so it is as much under test as cpu.c.
+ * All of them are linked rather than stubbed on purpose: the whole point is
+ * that the code under test is byte-for-byte the code the emulator runs, and a
+ * stub is a second implementation to get wrong.
  */
 
 #include "cpu.c"
