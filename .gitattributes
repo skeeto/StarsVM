@@ -1,0 +1,14 @@
+# Everything here is LF, on every platform.
+#
+# Fourteen files had drifted to CRLF, and at least one of them for a reason
+# worth writing down: tools/genimports.py writes src/imports.inc through a
+# shell redirect, and Python's text-mode stdout on Windows translates every
+# newline it is given.  The generators now ask for LF explicitly; this is the
+# belt to that braces, so neither a checkout nor an editor nor a commit can put
+# it back.
+* text=auto eol=lf
+
+# Except what is not text.  git's own detection would get these right, but a
+# mangled PNG is a bad way to find out it was wrong.
+*.png binary
+*.ico binary

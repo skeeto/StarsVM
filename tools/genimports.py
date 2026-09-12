@@ -10,6 +10,12 @@ import os
 import re
 import sys
 
+# This writes src/imports.inc through a shell redirect, and Python's text-mode
+# stdout on Windows turns every \n into \r\n.  That is how that file - and only
+# that file, of everything generated here - came to be CRLF in a tree that is
+# otherwise LF.  Ask for LF explicitly instead.
+sys.stdout.reconfigure(newline="\n")
+
 WINE = sys.argv[1] if len(sys.argv) > 1 else os.path.expanduser("~/src/wine")
 
 # The exact ordinals stars.exe references, recovered from its relocation

@@ -102,14 +102,14 @@ def main():
     except SystemExit:
         raise
     except OSError as err:
-        with open(rc, 'w') as f:
+        with open(rc, 'w', newline='') as f:
             f.write('/* no icon: %s */\n' % err)
         print('mkicon: %s; building without an icon' % err)
         return
 
     with open(ico, 'wb') as f:
         f.write(blob)
-    with open(rc, 'w') as f:
+    with open(rc, 'w', newline='') as f:
         f.write('1 ICON "%s"\n' % ico.replace('\\', '/'))
     print('mkicon: %s -> %s (%d bytes)' % (label, ico, len(blob)))
 
