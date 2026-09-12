@@ -24,6 +24,7 @@ OBJDIR  := build/$(if $(CROSS),32,64)
 TARGET  := StarsVM.exe
 FUZZER  := StarsVM-fuzz.exe
 PACKER  := StarsVM-pack.exe
+PROF    := StarsVM-prof.exe
 ONEFILE := Stars-x86.exe
 RES     := $(OBJDIR)/StarsVM.res.o
 
@@ -46,7 +47,7 @@ ARCH     := $(if $(CROSS),32,64)
 ARCHFILE := build/arch
 $(shell mkdir -p build)
 ifneq ($(ARCH),$(shell cat $(ARCHFILE) 2>/dev/null))
-$(shell rm -f $(TARGET) $(FUZZER) $(PACKER) $(ONEFILE) && echo $(ARCH) >$(ARCHFILE))
+$(shell rm -f $(TARGET) $(FUZZER) $(PACKER) $(PROF) $(ONEFILE) && echo $(ARCH) >$(ARCHFILE))
 endif
 
 # A unity build: src/unity.c includes every other source, so the compiler sees
@@ -62,9 +63,10 @@ SRC  := $(filter-out $(SRCDIR)/unity%.c,$(wildcard $(SRCDIR)/*.c))
 OBJ  := $(OBJDIR)/unity.o
 FOBJ := $(OBJDIR)/unity_fuzz.o
 POBJ := $(OBJDIR)/unity_pack.o
-DEP  := $(OBJ:.o=.d) $(FOBJ:.o=.d) $(POBJ:.o=.d)
+ROBJ := $(OBJDIR)/unity_prof.o
+DEP  := $(OBJ:.o=.d) $(FOBJ:.o=.d) $(POBJ:.o=.d) $(ROBJ:.o=.d)
 
-.PHONY: all clean imports fuzz onefile
+.PHONY: all clean imports fuzz onefile prof
 
 all: $(TARGET)
 
@@ -93,6 +95,10 @@ $(FOBJ): $(SRCDIR)/unity_fuzz.c $(SRC) GNUmakefile | $(OBJDIR)
 $(POBJ): $(SRCDIR)/unity_pack.c $(SRC) GNUmakefile | $(OBJDIR)
 	$(CC) $(CFLAGS) -c -o $@ $<
 
+# unity_prof.c includes unity.c, so it depends on it as well as on the sources.
+$(ROBJ): $(SRCDIR)/unity_prof.c $(SRCDIR)/unity.c $(SRC) GNUmakefile | $(OBJDIR)
+	$(CC) $(CFLAGS) -c -o $@ $<
+
 # Console programs, so their output needs no --console, and unstripped, because
 # a failure in either is exactly when symbols are wanted.  Neither is part of
 # the emulator: see the header of the unity file each is built from.
@@ -101,6 +107,11 @@ $(FUZZER): $(FOBJ)
 
 $(PACKER): $(POBJ)
 	$(CC) $(CFLAGS) -mconsole -o $@ $(POBJ) -lm
+
+# The emulator again, counters on.  It links what the emulator links, being the
+# same program, and it is a console binary so the report needs no --console.
+$(PROF): $(ROBJ) $(RES)
+	$(CC) $(CFLAGS) -mconsole -o $@ $(ROBJ) $(RES) $(LDLIBS)
 
 $(OBJDIR):
 	mkdir -p $(OBJDIR)
@@ -112,6 +123,8 @@ imports:
 fuzz: $(FUZZER)
 	./$(FUZZER)
 
+prof: $(PROF)
+
 # One self-contained executable: the emulator with the game compressed and
 # appended.  Needs the game, like the icon step does, and says so rather than
 # producing something that cannot run.
@@ -120,7 +133,7 @@ onefile: $(TARGET) $(PACKER)
 	./$(PACKER) stars.exe $(ONEFILE) $(TARGET)
 
 clean:
-	rm -rf build $(TARGET) $(FUZZER) $(PACKER) $(ONEFILE) \
+	rm -rf build $(TARGET) $(FUZZER) $(PACKER) $(PROF) $(ONEFILE) \
 	       StarsVM.ico StarsVM_icon.rc
 
 -include $(DEP)

@@ -57,6 +57,7 @@
 #include "msg16.c"
 #include "ne.c"
 #include "nedump.c"
+#include "prof.c"
 #include "resobj.c"
 #include "sel.c"
 #include "task.c"

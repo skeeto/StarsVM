@@ -9,6 +9,7 @@
 #include "task.h"
 #include "audio.h"
 #include "hostclock.h"
+#include "prof.h"
 
 #include <stdio.h>
 #include <string.h>
@@ -387,6 +388,7 @@ int main(int argc, char **argv)
             cpu.seg[S_CS], (unsigned)cpu.eip, cpu.seg[S_SS],
             reg16(&cpu, R_SP), cpu.seg[S_DS]);
 
+    prof_begin();
     fpu_host_enter();
     QueryPerformanceFrequency(&qfreq);
     QueryPerformanceCounter(&qt0);
@@ -416,6 +418,7 @@ int main(int argc, char **argv)
                        (double)qfreq.QuadPart);
     }
     fpu_host_leave();
+    prof_report();
     audio_shutdown();
 
     if (cpu.state == CPU_NOAPI) {

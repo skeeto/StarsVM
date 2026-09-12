@@ -10,6 +10,7 @@
  */
 
 #include "cpu.h"
+#include "prof.h"
 #include "sel.h"
 #include "log.h"
 #include "fpu.h"
@@ -590,6 +591,7 @@ int cpu_stop_latched(void) { return latched; }
 int cpu_step(Cpu *c)
 {
     uint8_t op;
+    uint16_t ip0;                  /* first byte, before any prefix            */
     int osize = 2, asize = 0;      /* operand size in bytes; asize: 32-bit addr */
     int rep = 0;                   /* 0 none, 0xF3 repe/rep, 0xF2 repne        */
 
@@ -616,6 +618,7 @@ int cpu_step(Cpu *c)
     }
 
     /* Prefixes. */
+    ip0 = ip_of(c);
     for (;;) {
         op = fetch8(c);
         switch (op) {
@@ -634,6 +637,7 @@ int cpu_step(Cpu *c)
         }
         break;
     }
+    prof_op(c->seg[S_CS], ip0, op);
 
     switch (op) {
 
@@ -1204,6 +1208,7 @@ int cpu_step(Cpu *c)
         uint16_t src_sel = seg_for(c, S_DS);
         uint16_t dst_sel = c->seg[S_ES];          /* ES is not overridable */
         uint32_t count = rep ? (asize ? c->r32[R_CX] : reg16(c, R_CX)) : 1;
+        uint32_t count0 = count;
 
         if (rep && count == 0) break;
         for (;;) {
@@ -1272,6 +1277,7 @@ int cpu_step(Cpu *c)
                 if (rep == 0xF2 && zf) break;
             }
         }
+        if (rep) prof_rep(count0 - count);
         break;
     }
 
