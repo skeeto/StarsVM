@@ -22,7 +22,12 @@ static void build_psp(Task *t)
     unsigned n = (unsigned)strlen(t->cmdline);
     unsigned i;
 
-    if (n > 126) n = 126;
+    /* A tail is a length byte and at most 126 characters.  main() refuses to
+       build a longer one, so arriving here means a caller went around it. */
+    if (n > 126) {
+        log_msg("task: command line cut to 126 of %u bytes\n", n);
+        n = 126;
+    }
 
     sel_wr16(sel, PSP_INT20, 0x20CD);            /* int 20h */
 

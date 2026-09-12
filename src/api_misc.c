@@ -10,6 +10,7 @@
 #include "sel.h"
 #include "gmem.h"
 #include "log.h"
+#include "hostclock.h"
 
 #include <stdio.h>
 #include <string.h>
@@ -59,7 +60,7 @@ static uint32_t t_TimerCount(Cpu *c, Args *a)
 {
     uint32_t p = arg_long(a);
     uint16_t sel = SEGPTR_SEL(p), off = SEGPTR_OFF(p);
-    DWORD now = GetTickCount();
+    DWORD now = host_tick();
 
     (void)c;
     if (!p) return 0;

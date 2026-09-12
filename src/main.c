@@ -8,6 +8,7 @@
 #include "fpu.h"
 #include "task.h"
 #include "audio.h"
+#include "hostclock.h"
 
 #include <stdio.h>
 #include <string.h>
@@ -53,6 +54,12 @@ static const char usage_text[] =
     "beside it.  `make onefile` builds the appended, compressed form, which is a\n"
     "single self-contained program; nothing else needs installing.\n"
     "\n"
+    "Arguments after `--`, and any bare filename not wanted as the module\n"
+    "path, go to the game itself, which has switches of its own - notably\n"
+    "-g[N] to generate N turns from a host file and exit.  The others are\n"
+    "-a -b -d -h -m -p -s -t -w -x, documented at starsfaq.com/command.htm.\n"
+    "\n"
+    "  --module PATH   load this module, ignoring any appended one\n"
     "  --dump          print the NE structure and exit\n"
     "  --dump-relocs   as --dump, with per-segment relocation counts\n"
     "  --imports       print the import thunk table and exit\n"
@@ -66,6 +73,9 @@ static const char usage_text[] =
     "  --trace-cpu N   log the first N instructions executed\n"
     "  --survey        keep going past unimplemented APIs (returning 0)\n"
     "  --console       open a console for the log (this is a GUI binary)\n"
+    "  --fixed-clock   pin every clock the guest can read, so that a run\n"
+    "                  writes byte-identical save files given the same\n"
+    "                  input - which is what makes a turn comparable\n"
     "  --trace-paint   log update regions around painting (repaint loops)\n"
     "  --play-wave N   play \"WAVE\" resource N through the sound path\n"
     "                  and exit (the game has 2601 2602 2611 2612 2621 2631;\n"
@@ -81,6 +91,25 @@ static int self_path(wchar_t *out, size_t n)
 {
     DWORD r = GetModuleFileNameW(NULL, out, (DWORD)n);
     return r > 0 && r < n;
+}
+
+/* argv reached us through the ANSI code page, which cannot spell every path
+   Windows can.  Flags are ASCII and fine; the one argument naming a file we
+   open ourselves is taken from the wide command line instead.  The game gets no
+   such treatment, and can get none: its arguments reach it through a PSP
+   command tail, which is bytes. */
+static void wide_arg(int argi, const char *narrow, wchar_t *out, size_t n)
+{
+    int wargc = 0;
+    wchar_t **wargv = CommandLineToArgvW(GetCommandLineW(), &wargc);
+
+    out[0] = 0;
+    if (wargv && argi > 0 && argi < wargc)
+        _snwprintf(out, n - 1, L"%ls", wargv[argi]);
+    else
+        MultiByteToWideChar(CP_ACP, 0, narrow, -1, out, (int)n);
+    out[n - 1] = 0;
+    if (wargv) LocalFree(wargv);
 }
 
 /* Default to the stars.exe sitting beside us. */
@@ -100,12 +129,29 @@ static void default_target(wchar_t *out, size_t n)
     out[n - 1] = 0;
 }
 
+/* What the run cost.  The instruction count is the interpreter's own and the
+   clock is the host's, so the rate is the one number that says whether a change
+   to the interpreter helped. */
+static void report_stop(int r, double secs)
+{
+    log_msg("\nStopped: %s after %llu instructions in %.3f s (%.1f M/s)\n",
+            cpu_state_name(r), (unsigned long long)cpu.icount, secs,
+            secs > 0.0 ? (double)cpu.icount / secs / 1e6 : 0.0);
+}
+
 int main(int argc, char **argv)
 {
-    const char *target = NULL;
+    const char *modopt = NULL;
     const char *logfile = NULL;
     wchar_t targetw[MAX_PATH * 2];
-    int targeti = 0, opened = 0;
+    int modopti = 0, opened = 0;
+    /* Everything bound for the game, in the order it was written.  A bare
+       filename is a candidate for the module path too, and which one - if any -
+       becomes the module is not known until the appended module has been tried,
+       so the decision waits and this keeps the order meanwhile. */
+    struct { const char *s; int argi, bare; } garg[32];
+    int ngarg = 0, endopt = 0;
+    char gcmd[127];             /* a PSP tail is a length byte and 126 more */
     int do_dump = 0, do_imports = 0, do_load = 0, do_run = 0, verbose = 0;
     uint64_t steps = 0;
     long trace_cpu = 0;
@@ -113,12 +159,29 @@ int main(int argc, char **argv)
     struct { unsigned seg, off, len; } peek[8];
     int npeek = 0;
     int i;
+    LARGE_INTEGER qfreq, qt0, qt1;
 
     set_me(argv[0]);
 
     for (i = 1; i < argc; i++) {
         const char *a = argv[i];
-        if (!strcmp(a, "--peek") && i + 1 < argc && npeek < 8) {
+        if (endopt || a[0] != '-') {
+            /* The game's.  A module candidate only while bare: past `--` the
+               intent was stated, so it is not second-guessed. */
+            if (ngarg == (int)(sizeof garg / sizeof *garg)) {
+                fprintf(stderr, "%s: too many arguments\n", me);
+                return 2;
+            }
+            garg[ngarg].s = a;
+            garg[ngarg].argi = i;
+            garg[ngarg].bare = !endopt;
+            ngarg++;
+        } else if (!strcmp(a, "--")) {
+            endopt = 1;
+        } else if (!strcmp(a, "--module") && i + 1 < argc) {
+            modopt = argv[++i];
+            modopti = i;
+        } else if (!strcmp(a, "--peek") && i + 1 < argc && npeek < 8) {
             if (sscanf(argv[++i], "%u:%x:%u", &peek[npeek].seg,
                        &peek[npeek].off, &peek[npeek].len) == 3) {
                 npeek++;
@@ -130,7 +193,8 @@ int main(int argc, char **argv)
         } else if (!strcmp(a, "--help") || !strcmp(a, "-h")) {
             printf("%s - run the 16-bit Stars! under a Win16-to-Win32 shim\n"
                    "\n"
-                   "usage: %s [options] [stars.exe]\n", me, me);
+                   "usage: %s [options] [stars.exe] [-- game arguments]\n",
+                   me, me);
             fputs(usage_text, stdout);
             return 0;
         } else if (!strcmp(a, "--dump")) {
@@ -151,6 +215,8 @@ int main(int argc, char **argv)
             thunk_survey = 1;
         } else if (!strcmp(a, "--console")) {
             log_console = 1;
+        } else if (!strcmp(a, "--fixed-clock")) {
+            clock_fixed = 1;
         } else if (!strcmp(a, "--steps") && i + 1 < argc) {
             steps = (uint64_t)_strtoui64(argv[++i], NULL, 0);
         } else if (!strcmp(a, "--trace-cpu") && i + 1 < argc) {
@@ -159,31 +225,13 @@ int main(int argc, char **argv)
             log_verbose = 1;
         } else if (!strcmp(a, "--log") && i + 1 < argc) {
             logfile = argv[++i];
-        } else if (a[0] == '-') {
+        } else {
             fprintf(stderr, "%s: unknown option %s\n", me, a);
             return 2;
-        } else {
-            target = a;
-            targeti = i;        /* remembered so the WIDE argv can supply it */
         }
     }
 
-    /* argv reached us through the ANSI code page, which cannot spell every path
-       Windows can.  Flags are ASCII and fine; the one argument that names a
-       file is taken from the wide command line instead. */
     targetw[0] = 0;
-    if (target) {
-        int wargc = 0;
-        wchar_t **wargv = CommandLineToArgvW(GetCommandLineW(), &wargc);
-        if (wargv && targeti < wargc)
-            _snwprintf(targetw, sizeof targetw / sizeof *targetw - 1,
-                       L"%ls", wargv[targeti]);
-        else
-            MultiByteToWideChar(CP_ACP, 0, target, -1, targetw,
-                                sizeof targetw / sizeof *targetw);
-        targetw[sizeof targetw / sizeof *targetw - 1] = 0;
-        if (wargv) LocalFree(wargv);
-    }
 
     /* Double-clicked, or run with nothing but a path: play the game.  The
        inspection modes are what needs asking for, not the ordinary one. */
@@ -205,20 +253,33 @@ int main(int argc, char **argv)
         if (!do_dump && !do_load && !do_run) { log_close(); return 0; }
     }
 
-    /* Three places the game can be, in order of how deliberate they are.  A
-       path on the command line wins; otherwise a module appended to this
-       executable, so that
+    /* Four places the game can be, in order of how deliberate they are.
+       --module says so outright.  Otherwise a module appended to this
+       executable wins, so that
            cat StarsVM.exe stars.exe > Stars-x86.exe
-       is a single self-contained program with nothing else to install; and
-       failing that the stars.exe sitting beside us. */
-    if (target) {
+       is a single self-contained program with nothing else to install - and so
+       that a bare filename handed to the packed build is a game file for the
+       game to open, not a module for us to load.  Failing that the first bare
+       argument is the module, which is how `StarsVM.exe stars.exe` has always
+       worked.  Failing that, the stars.exe sitting beside us. */
+    if (modopt) {
+        wide_arg(modopti, modopt, targetw, sizeof targetw / sizeof *targetw);
         opened = ne_open(&module, targetw);
     } else {
         wchar_t self[MAX_PATH];
         opened = self_path(self, sizeof self / sizeof *self) &&
                  ne_open_appended(&module, self);
         if (!opened) {
-            default_target(targetw, sizeof targetw / sizeof *targetw);
+            int k;
+            for (k = 0; k < ngarg; k++)
+                if (garg[k].bare) {
+                    wide_arg(garg[k].argi, garg[k].s, targetw,
+                             sizeof targetw / sizeof *targetw);
+                    garg[k].s = NULL;      /* ours, so not the game's */
+                    break;
+                }
+            if (!targetw[0])
+                default_target(targetw, sizeof targetw / sizeof *targetw);
             opened = ne_open(&module, targetw);
         }
     }
@@ -279,7 +340,36 @@ int main(int argc, char **argv)
     api_profile_register();
     api_dlg_register();
     thunk_report_unbound();
-    if (!task_start(&module, &cpu, "", 1)) {
+    /* The game's own command line, in the order it was written, less whatever
+       became the module path.  A real command tail begins with the separator,
+       so this one does too.  build_psp would quietly cut an over-long tail at
+       126 bytes, and that would surface as the game mis-reading a path rather
+       than as anything to do with us, so refuse to build one instead. */
+    gcmd[0] = 0;
+    {
+        size_t n = 0;
+        int k;
+        for (k = 0; k < ngarg; k++) {
+            size_t len;
+            if (!garg[k].s) continue;
+            len = strlen(garg[k].s);
+            if (n + 1 + len >= sizeof gcmd) {
+                log_msg("%s: the game needs %u bytes of command line and a PSP"
+                        " tail holds 126 - run from the game directory so the"
+                        " paths can be relative\n",
+                        me, (unsigned)(n + 1 + len));
+                gcmd[0] = 0;
+                break;
+            }
+            gcmd[n++] = ' ';
+            memcpy(gcmd + n, garg[k].s, len);
+            n += len;
+            gcmd[n] = 0;
+        }
+    }
+    if (*gcmd) log_msg("Game command line:%s\n", gcmd);
+
+    if (!task_start(&module, &cpu, gcmd, 1)) {
         ne_close(&module);
         log_close();
         return 1;
@@ -298,6 +388,8 @@ int main(int argc, char **argv)
             reg16(&cpu, R_SP), cpu.seg[S_DS]);
 
     fpu_host_enter();
+    QueryPerformanceFrequency(&qfreq);
+    QueryPerformanceCounter(&qt0);
     if (trace_cpu > 0) {
         char line[160];
         long n = 0;
@@ -314,12 +406,14 @@ int main(int argc, char **argv)
             if (trace_cpu && n == trace_cpu)
                 log_msg("... trace limit reached, continuing quietly\n");
         }
-        log_msg("\nStopped: %s after %llu instructions\n",
-                cpu_state_name(r), (unsigned long long)cpu.icount);
+        QueryPerformanceCounter(&qt1);
+        report_stop(r, (double)(qt1.QuadPart - qt0.QuadPart) /
+                       (double)qfreq.QuadPart);
     } else {
         int r = cpu_run(&cpu, steps);
-        log_msg("\nStopped: %s after %llu instructions\n",
-                cpu_state_name(r), (unsigned long long)cpu.icount);
+        QueryPerformanceCounter(&qt1);
+        report_stop(r, (double)(qt1.QuadPart - qt0.QuadPart) /
+                       (double)qfreq.QuadPart);
     }
     fpu_host_leave();
     audio_shutdown();

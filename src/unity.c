@@ -50,6 +50,7 @@
 #include "fpu.c"
 #include "handle.c"
 #include "heap.c"
+#include "hostclock.c"
 #include "imports.c"
 #include "log.c"
 #include "main.c"

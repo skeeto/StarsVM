@@ -250,12 +250,20 @@ uint32_t call16_wndproc(uint32_t proc, uint16_t ax,
     }
 
     /* Restore everything except the result.  Like Wine, we do not trust the
-       callee to have balanced the stack. */
+       callee to have balanced the stack.
+       icount is not part of the machine being restored: it counts what the run
+       has executed, and rolling it back discarded every instruction a callback
+       ever ran.  Since the game does nearly all of its work inside callbacks -
+       turn generation entirely so - the count has always reported a tiny
+       fraction of a GUI run.  Ten generated turns and one generated turn came
+       out 48 instructions apart. */
     {
         uint32_t ax_ = c->r32[R_AX], dx_ = c->r32[R_DX];
+        uint64_t ran = c->icount;
         *c = saved;
         c->r32[R_AX] = ax_;
         c->r32[R_DX] = dx_;
+        c->icount = ran;
         c->state = CPU_RUNNING;
     }
     return result;

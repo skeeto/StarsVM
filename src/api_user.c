@@ -16,6 +16,7 @@
 #include "msg16.h"
 #include "dlg.h"
 #include "resobj.h"
+#include "hostclock.h"
 
 #include <stdio.h>
 #include <string.h>
@@ -38,7 +39,7 @@ static uint32_t u_InitApp(Cpu *c, Args *a)
 static uint32_t u_GetTickCount(Cpu *c, Args *a)
 {
     (void)c; (void)a;
-    return GetTickCount();
+    return host_tick();
 }
 
 static uint32_t u_MessageBeep(Cpu *c, Args *a)

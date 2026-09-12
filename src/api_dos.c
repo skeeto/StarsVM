@@ -14,6 +14,7 @@
 #include "sel.h"
 #include "log.h"
 #include "dos.h"
+#include "hostclock.h"
 
 #include <stdio.h>
 #include <string.h>
@@ -361,7 +362,7 @@ static uint32_t dos3call(Cpu *c, Args *a)
 
     case 0x2A: {                                 /* get date */
         SYSTEMTIME st;
-        GetLocalTime(&st);
+        host_localtime(&st);
         set_reg16(c, R_CX, st.wYear);
         set_reg16(c, R_DX, (uint16_t)((st.wMonth << 8) | st.wDay));
         set_reg16(c, R_AX, (uint16_t)((reg16(c, R_AX) & 0xFF00) | st.wDayOfWeek));
@@ -369,7 +370,7 @@ static uint32_t dos3call(Cpu *c, Args *a)
     }
     case 0x2C: {                                 /* get time */
         SYSTEMTIME st;
-        GetLocalTime(&st);
+        host_localtime(&st);
         set_reg16(c, R_CX, (uint16_t)((st.wHour << 8) | st.wMinute));
         set_reg16(c, R_DX, (uint16_t)((st.wSecond << 8) | (st.wMilliseconds / 10)));
         return 0;
