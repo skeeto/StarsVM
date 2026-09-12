@@ -357,22 +357,33 @@ static long double load_f80(uint16_t sel, uint16_t off)
     return v;
 }
 
-static void store_f32(uint16_t sel, uint16_t off, long double v, uint16_t cw)
+/* Narrowing a value to store it rounds, and rounding is something the status
+   word reports: C1 says whether the result went up.  These used to leave it
+   alone entirely. */
+static void store_f32(Cpu *c, uint16_t sel, uint16_t off, long double v,
+                      uint16_t cw)
 {
     float f;
     uint32_t bits;
-    __asm__ volatile ("fldcw %2\n\tfldt %1\n\tfstps %0"
-                      : "=m"(f) : "m"(v), "m"(cw) : "st");
+    uint16_t sw;
+
+    __asm__ volatile ("fldcw %3\n\tfldt %2\n\tfstps %1\n\tfnstsw %0"
+                      : "=a"(sw), "=m"(f) : "m"(v), "m"(cw) : "st");
+    c->fpu_sw = (uint16_t)((c->fpu_sw & 0x3800u) | (sw & ~0x3800u));
     memcpy(&bits, &f, 4);
     sel_wr32(sel, off, bits);
 }
 
-static void store_f64(uint16_t sel, uint16_t off, long double v, uint16_t cw)
+static void store_f64(Cpu *c, uint16_t sel, uint16_t off, long double v,
+                      uint16_t cw)
 {
     double d;
     uint8_t b[8];
-    __asm__ volatile ("fldcw %2\n\tfldt %1\n\tfstpl %0"
-                      : "=m"(d) : "m"(v), "m"(cw) : "st");
+    uint16_t sw;
+
+    __asm__ volatile ("fldcw %3\n\tfldt %2\n\tfstpl %1\n\tfnstsw %0"
+                      : "=a"(sw), "=m"(d) : "m"(v), "m"(cw) : "st");
+    c->fpu_sw = (uint16_t)((c->fpu_sw & 0x3800u) | (sw & ~0x3800u));
     memcpy(b, &d, 8);
     fpu_mem_write(sel, off, b, 8);
 }
@@ -388,11 +399,34 @@ static void store_f80(uint16_t sel, uint16_t off, long double v)
 /* Integer conversions go through the host too, so the guest rounding mode in the
    control word decides how FIST rounds - which is exactly what C code relies on
    after setting the control word for truncation. */
-static int64_t to_int64(long double v, uint16_t cw)
+static int64_t to_int(Cpu *c, long double v, uint16_t cw, unsigned width)
 {
     int64_t r;
-    __asm__ volatile ("fldcw %2\n\tfldt %1\n\tfistpll %0"
-                      : "=m"(r) : "m"(v), "m"(cw) : "st");
+    uint16_t sw;
+
+    __asm__ volatile ("fldcw %3\n\tfldt %2\n\tfistpll %1\n\tfnstsw %0"
+                      : "=a"(sw), "=m"(r) : "m"(v), "m"(cw) : "st");
+    c->fpu_sw = (uint16_t)((c->fpu_sw & 0x3800u) | (sw & ~0x3800u));
+
+    /* The narrowing belongs here, not in the caller.  A value that does not fit
+       the destination is not truncated to it: the hardware writes the integer
+       indefinite for that width and raises IE.  Casting the 64-bit result down
+       wrote 0 instead, which is a plausible number and therefore the worst kind
+       of wrong.  A conversion that already failed comes back as the 64-bit
+       indefinite, which is out of range for the narrower widths and so lands in
+       the same place. */
+    if (width == 8) return r;
+    if (width == 4) {
+        if (r < -2147483647LL - 1 || r > 2147483647LL) {
+            c->fpu_sw |= 0x0001u;                          /* IE */
+            return (int64_t)(int32_t)0x80000000u;
+        }
+        return r;
+    }
+    if (r < -32768LL || r > 32767LL) {
+        c->fpu_sw |= 0x0001u;
+        return (int64_t)(int16_t)0x8000u;
+    }
     return r;
 }
 
@@ -424,8 +458,8 @@ int fpu_exec(Cpu *c, uint8_t op, uint8_t modrm, int is_reg,
         case 0xD9:
             switch (reg) {
             case 0: fpu_push(c, load_f32(sel, off)); return 1;      /* FLD m32   */
-            case 2: store_f32(sel, off, ld_get(c, 0), cw); return 1; /* FST m32  */
-            case 3: store_f32(sel, off, ld_get(c, 0), cw);
+            case 2: store_f32(c, sel, off, ld_get(c, 0), cw); return 1; /* FST m32 */
+            case 3: store_f32(c, sel, off, ld_get(c, 0), cw);
                     fpu_discard(c); return 1;                        /* FSTP m32 */
             case 4: /* FLDENV: restore the 14-byte 16-bit environment */
                 c->fpu_cw = sel_rd16(sel, off);
@@ -464,12 +498,12 @@ int fpu_exec(Cpu *c, uint8_t op, uint8_t modrm, int is_reg,
             switch (reg) {
             case 0: fpu_push(c, (long double)(int32_t)sel_rd32(sel, off)); return 1;
             case 2: {                              /* FIST m32 */
-                int64_t v = to_int64(ld_get(c, 0), cw);
+                int64_t v = to_int(c, ld_get(c, 0), cw, 4);
                 sel_wr32(sel, off, (uint32_t)(int32_t)v);
                 return 1;
             }
             case 3: {                              /* FISTP m32 */
-                int64_t v = to_int64(ld_get(c, 0), cw);
+                int64_t v = to_int(c, ld_get(c, 0), cw, 4);
                 sel_wr32(sel, off, (uint32_t)(int32_t)v);
                 fpu_discard(c);
                 return 1;
@@ -495,8 +529,8 @@ int fpu_exec(Cpu *c, uint8_t op, uint8_t modrm, int is_reg,
         case 0xDD:
             switch (reg) {
             case 0: fpu_push(c, load_f64(sel, off)); return 1;      /* FLD m64  */
-            case 2: store_f64(sel, off, ld_get(c, 0), cw); return 1; /* FST m64 */
-            case 3: store_f64(sel, off, ld_get(c, 0), cw);
+            case 2: store_f64(c, sel, off, ld_get(c, 0), cw); return 1; /* FST m64 */
+            case 3: store_f64(c, sel, off, ld_get(c, 0), cw);
                     fpu_discard(c); return 1;                        /* FSTP m64 */
             case 7: sel_wr16(sel, off, sw_value(c)); return 1;       /* FNSTSW m16 */
             default: return 0;
@@ -518,12 +552,12 @@ int fpu_exec(Cpu *c, uint8_t op, uint8_t modrm, int is_reg,
             switch (reg) {
             case 0: fpu_push(c, (long double)(int16_t)sel_rd16(sel, off)); return 1;
             case 2: {                              /* FIST m16 */
-                int64_t v = to_int64(ld_get(c, 0), cw);
+                int64_t v = to_int(c, ld_get(c, 0), cw, 2);
                 sel_wr16(sel, off, (uint16_t)(int16_t)v);
                 return 1;
             }
             case 3: {                              /* FISTP m16 */
-                int64_t v = to_int64(ld_get(c, 0), cw);
+                int64_t v = to_int(c, ld_get(c, 0), cw, 2);
                 sel_wr16(sel, off, (uint16_t)(int16_t)v);
                 fpu_discard(c);
                 return 1;
@@ -538,7 +572,7 @@ int fpu_exec(Cpu *c, uint8_t op, uint8_t modrm, int is_reg,
                 return 1;
             }
             case 7: {                              /* FISTP m64 */
-                int64_t v = to_int64(ld_get(c, 0), cw);
+                int64_t v = to_int(c, ld_get(c, 0), cw, 8);
                 uint8_t b[8];
                 int i;
                 memcpy(b, &v, 8);
