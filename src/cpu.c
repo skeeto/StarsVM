@@ -40,6 +40,13 @@ static const uint32_t size_sign[5] = { 0, 0x80u, 0x8000u, 0, 0x80000000u };
 static uint32_t mask_of(int size) { return size_mask[size]; }
 static uint32_t sign_of(int size) { return size_sign[size]; }
 
+/* Nonzero for each of the eleven bytes that is an instruction prefix. */
+static const uint8_t prefix_byte[256] = {
+    [0x26] = 1, [0x2E] = 1, [0x36] = 1, [0x3E] = 1,
+    [0x64] = 1, [0x65] = 1, [0x66] = 1, [0x67] = 1,
+    [0xF0] = 1, [0xF2] = 1, [0xF3] = 1,
+};
+
 static uint32_t sext(uint32_t v, int size)
 {
     if (size == 1) return (uint32_t)(int32_t)(int8_t)v;
@@ -649,25 +656,27 @@ int cpu_step(Cpu *c)
        cached selector agree at 0 but there is no base yet. */
     if (c->seg[S_CS] != c->cs_cached || !c->cs_base) cs_refresh(c);
 
-    /* Prefixes. */
+    /* Prefixes.  The table is what makes this cheap: a switch over eleven
+       sparse bytes compiled to a binary-search compare chain, so every byte
+       that is not a prefix - nearly all of them - walked four or five compares
+       before the instruction could start.  One load settles it. */
     ip0 = ip_of(c);
     for (;;) {
         op = fetch8(c);
+        if (!prefix_byte[op]) break;
         switch (op) {
-        case 0x66: osize = (osize == 2) ? 4 : 2; continue;
-        case 0x67: asize = !asize; continue;
-        case 0x26: c->seg_override = S_ES; continue;
-        case 0x2E: c->seg_override = S_CS; continue;
-        case 0x36: c->seg_override = S_SS; continue;
-        case 0x3E: c->seg_override = S_DS; continue;
-        case 0x64: c->seg_override = S_FS; continue;
-        case 0x65: c->seg_override = S_GS; continue;
-        case 0xF0: continue;                       /* LOCK: no effect for us */
-        case 0xF2: rep = 0xF2; continue;
-        case 0xF3: rep = 0xF3; continue;
-        default: break;
+        case 0x66: osize = (osize == 2) ? 4 : 2; break;
+        case 0x67: asize = !asize; break;
+        case 0x26: c->seg_override = S_ES; break;
+        case 0x2E: c->seg_override = S_CS; break;
+        case 0x36: c->seg_override = S_SS; break;
+        case 0x3E: c->seg_override = S_DS; break;
+        case 0x64: c->seg_override = S_FS; break;
+        case 0x65: c->seg_override = S_GS; break;
+        case 0xF0: break;                          /* LOCK: no effect for us */
+        case 0xF2: rep = 0xF2; break;
+        case 0xF3: rep = 0xF3; break;
         }
-        break;
     }
     prof_op(c->seg[S_CS], ip0, op);
 
