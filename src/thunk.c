@@ -260,6 +260,26 @@ uint32_t call16_wndproc(uint32_t proc, uint16_t ax,
     {
         uint32_t ax_ = c->r32[R_AX], dx_ = c->r32[R_DX];
         uint64_t ran = c->icount;
+
+        /* The FPU carries forward rather than being restored.  Its registers,
+           control, status and tag words are task-global on real Win16 - a
+           callee that changes the control word has changed it for everyone,
+           and nothing in the calling convention makes any of it caller-saved.
+           They were rolled back only because they share this struct with the
+           machine registers, which is the same accident that hid icount.
+           Measured before changing it: over twenty generated turns and a GUI
+           session the control word never moved across a callback, and the tag
+           word read FFFF - every register empty, as the convention requires -
+           at every single boundary.  So this costs nothing today.  What it buys
+           is that a callback which does leave something behind now keeps it,
+           and one that leaves the stack unbalanced shows up as itself rather
+           than being quietly tidied away. */
+        saved.fpu_cw  = c->fpu_cw;
+        saved.fpu_sw  = c->fpu_sw;
+        saved.fpu_tw  = c->fpu_tw;
+        saved.fpu_top = c->fpu_top;
+        memcpy(saved.st, c->st, sizeof saved.st);
+
         *c = saved;
         c->r32[R_AX] = ax_;
         c->r32[R_DX] = dx_;
