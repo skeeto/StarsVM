@@ -1,4 +1,4 @@
-/* main.c - stars16: run Stars! 2.70j by emulating Win16 on top of Win32. */
+/* main.c - run Stars! 2.70j by emulating Win16 on top of Win32. */
 
 #include "ne.h"
 #include "sel.h"
@@ -29,14 +29,29 @@ extern int trace_paint;
 
 static NeModule module;
 
+/* What to call ourselves in messages.  Taken from argv[0] rather than written
+   down, because the appended-module trick means the finished program is meant
+   to be renamed - Stars!-x86.exe, in the README - so any name compiled in here
+   is wrong for exactly the build this project recommends.  The name was written
+   down in nine PowerShell tools once too, and every one of them went on
+   reporting that "stars16" was not running long after nothing built under that
+   name; tools/starsproc.ps1 exists to keep that from happening again. */
+static const char *me = "Stars!VM";
+
+static void set_me(const char *argv0)
+{
+    const char *p;
+    if (!argv0) return;
+    for (p = argv0; *p; p++)
+        if (*p == '\\' || *p == '/' || *p == ':') argv0 = p + 1;
+    if (*argv0) me = argv0;
+}
+
 static const char usage_text[] =
-    "stars16 - run the 16-bit Stars! under a Win16-to-Win32 shim\n"
-    "\n"
-    "usage: stars16 [options] [Stars!.exe]\n"
     "\n"
     "With no path, the game is taken from a module appended to this executable\n"
-    "if there is one, and otherwise from the Stars!.exe beside it.  So\n"
-    "    cat Stars!VM.exe Stars!.exe > Stars!-x86.exe\n"
+    "if there is one, and otherwise from the stars.exe beside it.  So\n"
+    "    cat Stars!VM.exe stars.exe > Stars!-x86.exe\n"
     "is a single self-contained program; nothing else needs installing.\n"
     "\n"
     "  --dump          print the NE structure and exit\n"
@@ -67,20 +82,20 @@ static int self_path(wchar_t *out, size_t n)
     return r > 0 && r < n;
 }
 
-/* Default to the Stars!.exe sitting beside us. */
+/* Default to the stars.exe sitting beside us. */
 static void default_target(wchar_t *out, size_t n)
 {
     wchar_t self[MAX_PATH];
     wchar_t *slash;
 
     if (!self_path(self, sizeof self / sizeof *self)) {
-        _snwprintf(out, n - 1, L"Stars!.exe");
+        _snwprintf(out, n - 1, L"stars.exe");
         out[n - 1] = 0;
         return;
     }
     slash = wcsrchr(self, L'\\');
     if (slash) *slash = 0;
-    _snwprintf(out, n - 1, L"%ls\\Stars!.exe", self);
+    _snwprintf(out, n - 1, L"%ls\\stars.exe", self);
     out[n - 1] = 0;
 }
 
@@ -101,6 +116,8 @@ int main(int argc, char **argv)
     int npeek = 0;
     int i;
 
+    set_me(argv[0]);
+
     for (i = 1; i < argc; i++) {
         const char *a = argv[i];
         if (!strcmp(a, "--peek") && i + 1 < argc && npeek < 8) {
@@ -109,10 +126,13 @@ int main(int argc, char **argv)
                 npeek++;
                 do_load = 1;
             } else {
-                fprintf(stderr, "stars16: --peek wants SEG:HEXOFF:LEN\n");
+                fprintf(stderr, "%s: --peek wants SEG:HEXOFF:LEN\n", me);
                 return 2;
             }
         } else if (!strcmp(a, "--help") || !strcmp(a, "-h")) {
+            printf("%s - run the 16-bit Stars! under a Win16-to-Win32 shim\n"
+                   "\n"
+                   "usage: %s [options] [stars.exe]\n", me, me);
             fputs(usage_text, stdout);
             return 0;
         } else if (!strcmp(a, "--dump")) {
@@ -148,7 +168,7 @@ int main(int argc, char **argv)
         } else if (!strcmp(a, "--log") && i + 1 < argc) {
             logfile = argv[++i];
         } else if (a[0] == '-') {
-            fprintf(stderr, "stars16: unknown option %s\n", a);
+            fprintf(stderr, "%s: unknown option %s\n", me, a);
             return 2;
         } else {
             target = a;
@@ -202,9 +222,9 @@ int main(int argc, char **argv)
     /* Three places the game can be, in order of how deliberate they are.  A
        path on the command line wins; otherwise a module appended to this
        executable, so that
-           cat Stars!VM.exe Stars!.exe > Stars!-x86.exe
+           cat Stars!VM.exe stars.exe > Stars!-x86.exe
        is a single self-contained program with nothing else to install; and
-       failing that the Stars!.exe sitting beside us. */
+       failing that the stars.exe sitting beside us. */
     if (target) {
         opened = ne_open(&module, targetw);
     } else {
@@ -217,7 +237,7 @@ int main(int argc, char **argv)
         }
     }
     if (!opened) {
-        log_msg("stars16: cannot read %s\n", log_wide(targetw));
+        log_msg("%s: cannot read %s\n", me, log_wide(targetw));
         log_close();
         return 1;
     }
@@ -228,14 +248,14 @@ int main(int argc, char **argv)
     }
 
     if (!do_load && !do_run) {
-        log_msg("stars16: nothing to do - try --dump, --imports, --load or --run\n");
+        log_msg("%s: nothing to do - try --dump, --imports, --load or --run\n", me);
         ne_close(&module);
         log_close();
         return 0;
     }
 
     if (!ne_load(&module, thunk_resolve, NULL)) {
-        log_msg("stars16: load failed\n");
+        log_msg("%s: load failed\n", me);
         ne_close(&module);
         log_close();
         return 1;
@@ -342,7 +362,7 @@ int main(int argc, char **argv)
                           cpu.bad_op, cpu.bad_op2);
         snprintf(msg + n, sizeof msg - n,
                  "\n\nRe-run with --log FILE (or --console) for the details.");
-        MessageBoxA(NULL, msg, "stars16", MB_OK | MB_ICONERROR);
+        MessageBoxA(NULL, msg, me, MB_OK | MB_ICONERROR);
     }
     if (cpu.state == CPU_BADOP || cpu.state == CPU_FAULT) {
         char line[160];

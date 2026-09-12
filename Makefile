@@ -57,7 +57,7 @@ $(RES): stars16.rc stars16.manifest stars16_icon.rc | $(OBJDIR)
 # The icon comes out of the game's own resources.  Never fatal: without the
 # game next door the generated .rc is just a comment.
 stars16_icon.rc:
-	-python tools/mkicon.py "Stars!.exe" stars16.ico $@ StarsIco
+	-python tools/mkicon.py "stars.exe" stars16.ico $@ StarsIco
 	@test -f $@ || echo "/* no icon */" > $@
 
 $(OBJDIR)/unity.o: $(SRCDIR)/unity.c $(SRC) | $(OBJDIR)

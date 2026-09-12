@@ -7,7 +7,7 @@ hardware codes in one turn — that is the whole scheme. This documents what the
 hardware code actually is, because Stars!VM got it wrong for a while and the
 way it got it wrong was invisible.
 
-Addresses below are `segment:offset` into `Stars!.exe` (2.70j, 3,153,152
+Addresses below are `segment:offset` into `stars.exe` (2.70j, 3,153,152
 bytes). To reach a file offset, add the segment's base; `Stars!VM.exe --dump`
 prints them.
 

@@ -7,7 +7,7 @@
  * exact and predictable.
  *
  * Placement rule: any filename that is not already absolute resolves against
- * the directory holding Stars!.exe.  That satisfies "the INI must live next to
+ * the directory holding stars.exe.  That satisfies "the INI must live next to
  * the EXE" regardless of what name the game constructs at runtime - and it does
  * construct it at runtime, since there is no .ini string anywhere in the
  * binary.  A bare filename is exactly what would otherwise land in C:\Windows.

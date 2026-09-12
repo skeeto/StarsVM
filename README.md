@@ -69,7 +69,7 @@ With no argument, the game is looked for in three places, in order:
 
 1. a path given on the command line
 2. a module appended to the emulator's own executable
-3. the `Stars!.exe` sitting beside the emulator
+3. the `stars.exe` sitting beside the emulator
 
 Stars! itself is not included and is not redistributable — supply your own copy.
 

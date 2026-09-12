@@ -6,7 +6,7 @@ naming the RT_ICON resource that holds the image, where an ICO file wants a
 DWORD byte offset to the image inside the file.  So the conversion is: widen
 that field, lay the images out after the directory, and fill in the offsets.
 
-Usage: mkicon.py <Stars!.exe> <out.ico> <out.rc> [GROUPNAME]
+Usage: mkicon.py <stars.exe> <out.ico> <out.rc> [GROUPNAME]
 
 The .rc output is written either way: with an ICON directive when the icon was
 produced, and with a comment when it could not be, so that a build without the

@@ -12,7 +12,7 @@ import sys
 
 WINE = sys.argv[1] if len(sys.argv) > 1 else os.path.expanduser("~/src/wine")
 
-# The exact ordinals Stars!.exe references, recovered from its relocation
+# The exact ordinals stars.exe references, recovered from its relocation
 # records.  Keeping the list explicit means an unexpected import shows up as a
 # build-time gap rather than a silent runtime stub.
 WANTED = {

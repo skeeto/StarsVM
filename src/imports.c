@@ -1,4 +1,4 @@
-/* imports.c - the fixed import table for Stars!.exe and its resolver.
+/* imports.c - the fixed import table for stars.exe and its resolver.
  *
  * Every imported (module, ordinal) owns one 8-byte slot in a reserved selector.
  * The NE loader points each import fixup at that slot, and the interpreter
