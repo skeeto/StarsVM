@@ -118,32 +118,32 @@ static long double host_arith(Cpu *c, int code, long double a, long double b)
     case OP_ADD:
         __asm__ volatile ("fldcw %3\n\tfldt %1\n\tfldt %2\n\tfaddp\n\t"
                           "fnstsw %0\n\tfstpt %1"
-                          : "=a"(sw), "+m"(a) : "m"(b), "m"(cw) : "st");
+                          : "=a"(sw), "+m"(a) : "m"(b), "m"(cw) : "st", "st(1)");
         r = a; break;
     case OP_SUB:   /* a - b */
         __asm__ volatile ("fldcw %3\n\tfldt %2\n\tfldt %1\n\tfsubp\n\t"
                           "fnstsw %0\n\tfstpt %1"
-                          : "=a"(sw), "+m"(a) : "m"(b), "m"(cw) : "st");
+                          : "=a"(sw), "+m"(a) : "m"(b), "m"(cw) : "st", "st(1)");
         r = a; break;
     case OP_SUBR:  /* b - a */
         __asm__ volatile ("fldcw %3\n\tfldt %1\n\tfldt %2\n\tfsubp\n\t"
                           "fnstsw %0\n\tfstpt %1"
-                          : "=a"(sw), "+m"(a) : "m"(b), "m"(cw) : "st");
+                          : "=a"(sw), "+m"(a) : "m"(b), "m"(cw) : "st", "st(1)");
         r = a; break;
     case OP_MUL:
         __asm__ volatile ("fldcw %3\n\tfldt %1\n\tfldt %2\n\tfmulp\n\t"
                           "fnstsw %0\n\tfstpt %1"
-                          : "=a"(sw), "+m"(a) : "m"(b), "m"(cw) : "st");
+                          : "=a"(sw), "+m"(a) : "m"(b), "m"(cw) : "st", "st(1)");
         r = a; break;
     case OP_DIV:   /* a / b */
         __asm__ volatile ("fldcw %3\n\tfldt %2\n\tfldt %1\n\tfdivp\n\t"
                           "fnstsw %0\n\tfstpt %1"
-                          : "=a"(sw), "+m"(a) : "m"(b), "m"(cw) : "st");
+                          : "=a"(sw), "+m"(a) : "m"(b), "m"(cw) : "st", "st(1)");
         r = a; break;
     default:       /* OP_DIVR: b / a */
         __asm__ volatile ("fldcw %3\n\tfldt %1\n\tfldt %2\n\tfdivp\n\t"
                           "fnstsw %0\n\tfstpt %1"
-                          : "=a"(sw), "+m"(a) : "m"(b), "m"(cw) : "st");
+                          : "=a"(sw), "+m"(a) : "m"(b), "m"(cw) : "st", "st(1)");
         r = a; break;
     }
     c->fpu_sw = (uint16_t)((c->fpu_sw & 0x3800u) | (sw & ~0x3800u));
@@ -156,7 +156,7 @@ static void host_compare(Cpu *c, long double a, long double b)
     uint16_t sw = 0, cw = c->fpu_cw;
 
     __asm__ volatile ("fldcw %3\n\tfldt %2\n\tfldt %1\n\tfcompp\n\tfnstsw %0"
-                      : "=a"(sw) : "m"(a), "m"(b), "m"(cw) : "st");
+                      : "=a"(sw) : "m"(a), "m"(b), "m"(cw) : "st", "st(1)");
     c->fpu_sw = (uint16_t)((c->fpu_sw & ~(SW_C0 | SW_C1 | SW_C2 | SW_C3)) |
                            (sw & (SW_C0 | SW_C1 | SW_C2 | SW_C3)));
 }
@@ -196,38 +196,38 @@ static long double host_unary(Cpu *c, int code, long double a, long double b,
     case U_TAN:   /* FPTAN: replaces ST with tan(ST) then pushes 1.0 */
         __asm__ volatile ("fldcw %3\n\tfldt %1\n\tfptan\n\tfnstsw %0\n\t"
                           "fstpt %2\n\tfstpt %1"
-                          : "=a"(sw), "+m"(r), "=m"(*second) : "m"(cw) : "st");
+                          : "=a"(sw), "+m"(r), "=m"(*second) : "m"(cw) : "st", "st(1)");
         *pushed = 1;
         break;
     case U_ATAN:  /* FPATAN: atan(ST(1)/ST(0)), pops one */
         __asm__ volatile ("fldcw %3\n\tfldt %2\n\tfldt %1\n\tfpatan\n\t"
                           "fnstsw %0\n\tfstpt %1"
-                          : "=a"(sw), "+m"(r) : "m"(b), "m"(cw) : "st");
+                          : "=a"(sw), "+m"(r) : "m"(b), "m"(cw) : "st", "st(1)");
         break;
     case U_YL2X:  /* ST(1) * log2(ST(0)), pops one */
         __asm__ volatile ("fldcw %3\n\tfldt %2\n\tfldt %1\n\tfyl2x\n\t"
                           "fnstsw %0\n\tfstpt %1"
-                          : "=a"(sw), "+m"(r) : "m"(b), "m"(cw) : "st");
+                          : "=a"(sw), "+m"(r) : "m"(b), "m"(cw) : "st", "st(1)");
         break;
     case U_YL2XP1:
         __asm__ volatile ("fldcw %3\n\tfldt %2\n\tfldt %1\n\tfyl2xp1\n\t"
                           "fnstsw %0\n\tfstpt %1"
-                          : "=a"(sw), "+m"(r) : "m"(b), "m"(cw) : "st");
+                          : "=a"(sw), "+m"(r) : "m"(b), "m"(cw) : "st", "st(1)");
         break;
     case U_PREM:  /* ST(0) remainder ST(1) */
         __asm__ volatile ("fldcw %3\n\tfldt %2\n\tfldt %1\n\tfprem\n\t"
                           "fnstsw %0\n\tfstpt %1\n\tfstp %%st(0)"
-                          : "=a"(sw), "+m"(r) : "m"(b), "m"(cw) : "st");
+                          : "=a"(sw), "+m"(r) : "m"(b), "m"(cw) : "st", "st(1)");
         break;
     case U_SCALE: /* ST(0) * 2^trunc(ST(1)) */
         __asm__ volatile ("fldcw %3\n\tfldt %2\n\tfldt %1\n\tfscale\n\t"
                           "fnstsw %0\n\tfstpt %1\n\tfstp %%st(0)"
-                          : "=a"(sw), "+m"(r) : "m"(b), "m"(cw) : "st");
+                          : "=a"(sw), "+m"(r) : "m"(b), "m"(cw) : "st", "st(1)");
         break;
     case U_XTRACT:
         __asm__ volatile ("fldcw %3\n\tfldt %1\n\tfxtract\n\tfnstsw %0\n\t"
                           "fstpt %1\n\tfstpt %2"
-                          : "=a"(sw), "+m"(r), "=m"(*second) : "m"(cw) : "st");
+                          : "=a"(sw), "+m"(r), "=m"(*second) : "m"(cw) : "st", "st(1)");
         *pushed = 1;
         break;
     case U_SIN:
