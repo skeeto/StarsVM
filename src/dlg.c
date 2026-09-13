@@ -31,6 +31,12 @@
 
 /* ---- template conversion -------------------------------------------------- */
 
+/* The typeface the template asked for.  It does not survive into the converted
+   template - see the DS_SETFONT note in dlg16_to_32 - so it is remembered here
+   and handed to the controls once they exist. */
+static char dlg_pending_face[LF_FACESIZE];
+static int  dlg_pending_pt;
+
 struct wbuf {
     uint16_t *base, *p, *end;
     int       overflow;
@@ -105,7 +111,23 @@ static void *dlg16_to_32(const uint8_t *src, uint32_t len)
     p += 4;
     cdit = *p++;
 
-    w_dword(&b, style);
+    /* DS_SETFONT is dropped, and this is the whole of why.  A dialog's units
+       are mapped to pixels through base units taken from a font, and the two
+       Windows disagree about which font: Win16 always used the system font -
+       GetDialogBaseUnits, 8 by 16, so a dialog unit is two pixels each way -
+       and Win32 uses the dialog's own font when the template names one.  Here
+       that font is MS Sans Serif 8 point, whose base units are 6 by 13, so
+       every one of the 36 templates came out at three quarters of its width
+       and four fifths of its height.
+
+       Controls scale with the dialog and so look merely small, but the game
+       draws some of its own text - the tutor's pages, most visibly - in a font
+       it sizes itself from LOGPIXELSY, which does not shrink with the dialog.
+       By the second page of the tutorial that text ran off the bottom of the
+       window.  Stripping the flag puts the mapping back on the system font;
+       the typeface itself is applied once the controls exist, which is what
+       Win16 did with it and all it was ever used for here. */
+    w_dword(&b, style & ~(uint32_t)DS_SETFONT);
     /* No WS_EX_APPWINDOW here.  Every one of this game's templates is
        captioned, so gating on the caption would have excluded nothing and given
        all 36 dialog types their own taskbar button and Alt-Tab slot, appearing
@@ -124,11 +146,19 @@ static void *dlg16_to_32(const uint8_t *src, uint32_t len)
     w_sz_or_ord(&b, &p, end);                         /* class   */
     w_sz_or_ord(&b, &p, end);                         /* caption */
 
+    dlg_pending_face[0] = 0;
+    dlg_pending_pt = 0;
     if (style & DS_SETFONT) {
+        const uint8_t *q;
+        unsigned k;
         if (p + 2 > end) goto bad;
-        w_word(&b, (uint16_t)(p[0] | (p[1] << 8)));   /* point size */
+        dlg_pending_pt = (int)(p[0] | (p[1] << 8));
         p += 2;
-        w_str(&b, &p, end);                           /* typeface   */
+        for (k = 0, q = p; q < end && *q && k < LF_FACESIZE - 1; q++, k++)
+            dlg_pending_face[k] = (char)*q;
+        dlg_pending_face[k] = 0;
+        while (q < end && *q) q++;
+        p = (q < end) ? q + 1 : end;
     }
 
     for (i = 0; i < cdit; i++) {
@@ -208,6 +238,9 @@ static struct {
     uint32_t proc16;
     uint16_t hinstance;
     int      modeless;
+    int      pt;                    /* the template's font, until it is made */
+    char     face[LF_FACESIZE];
+    HFONT    font;                  /* ours to delete when the dialog goes */
 } dlgs[MAX_DIALOGS];
 
 static uint32_t dlg_pending_proc;
@@ -237,6 +270,39 @@ void dlg_proc_set(HWND h, uint32_t proc16, uint16_t hinst)
     dlgs[i].hwnd = h;
     dlgs[i].proc16 = proc16;
     dlgs[i].hinstance = hinst;
+    dlgs[i].pt = dlg_pending_pt;
+    memcpy(dlgs[i].face, dlg_pending_face, sizeof dlgs[i].face);
+}
+
+static BOOL CALLBACK font_to_child(HWND h, LPARAM f)
+{
+    SendMessageA(h, WM_SETFONT, (WPARAM)f, MAKELPARAM(FALSE, 0));
+    return TRUE;
+}
+
+/* The typeface the template named, given to the dialog and its controls now
+   that they exist.  Their positions and sizes are already settled, in the
+   units the system font mapped, so this only changes what they draw with -
+   which is the whole of what DS_SETFONT was doing for us. */
+static void dlg_apply_font(int slot, HWND hwnd)
+{
+    LOGFONTA lf;
+    HDC dc;
+
+    if (slot < 0 || dlgs[slot].font || !dlgs[slot].pt || !dlgs[slot].face[0])
+        return;
+    memset(&lf, 0, sizeof lf);
+    dc = GetDC(NULL);
+    lf.lfHeight = -MulDiv(dlgs[slot].pt,
+                          dc ? GetDeviceCaps(dc, LOGPIXELSY) : 96, 72);
+    if (dc) ReleaseDC(NULL, dc);
+    lf.lfWeight  = FW_NORMAL;
+    lf.lfCharSet = DEFAULT_CHARSET;
+    memcpy(lf.lfFaceName, dlgs[slot].face, LF_FACESIZE);
+    dlgs[slot].font = CreateFontIndirectA(&lf);
+    if (!dlgs[slot].font) return;
+    SendMessageA(hwnd, WM_SETFONT, (WPARAM)dlgs[slot].font, MAKELPARAM(FALSE, 0));
+    EnumChildWindows(hwnd, font_to_child, (LPARAM)dlgs[slot].font);
 }
 
 static INT_PTR CALLBACK dlgproc_bridge(HWND hwnd, UINT msg,
@@ -260,6 +326,9 @@ static INT_PTR CALLBACK dlgproc_bridge(HWND hwnd, UINT msg,
     slot = dlg_slot(hwnd);
     hinst = (slot >= 0) ? dlgs[slot].hinstance : task.hinstance;
 
+    /* Before the guest's WM_INITDIALOG, which may measure a control. */
+    if (msg == WM_INITDIALOG) dlg_apply_font(slot, hwnd);
+
     if (msg == WM_MOUSEWHEEL) return FALSE;
 
     /* Once a stop is latched no guest instruction can run, so a modal dialog
@@ -280,7 +349,10 @@ static INT_PTR CALLBACK dlgproc_bridge(HWND hwnd, UINT msg,
         !IsWindowVisible(hwnd))
         ShowWindow(hwnd, SW_SHOWNORMAL);
 
-    if (msg == WM_NCDESTROY && slot >= 0) memset(&dlgs[slot], 0, sizeof dlgs[0]);
+    if (msg == WM_NCDESTROY && slot >= 0) {
+        if (dlgs[slot].font) DeleteObject(dlgs[slot].font);
+        memset(&dlgs[slot], 0, sizeof dlgs[0]);
+    }
 
     /* A DLGPROC returns only a handled/not-handled flag - except for the
        messages whose result is the whole point, where DefDlgProc takes the
