@@ -1,6 +1,6 @@
 # Stars!VM
 
-Runs the 16-bit Windows game **Stars! 2.70j** on modern Windows by
+Runs the 16-bit Windows game **[Stars!][] 2.70j** on modern Windows by
 translating it. 64-bit Windows has no NTVDM and cannot execute 16-bit code
 at all, which is the version nearly everyone now runs. Stars!VM interprets
 the game's machine code itself and its Win16 API calls in terms of Win32,
@@ -18,6 +18,7 @@ get exactly right is one the game exercises, and an API it can stub is one
 the game never calls.
 
 [otvdm]: https://github.com/otya128/winevdm
+[Stars!]: https://en.wikipedia.org/wiki/Stars!
 
 What is in the box:
 
