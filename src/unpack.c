@@ -43,11 +43,49 @@ static uint32_t pk_rd32(const uint8_t *p)
            ((uint32_t)p[2] << 16) | ((uint32_t)p[3] << 24);
 }
 
+/* Where the certificate table starts, or 0 if the file carries no signature.
+   Authenticode puts the signature at the very end of the file and records its
+   position in the fifth PE data directory - the one entry there whose address
+   is a file offset rather than an RVA.  So on a signed executable our trailer
+   is no longer the last thing in the file; it is the last thing before the
+   certificate, which has to begin on an 8-byte boundary and so is preceded by
+   up to seven bytes of padding.
+
+   Signing comes after packing, and has to: everything before the certificate
+   table is what the signature covers, so a module appended afterwards would
+   fall outside it, and Windows rejects a file with data beyond the table. */
+static uint32_t cert_offset(const uint8_t *file, uint32_t len)
+{
+    uint32_t e_lfanew, dd, ndirs, off, size;
+    unsigned magic;
+
+    if (len < 0x40 || file[0] != 'M' || file[1] != 'Z') return 0;
+    e_lfanew = pk_rd32(file + 0x3C);
+    if (e_lfanew > len || len - e_lfanew < 26) return 0;
+    if (memcmp(file + e_lfanew, "PE\0\0", 4) != 0) return 0;
+    magic = (unsigned)file[e_lfanew + 24] | ((unsigned)file[e_lfanew + 25] << 8);
+    if (magic != 0x10B && magic != 0x20B) return 0;      /* PE32, PE32+ */
+
+    /* NumberOfRvaAndSizes sits just before the directories themselves. */
+    dd = e_lfanew + 24 + (magic == 0x10B ? 96u : 112u);
+    if (dd > len || len - dd < 5 * 8) return 0;
+    ndirs = pk_rd32(file + dd - 4);
+    if (ndirs < 5) return 0;
+    off  = pk_rd32(file + dd + 4 * 8);
+    size = pk_rd32(file + dd + 4 * 8 + 4);
+    if (!off || !size || off >= len || size > len - off) return 0;
+    return off;
+}
+
 int pack_find(const uint8_t *file, uint32_t len, PackInfo *pi)
 {
-    uint32_t at;
+    uint32_t at, end, slack = 0;
 
     if (len < PACK_FIXED) return 0;
+    end = cert_offset(file, len);
+    if (end) slack = 7;                          /* the table's alignment */
+    else     end = len;
+    if (end < PACK_FIXED) return 0;
     /* Backwards, so the last trailer wins if a file somehow carries two: the
        one a later packer added is the one that describes this file.
 
@@ -57,7 +95,7 @@ int pack_find(const uint8_t *file, uint32_t len, PackInfo *pi)
        Every structural test therefore comes before anything is believed or
        reported, and a candidate that fails one is simply not a trailer.  Only
        a trailer that is structurally sound but unreadable earns a complaint. */
-    for (at = len - PACK_FIXED + 1; at-- > 0; ) {
+    for (at = end - PACK_FIXED + 1; at-- > 0; ) {
         uint32_t ndelta, tlen, i, version;
 
         if (memcmp(file + at, PACK_MAGIC, PACK_MAGLEN) != 0) continue;
@@ -69,7 +107,9 @@ int pack_find(const uint8_t *file, uint32_t len, PackInfo *pi)
 
         if (ndelta > PACK_MAXDELTA) continue;
         tlen = PACK_FIXED + ndelta * 8;
-        if (at + tlen != len) continue;               /* must end the file */
+        /* It must end our content: the file itself, or - once signed - the
+           padding in front of the certificate table. */
+        if (at + tlen > end || end - (at + tlen) > slack) continue;
         if (pi->complen > at) continue;
         if (!pi->rawlen || !pi->complen) continue;
         if (version != PACK_VERSION) {

@@ -67,6 +67,14 @@ costs 68 ms of decompression at startup and about 250 lines in the emulator.
 it, including the several plausible ideas that turned out to make the file
 bigger.
 
+The result can be signed, and signing has to come last. Authenticode puts the
+certificate at the very end of the file, so on a signed build the trailer is no
+longer the last thing there — the loader reads the PE's security directory to
+find where the certificate starts and looks for the trailer in front of it.
+Appending to an already-signed emulator is the mistake in the other direction:
+the payload would fall outside what the signature covers, and Windows rejects a
+file with anything past the certificate table, so the packer says so.
+
 A plain `cat StarsVM.exe stars.exe >Stars-x86.exe` still works and still runs.
 The loader takes whichever it is given: a compressed payload identifies itself
 by a trailer at the end of the file, and failing that the old scan looks for an

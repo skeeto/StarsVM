@@ -80,6 +80,14 @@ int main(int argc, char **argv)
     if (emu) {
         emub = slurp(emu, &emulen);
         if (!emub) return 1;
+        /* The other way round from the supported order, and silently wrong:
+           an Authenticode signature covers everything up to the certificate
+           table, so a payload appended after one falls outside it, and Windows
+           rejects a file that has anything beyond the table at all. */
+        if (cert_offset(emub, emulen))
+            fprintf(stderr, "%s: %s is already signed, and appending to it "
+                    "invalidates that signature - sign %s instead, afterwards"
+                    "\n", prog, emu, out);
     }
 
     if (verbose) printf("%s: %s, %u bytes\n", prog, mod, rawlen);

@@ -36,11 +36,15 @@
 
 /* ---- the container ------------------------------------------------------- */
 
-/* A trailer at the very end of the file, with the payload immediately before
-   it.  Found by searching backwards for the magic rather than by arithmetic on
+/* A trailer at the end of the file, with the payload immediately before it.
+   Found by searching backwards for the magic rather than by arithmetic on
    where our own PE ends - the property the plain appended-module scan had, and
    worth keeping: the linker's idea of where we stop moves when symbols are
-   stripped, and something may yet be appended after us. */
+   stripped, and something may yet be appended after us.
+
+   Something is: signing a release appends an Authenticode certificate table,
+   which must be the last thing in the file, so the trailer then ends a few
+   bytes short of it.  pack_find knows where to stop looking. */
 #define PACK_MAGIC    "StarsVM\032"        /* 8 bytes, no terminator */
 #define PACK_MAGLEN   8
 #define PACK_VERSION  1
