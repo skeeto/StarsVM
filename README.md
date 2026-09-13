@@ -42,10 +42,8 @@ To build and play from source you will need:
 
 - [`stars27jrc3.zip`][dl], just `stars.exe`
   (MD5: `654f494482c7904c4f0f265d6c081582`)
-- A [Stars! serial code][starskey]
 
 [dl]: https://wiki.starsautohost.org/wiki/Downloads
-[starskey]: https://skeeto.github.io/starskey/
 
 ## One file, nothing to install
 

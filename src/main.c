@@ -29,6 +29,7 @@ void api_profile_register(void);
 void api_dlg_register(void);
 extern int thunk_survey;
 extern int trace_paint;
+extern int prompt_serial;
 
 static NeModule module;
 
@@ -76,6 +77,7 @@ static const char usage_text[] =
     "  --fixed-clock   pin every clock the guest can read, so that a run\n"
     "                  writes byte-identical save files given the same\n"
     "                  input - which is what makes a turn comparable\n"
+    "  --prompt-serial force Stars! to prompt for a serial code\n"
     "  --trace-paint   log update regions around painting (repaint loops)\n"
     "  --no-native     interpret everything: patch in none of the native\n"
     "                  routines that stand in for the game's hottest code\n"
@@ -292,6 +294,8 @@ int main(int argc, char **argv)
             log_console = 1;
         } else if (!strcmp(a, "--fixed-clock")) {
             clock_fixed = 1;
+        } else if (!strcmp(a, "--prompt-serial")) {
+            prompt_serial = 1;
         } else if (!strcmp(a, "--steps") && i + 1 < argc) {
             steps = (uint64_t)_strtoui64(argv[++i], NULL, 0);
         } else if (!strcmp(a, "--trace-cpu") && i + 1 < argc) {

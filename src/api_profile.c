@@ -25,6 +25,10 @@
 #include <wchar.h>
 #include <windows.h>
 
+/* When disabled, supply a fixed GlobalSettings for Stars.ini */
+#define GLOBAL_SETTINGS_PRESET "cXK3c0vpLLSpdAgeAMJdjUcWXpnp"  // EGGSWAIN
+int prompt_serial = 0;
+
 static void pstr(uint32_t segptr, const char *s, unsigned max)
 {
     uint16_t sel = SEGPTR_SEL(segptr), off = SEGPTR_OFF(segptr);
@@ -271,8 +275,18 @@ static uint32_t p_GetPrivateProfileString(Cpu *c, Args *a)
     g_str(filep, file, sizeof file);
     ini_path(file, path, sizeof path / sizeof *path);
 
-    if (!ini_get(path, sec, key, value, sizeof value))
+    int found = ini_get(path, sec, key, value, sizeof value);
+    if (!found) {
         snprintf(value, sizeof value, "%s", def);
+    }
+
+    if (!strcmp(key, "GlobalSettings")) {
+        if (prompt_serial) {
+            snprintf(value, sizeof value, " ");  // force empty
+        } else if (!found) {
+            snprintf(value, sizeof value, "%s", GLOBAL_SETTINGS_PRESET);
+        }
+    }
 
     pstr(bufp, value, size);
     if (log_verbose)
