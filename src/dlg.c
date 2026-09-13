@@ -82,6 +82,66 @@ static void w_sz_or_ord(struct wbuf *b, const uint8_t **src, const uint8_t *end)
     w_str(b, src, end);
 }
 
+/* Skip a Win16 sz-or-ordinal without emitting anything. */
+static const uint8_t *skip_sz_or_ord(const uint8_t *s, const uint8_t *end)
+{
+    if (s < end && *s == 0xFF) return s + 3 < end ? s + 3 : end;
+    while (s < end && *s) s++;
+    return s < end ? s + 1 : end;
+}
+
+/* How much wider a dialog unit was across than Win32 makes it, as a fraction.
+   Both Windows map a dialog unit through the dialog font's average character
+   width, and both measure that average the same way - the 52 letters, divided
+   by 52 - but they disagree about the last step.  MS Sans Serif 8 point
+   measures 323 pixels for the 52, an average of 6.212; Win32's
+   GdiGetCharDimensions makes that 6, and Win 3.1 made it 7.
+
+   Seven is what the game's own text says it must be.  The tutor draws its
+   prose itself, in Arial sized from LOGPIXELSY and so identical on both, and
+   the width it wrapped at under Win 3.1 can be read straight back out of a
+   screenshot: ten consecutive line breaks bracket it, in our own font, to
+   231-232 pixels, which puts the tutor's client between 253 and 260 and its
+   145 units at 1.745 to 1.793 pixels each.  Six gives 1.5 and eight gives 2;
+   only seven, at 1.75, is inside.  The height needs no such help - both take
+   it from tmHeight, 13 either way - which is why the dialogs were the right
+   height and the wrong width, and why only the tutor, the one dialog whose
+   text has to wrap, ever ran out of room.
+
+   Returns the numerator and denominator of the correction, 1/1 when there is
+   nothing to correct. */
+static void hbase_ratio(int pt, const char *face, int *num, int *den)
+{
+    static const char *alpha =
+        "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ";
+    LOGFONTA lf;
+    HDC dc;
+    HFONT f;
+    HGDIOBJ old;
+    SIZE s;
+
+    *num = *den = 1;
+    if (pt <= 0 || !face || !face[0]) return;    /* the system font: no change */
+    dc = GetDC(NULL);
+    if (!dc) return;
+    memset(&lf, 0, sizeof lf);
+    lf.lfHeight  = -MulDiv(pt, GetDeviceCaps(dc, LOGPIXELSY), 72);
+    lf.lfCharSet = DEFAULT_CHARSET;
+    lstrcpynA(lf.lfFaceName, face, LF_FACESIZE);
+    f = CreateFontIndirectA(&lf);
+    if (f) {
+        old = SelectObject(dc, f);
+        if (GetTextExtentPoint32A(dc, alpha, 52, &s)) {
+            int win32 = (int)((s.cx / 26 + 1) / 2);          /* to nearest */
+            int win16 = (int)((s.cx + 51) / 52);             /* rounded up */
+            if (win32 > 0 && win16 > win32) { *num = win16; *den = win32; }
+        }
+        SelectObject(dc, old);
+        DeleteObject(f);
+    }
+    ReleaseDC(NULL, dc);
+}
+
 /* Convert the Win16 dialog template at `src` into a Win32 one.  Returns a
    malloc'd block the caller frees, or NULL if the template is malformed. */
 static void *dlg16_to_32(const uint8_t *src, uint32_t len)
@@ -90,6 +150,7 @@ static void *dlg16_to_32(const uint8_t *src, uint32_t len)
     struct wbuf b;
     uint32_t style;
     unsigned cdit, i;
+    int hnum = 1, hden = 1;      /* the horizontal unit's Win16 correction */
     size_t words = (size_t)len * 2 + 128;
 
     b.base = (uint16_t *)calloc(words, sizeof(uint16_t));
@@ -115,8 +176,30 @@ static void *dlg16_to_32(const uint8_t *src, uint32_t len)
        frame is reachable now that the splash has a button of its own. */
     w_dword(&b, 0);                                   /* dwExtendedStyle */
     w_word(&b, (uint16_t)cdit);
+
+    /* The font sits behind three strings and the horizontal geometry in front
+       of them, so it has to be read ahead of where it lies. */
+    if (style & DS_SETFONT) {
+        const uint8_t *q = p + 8;                     /* past x, y, cx, cy */
+        q = skip_sz_or_ord(q, end);                   /* menu    */
+        q = skip_sz_or_ord(q, end);                   /* class   */
+        q = skip_sz_or_ord(q, end);                   /* caption */
+        if (q + 2 < end) {
+            char face[LF_FACESIZE];
+            unsigned k;
+            int pt = (int)(q[0] | (q[1] << 8));
+            q += 2;
+            for (k = 0; k + 1 < LF_FACESIZE && q + k < end && q[k]; k++)
+                face[k] = (char)q[k];
+            face[k] = 0;
+            hbase_ratio(pt, face, &hnum, &hden);
+        }
+    }
+
     for (i = 0; i < 4; i++) {                         /* x, y, cx, cy */
-        w_word(&b, (uint16_t)(p[0] | (p[1] << 8)));
+        uint16_t v = (uint16_t)(p[0] | (p[1] << 8));
+        if (i == 0 || i == 2) v = (uint16_t)MulDiv(v, hnum, hden);
+        w_word(&b, v);
         p += 2;
     }
 
@@ -139,6 +222,7 @@ static void *dlg16_to_32(const uint8_t *src, uint32_t len)
         if (p + 14 > end) goto bad;
         for (k = 0; k < 5; k++) {                     /* x, y, cx, cy, id */
             geom[k] = (uint16_t)(p[0] | (p[1] << 8));
+            if (k == 0 || k == 2) geom[k] = (uint16_t)MulDiv(geom[k], hnum, hden);
             p += 2;
         }
         istyle = (uint32_t)p[0] | ((uint32_t)p[1] << 8) |
