@@ -12,4 +12,9 @@
    seeks it. */
 uint16_t dos_open_mem(const uint8_t *mem, uint32_t len);
 
+/* Flush and close every handle the guest left open.  Called once, as the
+   process ends: a real file is written through a buffer, and this is where
+   the last of it goes. */
+void dos_shutdown(void);
+
 #endif

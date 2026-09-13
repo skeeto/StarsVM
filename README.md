@@ -207,9 +207,10 @@ own from the first instruction to the last, with every output file identical:
 
 | | 10 turns | 50 turns |
 |---|---|---|
-| `--no-native` | 8.36 s | 89.7 s |
+| `--no-native`, unbuffered files | 8.36 s | 89.7 s |
 | eight routines | 4.42 s | 49.4 s |
-| | 1.89× | 1.82× |
+| eight routines, buffered files | 3.81 s | 46.2 s |
+| | 2.19× | 1.94× |
 
 Eight routines stand in for 53% of the instructions of a ten-turn run and
 49% of a fifty-turn one; what is left is spread thinner, and the profiler's
@@ -217,6 +218,14 @@ report — which ranks basic blocks and functions by instructions executed,
 disassembles the top ones, names them by NE segment, and says where the
 seconds went between the interpreter, the host API handlers, the x87 and the
 string loops — is how the next site is chosen.
+
+The last row is the file layer rather than the interpreter. Win16's `_lread`
+was a DOS call and nothing more, and the game reads its files the way that
+invites: a record's length word, its type word, then the record, one call
+each, 36,000 reads and 11,000 writes per generated turn, none of them
+seeking. Each was a `ReadFile` or `WriteFile`. A 16 KB buffer per handle,
+read-ahead or write-behind, turns that into a few hundred; `src/api_dos.c`
+says how it stays exact when two handles are the same file.
 
 ## Sound
 

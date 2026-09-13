@@ -11,6 +11,7 @@
 #include "hostclock.h"
 #include "prof.h"
 #include "native.h"
+#include "dos.h"
 
 #include <stdio.h>
 #include <string.h>
@@ -512,6 +513,7 @@ int main(int argc, char **argv)
                        (double)qfreq.QuadPart);
     }
     fpu_host_leave();
+    dos_shutdown();
     prof_report();
     audio_shutdown();
 

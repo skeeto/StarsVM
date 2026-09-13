@@ -17,6 +17,7 @@
 #include "hostclock.h"
 
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include <windows.h>
 
@@ -67,11 +68,39 @@ static uint32_t dta_ptr = 0;          /* SEGPTR; defaults to PSP:0080 */
    Sequential and read-only is the whole contract.  The game imports _lread
    and _lclose and no seek of any kind, so an image window needs no more than
    a position, and the operations that cannot apply to one say so rather than
-   pretending. */
+   pretending.
+
+   A real file is buffered.  Win16's _lread was a DOS call and nothing more -
+   HFILE is the DOS handle number - and the game reads its files the way that
+   API invites: a record's length word, its type word, then the record, one
+   call each, 36,000 reads and 11,000 writes per generated turn, all but a
+   hundred of them directly after another on the same handle and none of them
+   seeking.  Each was a ReadFile or WriteFile, a microsecond or two apiece,
+   which by the time the interpreter had been made fast was an eighth of a
+   turn.  So a handle carries one buffer that is either read-ahead - the
+   next 16 KB of the file, served out in pieces - or write-behind - what the
+   game has written and the file has not yet seen.  It is one or the other:
+   a read flushes the writes, a write hands back to the file whatever was
+   read ahead and not consumed, so the file's own position is always what
+   the guest would believe it to be except by the amount the buffer accounts
+   for, and a seek corrects for that amount.
+
+   Two handles can be the same file - the game closes a file before opening
+   it again, but nothing says it must - so a handle remembers which file it
+   is, and a read through one flushes the writes pending on any other handle
+   to the same file first.  Flushing at close and at exit is the rest of it.
+   What is lost is only the error from a write that fails, which now
+   surfaces at the flush rather than at the call. */
+#define FILE_BUF 16384u
+
 typedef struct {
     HANDLE         h;      /* a real file; NULL for an image window     */
     const uint8_t *mem;    /* an image window; NULL for a real file     */
     uint32_t       len, pos;
+    uint8_t       *buf;    /* FILE_BUF bytes, on first use              */
+    uint32_t       rpos, rlen;   /* read-ahead: buf[rpos..rlen) unread  */
+    uint32_t       wlen;         /* write-behind: buf[0..wlen) unwritten */
+    DWORD          vol, ixhi, ixlo;   /* which file this is             */
 } File;
 static File files[MAX_FILES];
 
@@ -83,11 +112,71 @@ static int file_slot(void)
     return -1;
 }
 
+/* Hand the file what the guest has written.  0, or -1 with the buffer
+   discarded: there is nothing a second attempt would do differently. */
+static int file_flush(File *f)
+{
+    DWORD put = 0;
+    int ok = 1;
+    if (!f->wlen) return 0;
+    ok = WriteFile(f->h, f->buf, f->wlen, &put, NULL) && put == f->wlen;
+    f->wlen = 0;
+    return ok ? 0 : -1;
+}
+
+static int file_same(const File *a, const File *b)
+{
+    return a->h && b->h && a->vol == b->vol && a->ixhi == b->ixhi && a->ixlo == b->ixlo;
+}
+
+/* Before reading through `f`, whatever another handle to the same file has
+   not yet written must be there to read. */
+static int file_flush_aliases(File *f)
+{
+    int i, r = 0;
+    for (i = 5; i < MAX_FILES; i++)
+        if (&files[i] != f && files[i].wlen && file_same(&files[i], f))
+            if (file_flush(&files[i]) < 0) r = -1;
+    return r;
+}
+
+/* Before opening or creating anything: which file it will turn out to be is
+   not known until it is open, and by then a creation has already truncated
+   it, so a buffered write to it from an older handle would land afterwards
+   and put back what the creation removed.  Opens are rare and a handle is
+   dirty only mid-write, so this costs nothing measurable. */
+static void file_flush_all(void)
+{
+    int i;
+    for (i = 5; i < MAX_FILES; i++)
+        if (files[i].wlen) file_flush(&files[i]);
+}
+
+/* Give back to the file what was read ahead of the guest, so that its
+   position is where the guest thinks it is. */
+static void file_unread(File *f)
+{
+    if (f->rlen > f->rpos) {
+        LONG back = -(LONG)(f->rlen - f->rpos);
+        SetFilePointer(f->h, back, NULL, FILE_CURRENT);
+    }
+    f->rpos = f->rlen = 0;
+}
+
 static int file_alloc(HANDLE h)
 {
+    BY_HANDLE_FILE_INFORMATION info;
     int fd = file_slot();
     if (fd < 0) { CloseHandle(h); return -1; }
     files[fd].h = h;
+    files[fd].rpos = files[fd].rlen = files[fd].wlen = 0;
+    if (GetFileInformationByHandle(h, &info)) {
+        files[fd].vol  = info.dwVolumeSerialNumber;
+        files[fd].ixhi = info.nFileIndexHigh;
+        files[fd].ixlo = info.nFileIndexLow;
+    } else {
+        files[fd].vol = files[fd].ixhi = files[fd].ixlo = 0;
+    }
     return fd;
 }
 
@@ -97,12 +186,27 @@ static File *file_get(int fd)
     return (files[fd].h || files[fd].mem) ? &files[fd] : NULL;
 }
 
-static void file_release(int fd)
+/* Close.  -1 if the last of the writes could not be made. */
+static int file_release(int fd)
 {
-    if (files[fd].h) CloseHandle(files[fd].h);
+    int r = 0;
+    if (files[fd].h) {
+        r = file_flush(&files[fd]);
+        CloseHandle(files[fd].h);
+    }
+    free(files[fd].buf);
+    files[fd].buf = NULL;
     files[fd].h = NULL;
     files[fd].mem = NULL;
     files[fd].len = files[fd].pos = 0;
+    files[fd].rpos = files[fd].rlen = files[fd].wlen = 0;
+    return r;
+}
+
+static int file_buffer(File *f)
+{
+    if (!f->buf) f->buf = malloc(FILE_BUF);
+    return f->buf != NULL;
 }
 
 /* Read from either kind of handle.  -1 on failure, which for an image window
@@ -110,7 +214,10 @@ static void file_release(int fd)
    for a file. */
 static long file_read(File *f, void *dst, uint32_t want)
 {
+    uint8_t *out = dst;
+    uint32_t done = 0;
     DWORD got = 0;
+
     if (f->mem) {
         uint32_t n = f->len - f->pos;
         if (n > want) n = want;
@@ -118,8 +225,78 @@ static long file_read(File *f, void *dst, uint32_t want)
         f->pos += n;
         return (long)n;
     }
-    if (want && !ReadFile(f->h, dst, want, &got, NULL)) return -1;
-    return (long)got;
+    if (f->wlen && file_flush(f) < 0) return -1;
+    if (file_flush_aliases(f) < 0) return -1;
+    if (!file_buffer(f)) {
+        if (want && !ReadFile(f->h, dst, want, &got, NULL)) return -1;
+        return (long)got;
+    }
+    while (done < want) {
+        uint32_t n = f->rlen - f->rpos;
+        if (n) {
+            if (n > want - done) n = want - done;
+            memcpy(out + done, f->buf + f->rpos, n);
+            f->rpos += n;
+            done += n;
+            continue;
+        }
+        if (want - done >= FILE_BUF) {
+            /* Bigger than the buffer: straight into the destination. */
+            if (!ReadFile(f->h, out + done, want - done, &got, NULL)) return -1;
+            done += got;
+            break;
+        }
+        if (!ReadFile(f->h, f->buf, FILE_BUF, &got, NULL)) return -1;
+        if (!got) break;                       /* the end of the file */
+        f->rpos = 0;
+        f->rlen = got;
+    }
+    return (long)done;
+}
+
+/* Write to a real file.  -1 on failure. */
+static long file_write(File *f, const void *src, uint32_t n)
+{
+    DWORD put = 0;
+
+    if (!f->h) return -1;
+    if (f->rlen) file_unread(f);
+    if (!n) return 0;
+    if (!file_buffer(f)) {
+        if (!WriteFile(f->h, src, n, &put, NULL)) return -1;
+        return (long)put;
+    }
+    if (f->wlen + n > FILE_BUF && file_flush(f) < 0) return -1;
+    if (n >= FILE_BUF) {
+        if (!WriteFile(f->h, src, n, &put, NULL)) return -1;
+        return (long)put;
+    }
+    memcpy(f->buf + f->wlen, src, n);
+    f->wlen += n;
+    return (long)n;
+}
+
+/* Seek a real file.  The buffer's worth of read-ahead is the difference
+   between the file's position and the guest's; writes go out first.
+   Returns the new position, or INVALID_SET_FILE_POINTER. */
+static DWORD file_seek(File *f, LONG off, DWORD method)
+{
+    if (f->wlen && file_flush(f) < 0) return INVALID_SET_FILE_POINTER;
+    if (f->rlen) {
+        if (method == FILE_CURRENT) off -= (LONG)(f->rlen - f->rpos);
+        f->rpos = f->rlen = 0;
+    }
+    return SetFilePointer(f->h, off, NULL, method);
+}
+
+/* Every handle, flushed and closed: the process is ending.  DOS closed a
+   program's handles when it exited, and the buffered writes of a file the
+   game left open would otherwise never reach it. */
+void dos_shutdown(void)
+{
+    int i;
+    for (i = 5; i < MAX_FILES; i++)
+        if (files[i].h || files[i].mem) file_release(i);
 }
 
 static char *guest_path(uint32_t segptr, char *buf, size_t n);
@@ -198,6 +375,7 @@ static uint32_t k_OpenFile(Cpu *c, Args *a)
         return (attr == INVALID_FILE_ATTRIBUTES) ? 0xFFFF : 0;
     }
 
+    file_flush_all();
     access = (style & OF_READWRITE) ? (GENERIC_READ | GENERIC_WRITE)
            : (style & OF_WRITE)     ? GENERIC_WRITE
                                     : GENERIC_READ;
@@ -219,8 +397,7 @@ static uint32_t k_lclose(Cpu *c, Args *a)
     int fd = arg_word(a);
     (void)c;
     if (!file_get(fd)) return 0xFFFF;
-    file_release(fd);
-    return 0;
+    return file_release(fd) < 0 ? 0xFFFF : 0;
 }
 
 static uint32_t k_lread(Cpu *c, Args *a)
@@ -243,14 +420,12 @@ static uint32_t k_lwrite(Cpu *c, Args *a)
     uint32_t buf = arg_long(a);
     uint16_t want = arg_word(a);
     File *f = file_get(fd);
-    DWORD put = 0;
+    long put;
 
     (void)c;
     if (!f || !f->h) return 0xFFFF;          /* an image window is read-only */
-    if (want && !WriteFile(f->h, sel_ptr(SEGPTR_SEL(buf), SEGPTR_OFF(buf)),
-                           want, &put, NULL))
-        return 0xFFFF;
-    return put;
+    put = file_write(f, sel_ptr(SEGPTR_SEL(buf), SEGPTR_OFF(buf)), want);
+    return (put < 0) ? 0xFFFF : (uint32_t)put;
 }
 
 /* ---- directory searches -------------------------------------------------- */
@@ -442,6 +617,7 @@ static uint32_t dos3call(Cpu *c, Args *a)
         HANDLE h;
         int fd;
         guest_path(SEGPTR(c->seg[S_DS], reg16(c, R_DX)), path, sizeof path);
+        file_flush_all();
         h = CreateFileA(path, GENERIC_READ | GENERIC_WRITE,
                         FILE_SHARE_READ, NULL,
                         (ah == 0x5B) ? CREATE_NEW : CREATE_ALWAYS,
@@ -460,6 +636,7 @@ static uint32_t dos3call(Cpu *c, Args *a)
                      : (al & 3) == 1 ? GENERIC_WRITE
                                      : (GENERIC_READ | GENERIC_WRITE);
         guest_path(SEGPTR(c->seg[S_DS], reg16(c, R_DX)), path, sizeof path);
+        file_flush_all();
         h = CreateFileA(path, access, FILE_SHARE_READ | FILE_SHARE_WRITE, NULL,
                         OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
         if (h == INVALID_HANDLE_VALUE) {
@@ -475,7 +652,7 @@ static uint32_t dos3call(Cpu *c, Args *a)
     case 0x3E: {                                 /* close */
         int fd = reg16(c, R_BX);
         if (!file_get(fd)) { dos_fail(c, DOSERR_BADHANDLE); return 0; }
-        file_release(fd);
+        if (file_release(fd) < 0) dos_fail(c, DOSERR_ACCESS);
         return 0;
     }
 
@@ -506,10 +683,11 @@ static uint32_t dos3call(Cpu *c, Args *a)
         File *f = file_get(fd);
         uint16_t sel = c->seg[S_DS], off = reg16(c, R_DX);
         uint32_t want = reg16(c, R_CX);
-        DWORD put = 0;
+        long put;
 
         if (!f || !f->h) { dos_fail(c, DOSERR_BADHANDLE); return 0; }
-        if (want && !WriteFile(f->h, sel_ptr(sel, off), want, &put, NULL)) {
+        put = file_write(f, sel_ptr(sel, off), want);
+        if (put < 0) {
             dos_fail(c, DOSERR_ACCESS);
             return 0;
         }
@@ -530,7 +708,7 @@ static uint32_t dos3call(Cpu *c, Args *a)
         DWORD pos;
 
         if (!f || !f->h) { dos_fail(c, DOSERR_BADHANDLE); return 0; }
-        pos = SetFilePointer(f->h, lo, NULL, method);
+        pos = file_seek(f, lo, method);
         if (pos == INVALID_SET_FILE_POINTER) { dos_fail(c, DOSERR_ACCESS); return 0; }
         set_reg16(c, R_AX, (uint16_t)pos);
         set_reg16(c, R_DX, (uint16_t)(pos >> 16));
