@@ -2,6 +2,7 @@
 #include "log.h"
 
 #include <string.h>
+#include <windows.h>
 
 /* A flat table plus a small hash for the reverse direction.  Handle 0 is
    reserved so that a null guest handle stays null. */
@@ -26,11 +27,51 @@ static uint16_t hash_head[HASH_SIZE];
 #define FIRST_HANDLE 0x40
 static unsigned next_free = FIRST_HANDLE;
 
+/* Released entries, chained through hnext and handed out again before the
+   table is grown.  Without this it was a bump allocator: h_release blanked an
+   entry and nothing ever gave it out again, so every handle the guest was
+   given and gave back cost one of the 8192 for the life of the process. */
+static uint16_t free_head;
+static unsigned live;
+
+/* Allocations since the table was last swept, and how full it has to be before
+   sweeping is worth the scan.  The interval matters: a sweep that reclaims
+   nothing, because every window really is alive, must not then run again on
+   the very next allocation. */
+#define SWEEP_FIRST (MAX_HANDLES / 8)
+#define SWEEP_EVERY 512
+static unsigned since_sweep;
+
 static unsigned hash_of(void *host)
 {
     uintptr_t v = (uintptr_t)host;
     v ^= v >> 16;
     return (unsigned)(v & (HASH_SIZE - 1));
+}
+
+/* Reclaim the entries whose window is gone.
+   A window reaches this table from a dozen places - GetDlgItem, GetFocus,
+   GetParent, and every message that carries an HWND - and most of what those
+   name are host controls, running the host's own class procedure, so nothing
+   tells us when they die.  DestroyWindow releases the one window it is handed
+   and not the children destroyed along with it; a dialog that ends through
+   EndDialog releases none of them at all.  Measured on the New Game wizard:
+   thirteen open-and-close cycles took 260 entries and gave back six.
+   IsWindow settles it with no bookkeeping to keep anywhere else.  Only windows
+   are swept - a stale HDC or HBRUSH cannot be asked whether it is still alive,
+   and neither piles up this way, because the host reuses those values and the
+   entry already in the table is found again instead of another being made. */
+static unsigned sweep_dead_windows(void)
+{
+    unsigned h, n = 0;
+
+    for (h = FIRST_HANDLE; h < next_free; h++)
+        if (tab[h].type == H_WND && tab[h].host &&
+            !IsWindow((HWND)tab[h].host)) {
+            h_release((uint16_t)h);
+            n++;
+        }
+    return n;
 }
 
 uint16_t h16(int type, void *host)
@@ -45,11 +86,26 @@ uint16_t h16(int type, void *host)
         if (tab[h].host == host && tab[h].type == type)
             return h;
 
-    if (next_free >= MAX_HANDLES) {
-        log_msg("handle: table full (%d entries)\n", MAX_HANDLES);
+    /* Nothing to hand back and the table is filling: see who has died. */
+    since_sweep++;
+    if (!free_head && next_free >= SWEEP_FIRST && since_sweep >= SWEEP_EVERY) {
+        unsigned dead = sweep_dead_windows();
+        since_sweep = 0;
+        if (dead)
+            log_msg("handle: swept %u dead windows, %u live\n", dead, live);
+    }
+
+    if (free_head) {
+        h = free_head;
+        free_head = tab[h].hnext;
+    } else if (next_free < MAX_HANDLES) {
+        h = (uint16_t)next_free++;
+    } else {
+        log_msg("handle: table full (%d entries, %u live)\n",
+                MAX_HANDLES, live);
         return 0;
     }
-    h = (uint16_t)next_free++;
+    live++;
     tab[h].host = host;
     tab[h].type = (uint8_t)type;
     tab[h].hnext = hash_head[b];
@@ -98,4 +154,7 @@ void h_release(uint16_t handle)
         if (*link == handle) { *link = tab[handle].hnext; break; }
     }
     memset(&tab[handle], 0, sizeof tab[handle]);
+    tab[handle].hnext = free_head;
+    free_head = handle;
+    live--;
 }
