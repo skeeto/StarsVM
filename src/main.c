@@ -443,9 +443,11 @@ int main(int argc, char **argv)
     gcmd[0] = 0;
     {
         size_t n = 0;
+        const char *prev = NULL;
         int k;
         for (k = 0; k < ngarg; k++) {
-            size_t len;
+            size_t len, j;
+            int ispath;
             if (!garg[k].s) continue;
             len = strlen(garg[k].s);
             if (n + 1 + len >= sizeof gcmd) {
@@ -458,8 +460,25 @@ int main(int argc, char **argv)
             }
             gcmd[n++] = ' ';
             memcpy(gcmd + n, garg[k].s, len);
+            /* A path a modern shell spelled with forward slashes becomes one
+               spelled the way a Win16 program can read.  Every file the game
+               opens through us would be found either way - Win32 takes both
+               separators - but the game also does its own string work on the
+               path it was handed, and a backslash is the only separator it
+               knows: the backup directory it keeps beside a host file is that
+               path cut at the last backslash, so `-g1 game/Game.hst` puts the
+               backups in the working directory instead of beside the game.
+               A switch is left alone - including one written with the other
+               DOS prefix, whatever the game makes of it - and so is the
+               password after -p, which is text and not a path. */
+            ispath = garg[k].s[0] != '-' && garg[k].s[0] != '/' &&
+                     !(prev && !strcmp(prev, "-p"));
+            if (ispath)
+                for (j = 0; j < len; j++)
+                    if (gcmd[n + j] == '/') gcmd[n + j] = '\\';
             n += len;
             gcmd[n] = 0;
+            prev = garg[k].s;
         }
     }
     if (*gcmd) log_msg("Game command line:%s\n", gcmd);
