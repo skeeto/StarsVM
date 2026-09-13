@@ -6,6 +6,9 @@ StarsVM-pack.exe
 StarsVM-prof.exe
 Stars-x86.exe
 
+tags
+.gdb_history
+
 # Generated at build time by tools/mkicon.py from the game's own
 # RT_GROUP_ICON.  Not checked in: it is derived, and the artwork belongs to
 # Stars!, not to this program.  A build with no stars.exe next door gets a
@@ -24,7 +27,6 @@ __pycache__/
 # ours to redistribute.
 stars.exe
 Stars.ini
-command-line.txt
 
 # The benchmark: a saved game and a copy of the module beside it, plus the
 # blessed outputs.  See tools/bench.ps1.  The game is the user's and the module
