@@ -169,14 +169,25 @@ static uint32_t k_OpenFile(Cpu *c, Args *a)
 
     (void)c;
     guest_path(namep, path, sizeof path);
-    /* A bare or relative name resolves against the directory holding the game,
-       which is also where its save files live. */
+    /* A bare or relative name is looked for beside the module first and then
+       in the current directory - the first two of the six places OpenFile
+       documents, and the two that matter, since the game's files are either
+       beside stars.exe or where the game was started.  The rule covers
+       creating a file as well as opening one, so that a turn file the game
+       rewrites lands where it found the last one; a name that exists in
+       neither place is created where the game was started, as it would have
+       been under Windows.  Until this, only the module's directory was tried,
+       and a game started from its own directory with the module elsewhere
+       opened its host file (a DOS open, which is relative to the current
+       directory) and then could not find the .xy beside it. */
     if (path[1] != ':' && path[0] != '\\') {
         size_t dl = strlen(task.exedir);
         if (dl > sizeof full / 2) dl = sizeof full / 2;
         snprintf(full, sizeof full, "%.*s\\%.*s",
                  (int)dl, task.exedir,
                  (int)(sizeof full - dl - 2), path);
+        if (GetFileAttributesA(full) == INVALID_FILE_ATTRIBUTES)
+            snprintf(full, sizeof full, "%.*s", (int)sizeof full - 1, path);
     } else {
         snprintf(full, sizeof full, "%.*s", (int)sizeof full - 1, path);
     }

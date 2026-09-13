@@ -91,7 +91,11 @@ the emulator's, so the game's go after it:
 StarsVM.exe -- -g10 game.hst
 ```
 
-That is the game's batch mode: ten turns from a host file, then exit.
+That is the game's batch mode: ten turns from a host file, then exit. A
+file the game names without a path is looked for beside the module first and
+then in the current directory, so a game can live beside `stars.exe` or
+wherever it was started from; its turn files are written back where its host
+file was found.
 `--help` lists the rest. One of them, `-x`, asked 16-bit Windows to shut the
 machine down when the game quit; here it does nothing.
 

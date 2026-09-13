@@ -10,10 +10,10 @@
 # which is the user's, and stars.exe, which is not ours to redistribute):
 #
 #   bench/orig/    Game.* plus stars.exe and Stars.ini, copied there by hand
-#                  from wherever the test game lives.  The module and the ini
-#                  sit beside the game files because the emulator resolves the
-#                  game's OpenFile calls against the module's directory and
-#                  reads Stars.ini from beside itself.
+#                  from wherever the test game lives.  Stars.ini sits beside
+#                  the emulator, which is where it reads it from, and stars.exe
+#                  beside that so no path has to be given; the game files
+#                  could be anywhere the run is started from.
 #   bench/run/     rebuilt from orig/ for every run
 #   bench/goldenN/ the output of an N-turn run everybody agrees is right;
 #                  -Golden (re)creates it from the run that follows
