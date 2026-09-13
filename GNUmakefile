@@ -66,7 +66,7 @@ POBJ := $(OBJDIR)/unity_pack.o
 ROBJ := $(OBJDIR)/unity_prof.o
 DEP  := $(OBJ:.o=.d) $(FOBJ:.o=.d) $(POBJ:.o=.d) $(ROBJ:.o=.d)
 
-.PHONY: all clean imports fuzz onefile prof
+.PHONY: all clean imports fuzz onefile prof bench
 
 all: $(TARGET)
 
@@ -124,6 +124,12 @@ fuzz: $(FUZZER)
 	./$(FUZZER)
 
 prof: $(PROF)
+
+# Ten generated turns of the game under bench/, timed and checked against the
+# blessed output.  TURNS=50 for the late-game profile.  See tools/bench.ps1.
+TURNS := 10
+bench: $(TARGET)
+	powershell -NoProfile -ExecutionPolicy Bypass -File tools/bench.ps1 -Turns $(TURNS)
 
 # One self-contained executable: the emulator with the game compressed and
 # appended.  Needs the game, like the icon step does, and says so rather than

@@ -732,3 +732,46 @@ int fpu_exec(Cpu *c, uint8_t op, uint8_t modrm, int is_reg,
         return 0;
     }
 }
+
+/* ------------------------------------------------------- for native routines */
+
+/* See fpu.h.  Wrappers, so that fpu_exec's own calls to the helpers stay
+   inlinable and their names stay private. */
+long double fpu_get(Cpu *c, int i) { return ld_get(c, i); }
+void        fpu_set(Cpu *c, int i, long double v) { ld_set(c, i, v); }
+void        fpu_load(Cpu *c, long double v) { fpu_push(c, v); }
+void        fpu_pop(Cpu *c) { fpu_discard(c); }
+uint16_t    fpu_status(Cpu *c) { return sw_value(c); }
+long double fpu_load_f64(uint16_t sel, uint16_t off) { return load_f64(sel, off); }
+
+long double fpu_arith(Cpu *c, int op, long double a, long double b)
+{
+    static const int codes[6] = { OP_ADD, OP_SUB, OP_SUBR, OP_MUL, OP_DIV, OP_DIVR };
+    return host_arith(c, codes[op], a, b);
+}
+
+long double fpu_sqrt(Cpu *c, long double a)
+{
+    long double second;
+    int pushed;
+    return host_unary(c, U_SQRT, a, 0, &second, &pushed);
+}
+
+void fpu_xam(Cpu *c, long double a)
+{
+    long double second;
+    int pushed;
+    host_unary(c, U_XAM, a, 0, &second, &pushed);
+}
+
+int64_t fpu_to_int(Cpu *c, long double v, unsigned width)
+{
+    return to_int(c, v, c->fpu_cw, width);
+}
+
+void fpu_store_f64(Cpu *c, uint16_t sel, uint16_t off, long double v)
+{
+    store_f64(c, sel, off, v, c->fpu_cw);
+}
+
+void fpu_clex(Cpu *c) { c->fpu_sw &= ~0x80FFu; }

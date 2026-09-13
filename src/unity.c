@@ -55,6 +55,7 @@
 #include "log.c"
 #include "main.c"
 #include "msg16.c"
+#include "native.c"
 #include "ne.c"
 #include "nedump.c"
 #include "prof.c"

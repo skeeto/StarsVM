@@ -33,6 +33,9 @@ What is in the box:
   unchanged
 - Win16 → Win32 translation for KERNEL, USER, GDI, COMMDLG, TOOLHELP, WIN87EM,
   MMSYSTEM and WAVEMIX — all 209 imports the game uses, none stubbed
+- native routines for the game's hottest code (`src/native.c`), patched over
+  it at load and checked against the interpreter on demand, which is what
+  makes turn generation fast; see "Turn generation" below
 
 To build and play from source you will need:
 
@@ -165,6 +168,52 @@ and it is a history expansion in an interactive shell — so the binaries are
 
 [w64]: https://github.com/skeeto/w64devkit
 
+## Turn generation
+
+Everything the game does is quick except generating a turn, and the profiler
+(`make prof`, then run the game; the report comes out at exit) says why in
+one line: a quarter of every instruction executed comes from five basic
+blocks, half from twenty. The hot code is a handful of small, closed pieces
+of game logic run tens of millions of times — the nearest-object scan, the
+habitability formula, the random generator, a few C runtime helpers — and the
+interpreter's per-instruction cost is what they pay.
+
+So those pieces are rewritten in C and patched over the guest code:
+`src/native.c` holds the routines, `docs/natives.md` the disassembly each one
+stands in for and what it must leave behind. The first byte of a site becomes
+`0xD6`, an opcode no 16-bit compiler emits, and the interpreter dispatches it
+to the routine. A routine may stop at any instruction boundary it likes — the
+loop's head after the iterations it models, the start of a float tail — and
+may decline, in which case the original instruction runs; either way the
+machine is left exactly as the interpreter would have left it, dead stores
+and stale register halves included, because that is what makes correctness a
+mechanical test:
+
+- `--verify-native N` runs, every Nth call, both the routine and the code it
+  replaced from the same state and requires the interpreter to reach the
+  routine's stopping point with the same registers, flags and memory. The same
+  state at the same address means the same future.
+- `tools/bench.ps1` (`make bench`) generates N turns with `--fixed-clock`,
+  times them, and compares every output file byte for byte against a blessed
+  run of the unpatched emulator (`--no-native`). A copy of a test game goes
+  in `bench/orig/`, beside `stars.exe` and `Stars.ini`; see the script.
+
+Measured on a Huge, packed, 16-player game, the time being the interpreter's
+own from the first instruction to the last, with every output file identical:
+
+| | 10 turns | 50 turns |
+|---|---|---|
+| `--no-native` | 8.36 s | 89.7 s |
+| eight routines | 4.42 s | 49.4 s |
+| | 1.89× | 1.82× |
+
+Eight routines stand in for 53% of the instructions of a ten-turn run and
+49% of a fifty-turn one; what is left is spread thinner, and the profiler's
+report — which ranks basic blocks and functions by instructions executed,
+disassembles the top ones, names them by NE segment, and says where the
+seconds went between the interpreter, the host API handlers, the x87 and the
+string loops — is how the next site is chosen.
+
 ## Sound
 
 The game's battle effects play. Stars! drove them through Microsoft's 1993
@@ -224,6 +273,9 @@ does not borrow a console it might later be killed through, so they want
 | `--dump`, `--dump-relocs` | print the NE structure |
 | `--imports` | print the import thunk table |
 | `--peek S:OFF:N` | hex-dump N bytes at segment S, offset OFF |
+| `--disasm S:OFF:N` | disassemble N instructions from there, as `segS:OFF` lines |
+| `--no-native` | patch in none of the native routines (see "Turn generation"): the A/B |
+| `--verify-native N` | every Nth call of each native routine, also run the code it replaced and stop on any difference |
 | `--play-wave N` | play a `WAVE` resource through the sound path and exit |
 | `--survey` | keep going past unimplemented APIs instead of stopping |
 | `--log FILE` | also write the log to a file |

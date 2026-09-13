@@ -8,6 +8,7 @@
 
 #include "cpu.h"
 #include "sel.h"
+#include "native.h"
 
 #include <stdio.h>
 #include <string.h>
@@ -324,6 +325,12 @@ int disasm(uint16_t sel, uint16_t off, char *out, int len)
         } else {
             snprintf(txt, sizeof txt, "(0f %02x)", o2);
         }
+        break;
+    }
+    case 0xD6: {                                  /* a native routine's site */
+        const char *nm = native_name_at(sel, off);
+        if (nm) snprintf(txt, sizeof txt, "native %s", nm);
+        else    snprintf(txt, sizeof txt, "(d6)");
         break;
     }
     default:

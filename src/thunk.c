@@ -101,8 +101,10 @@ void thunk_dispatch(Cpu *c, uint16_t off)
             return;
         }
     } else {
+        uint64_t t0 = prof_api_begin();
         a.top = words + e->pop / 2u;
         result = e->fn(c, &a);
+        prof_api_end(index, t0);
     }
 
     /* A register-convention entry (InitTask, DOS3Call, the FP dispatcher) takes
@@ -212,7 +214,7 @@ uint32_t call16_wndproc(uint32_t proc, uint16_t ax,
        to run, leaving the program alive with nothing reported.  So --steps
        bounds the outer loop only, and its help text says so. */
     {
-        uint64_t ran = 0;
+        uint64_t ran = 0, t0 = prof_nest_begin();
         for (;;) {
             r = cpu_run(c, CALL16_NOTE);
             if (r != CPU_STEPS) break;
@@ -222,6 +224,7 @@ uint32_t call16_wndproc(uint32_t proc, uint16_t ax,
                     SEGPTR_SEL(proc), SEGPTR_OFF(proc),
                     (unsigned long long)ran);
         }
+        prof_nest_end(t0);
     }
     depth--;
 

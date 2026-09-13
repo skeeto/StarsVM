@@ -101,6 +101,33 @@ int  cpu_stop_latched(void);
 void     cpu_push16(Cpu *c, uint16_t v);
 uint16_t cpu_pop16(Cpu *c);
 
+/* Opcode 0xD6 marks a site where a native routine stands in for guest code
+   (see native.h).  cpu_step hands it here with the address of the instruction;
+   the hook answers 1 when it ran the routine and left eip where it stopped,
+   0 when it declined - having put the byte 0xD6 replaced into *orig, so the
+   instruction can be decoded as it was - and -1 when the address is not a
+   site at all, which is then the undecodable instruction it always was.  A
+   pointer rather than a call so that cpu.c, and the fuzzer built from it, need
+   know nothing about native.c. */
+extern int (*cpu_native)(Cpu *c, uint16_t ip0, uint8_t *orig);
+
+/* The interpreter's own flag arithmetic, for a native routine that has to
+   leave eflags exactly as the instructions it stands in for would have -
+   including the bits real hardware leaves undefined and this interpreter
+   defines, because --verify-native compares the whole register.  `res` is the
+   unmasked result and `size` is in bytes.  cpu_shift is do_shift: op is the
+   group-2 reg field (4 SHL, 5 SHR, 7 SAR, ...). */
+void     cpu_flags_add(Cpu *c, uint32_t a, uint32_t b, uint32_t carry,
+                       uint32_t res, int size);
+void     cpu_flags_sub(Cpu *c, uint32_t a, uint32_t b, uint32_t borrow,
+                       uint32_t res, int size);
+void     cpu_flags_logic(Cpu *c, uint32_t res, int size);
+uint32_t cpu_shift(Cpu *c, int op, uint32_t v, unsigned count, int size);
+uint32_t cpu_inc(Cpu *c, uint32_t a, int size);     /* CF untouched */
+uint32_t cpu_dec(Cpu *c, uint32_t a, int size);
+/* MUL/IMUL r/m: the accumulator in, the product in DX:AX (EDX:EAX). */
+void     cpu_mul(Cpu *c, int size, uint32_t src, int signed_op);
+
 /* Convenience accessors. */
 static inline uint16_t reg16(Cpu *c, int r)            { return (uint16_t)c->r32[r]; }
 static inline void set_reg16(Cpu *c, int r, uint16_t v){ c->r32[r] = (c->r32[r] & 0xFFFF0000u) | v; }

@@ -25,3 +25,8 @@ __pycache__/
 stars.exe
 Stars.ini
 command-line.txt
+
+# The benchmark: a saved game and a copy of the module beside it, plus the
+# blessed outputs.  See tools/bench.ps1.  The game is the user's and the module
+# is not ours to redistribute.
+bench/

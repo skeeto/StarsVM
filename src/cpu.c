@@ -20,6 +20,8 @@
 
 Cpu cpu;
 
+int (*cpu_native)(Cpu *c, uint16_t ip0, uint8_t *orig);
+
 /* ------------------------------------------------------------------- helpers */
 
 static const uint8_t parity8[256] = {
@@ -678,6 +680,22 @@ int cpu_step(Cpu *c)
         case 0xF3: rep = 0xF3; break;
         }
     }
+
+    /* A native routine's site, or the SALC nothing emits.  Handled before the
+       profiler sees the opcode, so that a declined dispatch is counted as the
+       instruction it turned out to be. */
+    if (op == 0xD6) {
+        int r = cpu_native ? cpu_native(c, ip0, &op) : -1;
+        if (r > 0) goto done;
+        if (r < 0) {
+            c->state = CPU_BADOP;
+            c->bad_op = 0xD6;
+            c->bad_op2 = 0;
+            goto done;
+        }
+        /* Declined: op is now the byte that was patched over and eip is
+           already past it, so this is the ordinary decode from here on. */
+    }
     prof_op(c->seg[S_CS], ip0, op);
 
     switch (op) {
@@ -1250,8 +1268,10 @@ int cpu_step(Cpu *c)
         uint16_t dst_sel = c->seg[S_ES];          /* ES is not overridable */
         uint32_t count = rep ? (asize ? c->r32[R_CX] : reg16(c, R_CX)) : 1;
         uint32_t count0 = count;
+        uint64_t t0;
 
         if (rep && count == 0) break;
+        t0 = prof_tick();
         for (;;) {
             uint16_t si = asize ? (uint16_t)c->r32[R_SI] : reg16(c, R_SI);
             uint16_t di = asize ? (uint16_t)c->r32[R_DI] : reg16(c, R_DI);
@@ -1318,7 +1338,7 @@ int cpu_step(Cpu *c)
                 if (rep == 0xF2 && zf) break;
             }
         }
-        if (rep) prof_rep(count0 - count);
+        if (rep) prof_rep(count0 - count, prof_tick() - t0);
         break;
     }
 
@@ -1342,6 +1362,8 @@ int cpu_step(Cpu *c)
     case 0xDC: case 0xDD: case 0xDE: case 0xDF: {
         uint8_t modrm = fetch8(c);
         Ea ea = { 0, 0, 0, 0, 0 };
+        uint64_t t0;
+        int ok;
         if ((modrm >> 6) == 3) {
             ea.is_reg = 1;
             ea.reg = (modrm >> 3) & 7;
@@ -1350,7 +1372,10 @@ int cpu_step(Cpu *c)
             /* Re-decode with the ModRM byte we already consumed. */
             decode_ea(c, modrm, asize, &ea);
         }
-        if (!fpu_exec(c, op, modrm, ea.is_reg, ea.sel, ea.off)) {
+        t0 = prof_tick();
+        ok = fpu_exec(c, op, modrm, ea.is_reg, ea.sel, ea.off);
+        prof_fpu(prof_tick() - t0);
+        if (!ok) {
             c->state = CPU_BADOP;
             c->bad_op = op;
             c->bad_op2 = modrm;
@@ -1362,6 +1387,7 @@ int cpu_step(Cpu *c)
     /* ---- two-byte opcodes ------------------------------------------------ */
     case 0x0F: {
         uint8_t op2 = fetch8(c);
+        prof_op2(op2);
         switch (op2) {
         case 0x80: case 0x81: case 0x82: case 0x83:
         case 0x84: case 0x85: case 0x86: case 0x87:
@@ -1510,6 +1536,7 @@ int cpu_step(Cpu *c)
         break;
     }
 
+done:
     if (c->state == CPU_BADOP || c->state == CPU_FAULT) {
         c->bad_cs = c->seg[S_CS];
         c->bad_ip = ip_of(c);
@@ -1522,6 +1549,34 @@ int cpu_step(Cpu *c)
     }
     return c->state;
 }
+
+/* See cpu.h.  Wrappers rather than the helpers made external, so that the
+   interpreter's own calls to them stay inlinable. */
+void cpu_flags_add(Cpu *c, uint32_t a, uint32_t b, uint32_t carry,
+                   uint32_t res, int size)
+{
+    flags_add(c, a, b, carry, res, size);
+}
+
+void cpu_flags_sub(Cpu *c, uint32_t a, uint32_t b, uint32_t borrow,
+                   uint32_t res, int size)
+{
+    flags_sub(c, a, b, borrow, res, size);
+}
+
+void cpu_flags_logic(Cpu *c, uint32_t res, int size)
+{
+    flags_logic(c, res, size);
+}
+
+uint32_t cpu_shift(Cpu *c, int op, uint32_t v, unsigned count, int size)
+{
+    return do_shift(c, op, v, count, size);
+}
+
+uint32_t cpu_inc(Cpu *c, uint32_t a, int size) { return do_inc(c, a, size); }
+uint32_t cpu_dec(Cpu *c, uint32_t a, int size) { return do_dec(c, a, size); }
+void cpu_mul(Cpu *c, int size, uint32_t src, int signed_op) { do_mul(c, size, src, signed_op); }
 
 int cpu_run(Cpu *c, uint64_t max)
 {

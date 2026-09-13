@@ -10,6 +10,7 @@
 #include "audio.h"
 #include "hostclock.h"
 #include "prof.h"
+#include "native.h"
 
 #include <stdio.h>
 #include <string.h>
@@ -61,6 +62,8 @@ static const char usage_text[] =
     "  --imports       print the import thunk table and exit\n"
     "  --load          load and relocate the module, then report\n"
     "  --peek S:OFF:N  after loading, hex-dump N bytes at segment S offset OFF\n"
+    "  --disasm S:OFF:N\n"
+    "                  after loading, disassemble N instructions from there\n"
     "  --run           load and start executing at the entry point (default)\n"
     "  --steps N       stop after N instructions in the outer loop, 0 for\n"
     "                  no limit (the default).  Guest callbacks are never\n"
@@ -73,6 +76,14 @@ static const char usage_text[] =
     "                  writes byte-identical save files given the same\n"
     "                  input - which is what makes a turn comparable\n"
     "  --trace-paint   log update regions around painting (repaint loops)\n"
+    "  --no-native     interpret everything: patch in none of the native\n"
+    "                  routines that stand in for the game's hottest code\n"
+    "                  (docs/natives.md).  The A/B for them, and the way to\n"
+    "                  rule them out\n"
+    "  --verify-native N\n"
+    "                  every Nth time a native routine runs, also run the\n"
+    "                  guest code it replaced from the same state and stop\n"
+    "                  on any difference\n"
     "  --play-wave N   play \"WAVE\" resource N through the sound path\n"
     "                  and exit (the game has 2601 2602 2611 2612 2621 2631;\n"
     "                  N = 0 plays all six, overlapping)\n"
@@ -191,6 +202,13 @@ static void report_stop(int r, double secs)
     log_msg("\nStopped: %s after %llu instructions in %.3f s (%.1f M/s)\n",
             cpu_state_name(r), (unsigned long long)cpu.icount, secs,
             secs > 0.0 ? (double)cpu.icount / secs / 1e6 : 0.0);
+    /* Each native call counted as one instruction above.  This is what they
+       stood in for, so the two lines together say what a full interpretation
+       would have cost. */
+    if (native_calls)
+        log_msg("  native: %llu calls stood in for %llu more instructions\n",
+                (unsigned long long)native_calls,
+                (unsigned long long)native_instrs);
 }
 
 int main(int argc, char **argv)
@@ -210,7 +228,7 @@ int main(int argc, char **argv)
     uint64_t steps = 0;
     long trace_cpu = 0;
     long play_wave = -1;
-    struct { unsigned seg, off, len; } peek[8];
+    struct { unsigned seg, off, len, code; } peek[8];
     int npeek = 0;
     int i;
     LARGE_INTEGER qfreq, qt0, qt1;
@@ -235,13 +253,15 @@ int main(int argc, char **argv)
         } else if (!strcmp(a, "--module") && i + 1 < argc) {
             modopt = argv[++i];
             modopti = i;
-        } else if (!strcmp(a, "--peek") && i + 1 < argc && npeek < 8) {
+        } else if ((!strcmp(a, "--peek") || !strcmp(a, "--disasm")) &&
+                   i + 1 < argc && npeek < 8) {
+            peek[npeek].code = a[2] == 'd';
             if (sscanf(argv[++i], "%u:%x:%u", &peek[npeek].seg,
                        &peek[npeek].off, &peek[npeek].len) == 3) {
                 npeek++;
                 do_load = 1;
             } else {
-                fprintf(stderr, "%s: --peek wants SEG:HEXOFF:LEN\n", me);
+                fprintf(stderr, "%s: %s wants SEG:HEXOFF:LEN\n", me, a);
                 return 2;
             }
         } else if (!strcmp(a, "--help") || !strcmp(a, "-h")) {
@@ -263,6 +283,10 @@ int main(int argc, char **argv)
             trace_paint = 1;
         } else if (!strcmp(a, "--survey")) {
             thunk_survey = 1;
+        } else if (!strcmp(a, "--no-native")) {
+            native_disable();
+        } else if (!strcmp(a, "--verify-native") && i + 1 < argc) {
+            native_verify((unsigned)strtoul(argv[++i], NULL, 0));
         } else if (!strcmp(a, "--console")) {
             log_console = 1;
         } else if (!strcmp(a, "--fixed-clock")) {
@@ -371,6 +395,17 @@ int main(int argc, char **argv)
         unsigned segno = peek[i].seg, off = peek[i].off, len = peek[i].len, j;
         NeSeg *s = ne_seg(&module, segno);
         if (!s) { log_msg("peek: no segment %u\n", segno); continue; }
+        if (peek[i].code) {
+            /* N instructions, in the form the profiler and the traces use. */
+            char line[160];
+            for (j = 0; j < len; j++) {
+                int n = disasm(s->sel, (uint16_t)off, line, sizeof line);
+                log_msg("seg%u:%s\n", segno, line + 5);
+                if (n <= 0) break;
+                off += (unsigned)n;
+            }
+            continue;
+        }
         log_msg("seg %u (%04X):%04X ", segno, s->sel, off);
         for (j = 0; j < len; j++)
             log_msg("%02X ", sel_rd8(s->sel, (uint16_t)(off + j)));
@@ -424,6 +459,11 @@ int main(int argc, char **argv)
     }
     if (*gcmd) log_msg("Game command line:%s\n", gcmd);
 
+    /* Before the first instruction and before prof_begin takes its copy of the
+       code, so that the profiler's immutability check sees the patched code as
+       the code. */
+    native_install(&module);
+
     if (!task_start(&module, &cpu, gcmd, 1)) {
         ne_close(&module);
         log_close();
@@ -442,7 +482,7 @@ int main(int argc, char **argv)
             cpu.seg[S_CS], (unsigned)cpu.eip, cpu.seg[S_SS],
             reg16(&cpu, R_SP), cpu.seg[S_DS]);
 
-    prof_begin();
+    prof_begin(&module);
     fpu_host_enter();
     QueryPerformanceFrequency(&qfreq);
     QueryPerformanceCounter(&qt0);
