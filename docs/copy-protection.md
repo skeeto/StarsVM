@@ -188,3 +188,21 @@ one-time annoyance for anyone upgrading.
   that the codes live in the `.x` files. Its claim that the code changes with
   "adding/removing a piece of hardware" is true only of storage at C: or D:.
   Its implication that free disk space matters is wrong.
+
+## The serial code itself
+
+`docs/starskey.c` generates serial codes. The game's acceptance test is
+`seg15:0x2CEE`, called from the `GlobalSettings` decoder `seg5:0x1E98`
+with the parsed `V`. It is not a pointer test at all. In order:
+
+1. **Blacklist.** `seg15:0x2CA2` XORs `V` with `0xA5A5A5A5` and binary-searches
+   a 23-entry sorted table at `DGROUP:0x726`. A hit rejects. The entries decode
+   to the "usurper" `V` values the DOSBox notes recorded
+   (`0x0034xxxx`/`0x0047xxxx`/`0x00799d1a` and friends), so the effect the notes
+   attributed to a non-writable selector is really this list.
+2. **Top digit.** `V` is divided by 36 four times; the quotient — the value the
+   first character contributes to `V`, i.e. `raw(first_char)` — must be one of
+   `{2, 4, 6, 18, 22}`. The first character must therefore be one of
+   **`C, E, G, S, W`**.
+3. **Remainder.** `V mod 36^4` (the low four digits) must lie in
+   `[0x64, 0x16E360]`.

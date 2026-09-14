@@ -75,22 +75,55 @@ static uint32_t compute_V(const char *s) {
     return V;
 }
 
-/* Restart-valid window for the game's blob extraction: the polynomial V is used
- * as a far pointer (selector:offset) and the decoded struct is copied to V+4.
- * On real Windows 3.1 (DOSBox) the app's writable data segments occupy selector
- * indices 12-14 in both the LDT and GDT (verified empirically: LDT 12-14 and
- * GDT 13-14 all work), so V must be in [0x640000, 0x780000). Indices <= 8 and
- * >= 15 (plus all higher selectors) are non-writable: the copy faults and
- * extraction silently fails (V=0 at restart = "usurper"). Confirmed in DOSBox:
- * Good 0x0067a9b4/0x006d914f/0x006f0a76/0x00773366, GDT band 0x0068-0x0073;
- * Usurper 0x0034xxxx-0x0047xxxx and 0x00799d1a+. The offset cap keeps the
- * (up to ~0x400 byte) copy inside the segment limit (off + 4 + 0x3FC <= 0xFFFF). */
-#define V_MIN 0x00640000u
-#define V_MAX 0x00780000u
+/* Serial acceptance, as the game actually tests it.
+ *
+ * The game validates V in seg15:0x2CEE (called from the GlobalSettings decoder
+ * at seg5:0x1E98 with the 32-bit V just parsed).  In order:
+ *
+ *   1. blacklist.  seg15:0x2CA2 XORs V with 0xA5A5A5A5 and binary-searches a
+ *      23-entry sorted table at DGROUP:0x726.  A hit rejects the serial.  The
+ *      entries decode to the "usurper" V values seen on real hardware.
+ *   2. top digit.  V is divided by 36 four times (the base-36 digits, most
+ *      significant first) and the quotient must be one of {2,4,6,18,22}.  Since
+ *      that quotient is raw32(first char) -- the value the serial's FIRST
+ *      character contributes to V, un-XORed -- the first character must be one
+ *      of {C, E, G, S, W}.  This is what rules out "D": raw32('D') == 3.
+ *   3. remainder.  V mod 36^4 (the low four digits) must lie in [0x64,0x16E360].
+ */
 
-static int restart_ok(const char *s) {
+/* The 23 blacklisted V values: the stored table entries XOR 0xA5A5A5A5, with
+ * the 0x00000000 / 0xFFFFFFFF sentinels removed. */
+static const uint32_t BLACKLIST[] = {
+    0x01CE7893u, 0x01D1FBFDu, 0x01D9D3FDu, 0x0099F50Fu, 0x009BBE28u,
+    0x00E770B0u, 0x00C1E874u, 0x00C2C5A2u, 0x00D8A96Fu, 0x0035458Fu,
+    0x0034CD48u, 0x0034CED4u, 0x00684DD4u, 0x007599BFu, 0x0070C0DBu,
+    0x00799D1Au, 0x00479DD2u, 0x0235F254u, 0x02342951u, 0x02343D2Cu,
+    0x02340C98u, 0x02447E57u, 0x024240D9u,
+};
+
+/* raw32(first char): the value the first serial character contributes to V,
+ * which is exactly what seg15:0x2CEE recovers by dividing V by 36^4.  The
+ * allowed set is the five compares at seg15:0x2D6D..0x2D8E. */
+static int first_char_ok(uint32_t top) {
+    return top == 2 || top == 4 || top == 6 || top == 18 || top == 22;
+}
+
+static int blacklisted(uint32_t V) {
+    for (size_t i = 0; i < sizeof BLACKLIST / sizeof BLACKLIST[0]; i++)
+        if (BLACKLIST[i] == V) return 1;
+    return 0;
+}
+
+/* seg15:0x2CEE, exactly: not blacklisted, top digit in {2,4,6,18,22}, and the
+ * low four digits in [0x64,0x16E360]. */
+static int serial_ok(const char *s) {
     uint32_t V = compute_V(s);
-    return V >= V_MIN && V < V_MAX && (V & 0xFFFF) < 0xFC00;
+    uint32_t top = V / 1679616u;        /* 36^4 */
+    uint32_t rem = V % 1679616u;
+    if (blacklisted(V)) return 0;
+    if (!first_char_ok(top)) return 0;
+    if (rem < 0x64u || rem > 0x16E360u) return 0;
+    return 1;
 }
 
 static void init_state(uint32_t V, uint32_t *lo, uint32_t *ext) {
@@ -123,7 +156,7 @@ static int check(const char *s) {
     if (result % 36 != (uint32_t)charval32(t[5])) return 0;
     result /= 36;
     if (result % 36 != (uint32_t)charval32(t[6])) return 0;
-    return 1;
+    return serial_ok(t);
 }
 
 static int invert_char(uint32_t t) {
@@ -151,13 +184,26 @@ static void generate(char *out) {
             out[0] = (char)c0; out[1] = (char)c1; out[2] = (char)c2;
             out[3] = (char)c3; out[4] = (char)c4; out[5] = (char)c5;
             out[6] = (char)c6; out[7] = (char)c7; out[8] = 0;
-            if (restart_ok(out))
+            if (serial_ok(out))
                 return;
         }
     }
 }
 
 int main(int argc, char **argv) {
+    /* With no argument, generate one code; with a single numeric argument,
+       generate that many.  Any other argument is a serial code to validate,
+       and only the ones the game would accept are printed - which is how a
+       list of candidates can be filtered. */
+    if (argc > 1 && !(argc == 2 && strlen(argv[1]) != 8 &&
+                      strspn(argv[1], "0123456789") == strlen(argv[1]))) {
+        for (int i = 1; i < argc; i++)
+            if (strlen(argv[i]) == 8 && check(argv[i]))
+                puts(argv[i]);
+        return 0;
+    }
+
+    srand(time(0));
     int n = argc>1 ? atoi(argv[1]) : 1;
     for (int i = 0; i < n; i++) {
         char buf[9];
