@@ -1,0 +1,230 @@
+﻿<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Stars! Serial Codes</title>
+<style>
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+  body {
+    min-height: 100vh;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    background: linear-gradient(135deg, #0f0c29, #302b63, #24243e);
+    font-family: 'Segoe UI', system-ui, -apple-system, sans-serif;
+    color: #e0e0e0;
+  }
+
+  .card {
+    background: rgba(255,255,255,0.06);
+    backdrop-filter: blur(12px);
+    border: 1px solid rgba(255,255,255,0.12);
+    border-radius: 16px;
+    padding: 2.5rem 2rem;
+    width: 340px;
+    box-shadow: 0 8px 32px rgba(0,0,0,0.4);
+  }
+
+  h1 {
+    text-align: center;
+    font-size: 1.5rem;
+    font-weight: 600;
+    margin-bottom: 1.5rem;
+    letter-spacing: 0.05em;
+    background: linear-gradient(90deg, #a78bfa, #60a5fa);
+    -webkit-background-clip: text;
+    -webkit-text-fill-color: transparent;
+  }
+
+  label {
+    display: block;
+    font-size: 0.8rem;
+    font-weight: 600;
+    letter-spacing: 0.1em;
+    text-transform: uppercase;
+    color: #a5b4fc;
+    margin-bottom: 0.4rem;
+  }
+
+  input[type="text"] {
+    width: 100%;
+    padding: 0.7rem 0.9rem;
+    border: 1px solid rgba(255,255,255,0.15);
+    border-radius: 8px;
+    background: rgba(0,0,0,0.3);
+    color: #f0f0f0;
+    font-size: 1rem;
+    font-family: 'Courier New', monospace;
+    letter-spacing: 0.15em;
+    text-transform: uppercase;
+    outline: none;
+    transition: border-color 0.2s;
+  }
+
+  input[type="text"]:focus {
+    border-color: #a78bfa;
+  }
+
+  input[type="text"]::placeholder {
+    color: #666;
+    text-transform: none;
+    letter-spacing: normal;
+  }
+
+  button {
+    display: block;
+    width: 100%;
+    margin-top: 0.8rem;
+    padding: 0.7rem;
+    border: none;
+    border-radius: 8px;
+    background: linear-gradient(90deg, #7c3aed, #3b82f6);
+    color: #fff;
+    font-size: 1rem;
+    font-weight: 600;
+    cursor: pointer;
+    transition: opacity 0.2s, transform 0.1s;
+  }
+
+  button:hover { opacity: 0.9; }
+  button:active { transform: scale(0.98); }
+
+  button.secondary {
+    background: transparent;
+    border: 1px solid rgba(255,255,255,0.2);
+    color: #e0e0e0;
+  }
+
+  .output-group {
+    margin-top: 1.2rem;
+  }
+
+  .output-group label {
+    color: #a5b4fc;
+  }
+
+  .output-field {
+    width: 100%;
+    padding: 0.6rem 0.9rem;
+    border: 1px solid rgba(255,255,255,0.08);
+    border-radius: 8px;
+    background: rgba(0,0,0,0.25);
+    color: #34d399;
+    font-size: 0.95rem;
+    font-family: 'Courier New', monospace;
+    letter-spacing: 0.2em;
+    min-height: 2.4rem;
+  }
+
+  .spacer { height: 0.6rem; }
+
+  .error {
+    color: #f87171;
+    font-size: 0.85rem;
+    text-align: center;
+    margin-top: 0.8rem;
+    min-height: 1.2rem;
+  }
+</style>
+</head>
+<body>
+
+<div class="card">
+  <h1>Stars! Serial Codes</h1>
+
+  <label for="key">Serial</label>
+  <input type="text" id="key" placeholder="8-character code" maxlength="8" autocomplete="off" spellcheck="false">
+
+  <button id="genBtn">Generate</button>
+  <button id="checkBtn" class="secondary">Check</button>
+
+  <div class="spacer"></div>
+
+  <div class="output-group">
+    <label for="verdict">Result</label>
+    <input type="text" id="verdict" class="output-field" readonly value="">
+  </div>
+
+  <div class="error" id="error"></div>
+</div>
+
+<script>
+(async () => {
+  const wasm = "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";
+
+  const bytes = Uint8Array.from(atob(wasm), c => c.charCodeAt(0));
+  const mod = await WebAssembly.instantiate(bytes);
+  const generate    = mod.instance.exports.generate;
+  const checkSerial = mod.instance.exports.check_serial;
+
+  const keyInput = document.getElementById('key');
+  const genBtn   = document.getElementById('genBtn');
+  const checkBtn = document.getElementById('checkBtn');
+  const verdict  = document.getElementById('verdict');
+  const errDiv   = document.getElementById('error');
+
+  // check_serial returns 1=VALID, 0=INVALID, 2=USURPER. A usurper is a special
+  // kind of invalid, so it shares INVALID's color.
+  const NAMES  = { 1: 'VALID', 0: 'INVALID', 2: 'USURPER' };
+  const COLORS = { VALID: '#34d399', INVALID: '#f87171', USURPER: '#f87171' };
+
+  // The wasm module is deterministic and cannot source entropy, so the browser
+  // picks a 64-bit seed from Math.random() for each generated key.
+  function randomSeed() {
+    let s = 0n;
+    for (let i = 0; i < 8; i++) s = (s << 8n) | BigInt(Math.floor(Math.random() * 256));
+    return s;
+  }
+
+  // Keys travel as a single i64 with the first char in the high byte.
+  function unpackKey(u64) {
+    let s = '';
+    for (let i = 7; i >= 0; i--) s += String.fromCharCode(Number((u64 >> BigInt(8 * i)) & 0xffn));
+    return s;
+  }
+
+  function packKey(str) {
+    let r = 0n;
+    for (let i = 0; i < 8; i++) r = (r << 8n) | BigInt(str.charCodeAt(i));
+    return r;
+  }
+
+  function clearVerdict() {
+    verdict.value = '';
+    verdict.style.color = '';
+  }
+
+  function showVerdict(code) {
+    verdict.value = NAMES[code];
+    verdict.style.color = COLORS[NAMES[code]];
+  }
+
+  function onGenerate() {
+    errDiv.textContent = '';
+    clearVerdict();
+    keyInput.value = unpackKey(generate(randomSeed()));
+  }
+
+  function onCheck() {
+    errDiv.textContent = '';
+    const raw = keyInput.value.trim().toUpperCase();
+    if (raw.length !== 8) {
+      clearVerdict();
+      errDiv.textContent = 'Enter an 8-character serial.';
+      return;
+    }
+    showVerdict(checkSerial(packKey(raw)));
+  }
+
+  genBtn.addEventListener('click', onGenerate);
+  checkBtn.addEventListener('click', onCheck);
+  keyInput.addEventListener('keydown', e => { if (e.key === 'Enter') onCheck(); });
+
+  // Give the visitor a random serial on page load.
+  onGenerate();
+})();
+</script>
+</body>
+</html>
