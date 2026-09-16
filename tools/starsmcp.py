@@ -363,13 +363,19 @@ def _universe(h):
 
 def _fit(pts, universe):
     """screen = scale * universe + offset, each axis on its own so that a
-    non-square pixel would show up rather than be averaged away."""
+    non-square pixel would show up rather than be averaged away.
+
+    Outliers are thrown out and the fit repeated, because the points come from
+    pairing each label with the nearest drawn dot and that is ambiguous where
+    two planets sit close together - Hacker and Neil snap to the same dot -
+    which drags the whole fit if it is left in."""
     pairs = [(universe[n], xy) for n, xy in pts.items() if n in universe]
     if len(pairs) < 3:
         return None
-    def axis(i):
-        us = [p[0][i] for p in pairs]
-        ss = [p[1][i] for p in pairs]
+
+    def solve(ps, i):
+        us = [p[0][i] for p in ps]
+        ss = [p[1][i] for p in ps]
         n = len(us)
         mu, ms = sum(us) / float(n), sum(ss) / float(n)
         den = sum((u - mu) ** 2 for u in us)
@@ -377,12 +383,25 @@ def _fit(pts, universe):
             return None
         a = sum((us[k] - mu) * (ss[k] - ms) for k in range(n)) / den
         return a, ms - a * mu
-    fx, fy = axis(0), axis(1)
-    if not fx or not fy:
-        return None
-    resid = max(max(abs(fx[0] * p[0][0] + fx[1] - p[1][0]),
-                    abs(fy[0] * p[0][1] + fy[1] - p[1][1])) for p in pairs)
-    return fx, fy, resid, len(pairs)
+
+    def worst(ps, fx, fy):
+        err = [(max(abs(fx[0] * p[0][0] + fx[1] - p[1][0]),
+                    abs(fy[0] * p[0][1] + fy[1] - p[1][1])), k)
+               for k, p in enumerate(ps)]
+        err.sort()
+        return err
+
+    for round_ in range(6):
+        fx, fy = solve(pairs, 0), solve(pairs, 1)
+        if not fx or not fy:
+            return None
+        err = worst(pairs, fx, fy)
+        median = err[len(err) // 2][0]
+        top, at = err[-1]
+        if len(pairs) <= 6 or top <= max(3.0, 3.0 * median):
+            return fx, fy, top, len(pairs)
+        pairs.pop(at)
+    return fx, fy, err[-1][0], len(pairs)
 
 
 def _dump(h, what):
@@ -831,6 +850,10 @@ TOOLS = [
             "properties": {
                 "name": {"type": "string", "description": "planet or fleet name"},
                 "double": {"type": "boolean", "description": "double-click (default true)"},
+                "shift": {"type": "boolean",
+                          "description": "hold Shift - on the map that adds a waypoint"},
+                "control": {"type": "boolean"},
+                "right": {"type": "boolean", "description": "right-click, for the object menu"},
             },
             "required": ["name"],
         },
@@ -1031,7 +1054,7 @@ def call_tool(h, name, args):
         fx, fy, resid, n = fit
         x = int(round(fx[0] * st["x"] + fx[1]))
         y = int(round(fy[0] * st["y"] + fy[1]))
-        flags = 32 if args.get("double", True) else 0
+        flags = (32 if args.get("double", True) else 0)             | (4 if args.get("shift") else 0)             | (8 if args.get("control") else 0)             | (16 if args.get("right") else 0)
         h.request("CLICKAT %s %d %d %d" % (scan["hwnd"], x, y, flags))
         _settle(h)
         pane = _one(_windows(h), "starsplanet")
