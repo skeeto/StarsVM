@@ -224,7 +224,9 @@ int main(int argc, char **argv)
 {
     const char *modopt = NULL;
     const char *logfile = NULL;
+#ifdef STARSVM_HARNESS
     const char *harness_pipe = NULL;
+#endif
     wchar_t targetw[MAX_PATH * 2];
     int modopti = 0, opened = 0;
     /* Everything bound for the game, in the order it was written.  A bare
@@ -311,12 +313,14 @@ int main(int argc, char **argv)
             log_verbose = 1;
         } else if (!strcmp(a, "--log") && i + 1 < argc) {
             logfile = argv[++i];
+#ifdef STARSVM_HARNESS
         } else if (!strcmp(a, "--harness")) {
             harness_pipe = "\\\\.\\pipe\\StarsVM-harness";
             /* An optional name, but only one that is plainly a pipe path:
                anything else is a game argument we must not swallow. */
             if (i + 1 < argc && !strncmp(argv[i + 1], "\\\\", 2))
                 harness_pipe = argv[++i];
+#endif
         } else {
             fprintf(stderr, "%s: unknown option %s\n", me, a);
             return 2;
@@ -519,7 +523,9 @@ int main(int argc, char **argv)
             cpu.seg[S_CS], (unsigned)cpu.eip, cpu.seg[S_SS],
             reg16(&cpu, R_SP), cpu.seg[S_DS]);
 
+#ifdef STARSVM_HARNESS
     if (harness_pipe) harness_start(harness_pipe);
+#endif
 
     prof_begin(&module);
     fpu_host_enter();
