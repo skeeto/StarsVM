@@ -25,6 +25,7 @@ TARGET  := StarsVM.exe
 FUZZER  := StarsVM-fuzz.exe
 PACKER  := StarsVM-pack.exe
 PROF    := StarsVM-prof.exe
+HARNESS := StarsVM-harness.exe
 ONEFILE := Stars-x86.exe
 RES     := $(OBJDIR)/StarsVM.res.o
 
@@ -47,7 +48,7 @@ ARCH     := $(if $(CROSS),32,64)
 ARCHFILE := build/arch
 $(shell mkdir -p build)
 ifneq ($(ARCH),$(shell cat $(ARCHFILE) 2>/dev/null))
-$(shell rm -f $(TARGET) $(FUZZER) $(PACKER) $(PROF) $(ONEFILE) && echo $(ARCH) >$(ARCHFILE))
+$(shell rm -f $(TARGET) $(FUZZER) $(PACKER) $(PROF) $(HARNESS) $(ONEFILE) && echo $(ARCH) >$(ARCHFILE))
 endif
 
 # A unity build: src/unity.c includes every other source, so the compiler sees
@@ -64,9 +65,10 @@ OBJ  := $(OBJDIR)/unity.o
 FOBJ := $(OBJDIR)/unity_fuzz.o
 POBJ := $(OBJDIR)/unity_pack.o
 ROBJ := $(OBJDIR)/unity_prof.o
-DEP  := $(OBJ:.o=.d) $(FOBJ:.o=.d) $(POBJ:.o=.d) $(ROBJ:.o=.d)
+HOBJ := $(OBJDIR)/unity_harness.o
+DEP  := $(OBJ:.o=.d) $(FOBJ:.o=.d) $(POBJ:.o=.d) $(ROBJ:.o=.d) $(HOBJ:.o=.d)
 
-.PHONY: all clean imports fuzz onefile prof bench
+.PHONY: all clean imports fuzz onefile prof harness bench
 
 all: $(TARGET)
 
@@ -99,6 +101,10 @@ $(POBJ): $(SRCDIR)/unity_pack.c $(SRC) GNUmakefile | $(OBJDIR)
 $(ROBJ): $(SRCDIR)/unity_prof.c $(SRCDIR)/unity.c $(SRC) GNUmakefile | $(OBJDIR)
 	$(CC) $(CFLAGS) -c -o $@ $<
 
+# The same, for the LLM harness.  Built by `make harness` and never by `all`.
+$(HOBJ): $(SRCDIR)/unity_harness.c $(SRCDIR)/unity.c $(SRC) GNUmakefile | $(OBJDIR)
+	$(CC) $(CFLAGS) -c -o $@ $<
+
 # Console programs, so their output needs no --console, and unstripped, because
 # a failure in either is exactly when symbols are wanted.  Neither is part of
 # the emulator: see the header of the unity file each is built from.
@@ -112,6 +118,14 @@ $(PACKER): $(POBJ)
 # same program, and it is a console binary so the report needs no --console.
 $(PROF): $(ROBJ) $(RES)
 	$(CC) $(CFLAGS) -mconsole -o $@ $(ROBJ) $(RES) $(LDLIBS)
+
+# The harness is the emulator with the game's GUI, so it stays a windows binary,
+# but it is left unstripped: this is a dev tool and a crash in it is exactly when
+# symbols are wanted.
+$(HARNESS): $(HOBJ) $(RES)
+	$(CC) $(CFLAGS) -mwindows -o $@ $(HOBJ) $(RES) $(LDLIBS)
+
+harness: $(HARNESS)
 
 $(OBJDIR):
 	mkdir -p $(OBJDIR)

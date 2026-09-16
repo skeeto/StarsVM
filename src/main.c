@@ -12,6 +12,7 @@
 #include "prof.h"
 #include "native.h"
 #include "dos.h"
+#include "harness.h"
 
 #include <stdio.h>
 #include <string.h>
@@ -91,6 +92,11 @@ static const char usage_text[] =
     "                  and exit (the game has 2601 2602 2611 2612 2621 2631;\n"
     "                  N = 0 plays all six, overlapping)\n"
     "  --log FILE      also write the log to FILE\n"
+#ifdef STARSVM_HARNESS
+    "  --harness [PIPE]\n"
+    "                  serve the LLM harness on a named pipe (dev builds\n"
+    "                  only; see tools/starsmcp.py)\n"
+#endif
     "  --help          this text\n"
     "\n"
     "Everything starting with `-` before the `--` is ours, so the game's own\n"
@@ -218,6 +224,7 @@ int main(int argc, char **argv)
 {
     const char *modopt = NULL;
     const char *logfile = NULL;
+    const char *harness_pipe = NULL;
     wchar_t targetw[MAX_PATH * 2];
     int modopti = 0, opened = 0;
     /* Everything bound for the game, in the order it was written.  A bare
@@ -304,6 +311,12 @@ int main(int argc, char **argv)
             log_verbose = 1;
         } else if (!strcmp(a, "--log") && i + 1 < argc) {
             logfile = argv[++i];
+        } else if (!strcmp(a, "--harness")) {
+            harness_pipe = "\\\\.\\pipe\\StarsVM-harness";
+            /* An optional name, but only one that is plainly a pipe path:
+               anything else is a game argument we must not swallow. */
+            if (i + 1 < argc && !strncmp(argv[i + 1], "\\\\", 2))
+                harness_pipe = argv[++i];
         } else {
             fprintf(stderr, "%s: unknown option %s\n", me, a);
             return 2;
@@ -505,6 +518,8 @@ int main(int argc, char **argv)
     log_msg("\nStarting at %04X:%04X, ss:sp %04X:%04X, ds %04X\n\n",
             cpu.seg[S_CS], (unsigned)cpu.eip, cpu.seg[S_SS],
             reg16(&cpu, R_SP), cpu.seg[S_DS]);
+
+    if (harness_pipe) harness_start(harness_pipe);
 
     prof_begin(&module);
     fpu_host_enter();

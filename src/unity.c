@@ -49,6 +49,7 @@
 #include "dlg.c"
 #include "fpu.c"
 #include "handle.c"
+#include "harness.c"
 #include "heap.c"
 #include "hostclock.c"
 #include "imports.c"

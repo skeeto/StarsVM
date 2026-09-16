@@ -20,6 +20,7 @@
 #include "sel.h"
 #include "gmem.h"
 #include "log.h"
+#include "harness.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -116,6 +117,7 @@ static uint32_t g_Rectangle(Cpu *c, Args *a)
     HDC dc = HDC_32(arg_word(a));
     int l = arg_sword(a), t = arg_sword(a), r = arg_sword(a), b = arg_sword(a);
     (void)c;
+    harness_draw(dc, "rect", l, t, r - l, b - t);
     return (uint32_t)Rectangle(dc, l, t, r, b);
 }
 
@@ -124,6 +126,7 @@ static uint32_t g_Ellipse(Cpu *c, Args *a)
     HDC dc = HDC_32(arg_word(a));
     int l = arg_sword(a), t = arg_sword(a), r = arg_sword(a), b = arg_sword(a);
     (void)c;
+    harness_draw(dc, "ellipse", l, t, r - l, b - t);
     return (uint32_t)Ellipse(dc, l, t, r, b);
 }
 
@@ -133,6 +136,7 @@ static uint32_t g_PatBlt(Cpu *c, Args *a)
     int x = arg_sword(a), y = arg_sword(a), w = arg_sword(a), h = arg_sword(a);
     DWORD rop = arg_long(a);
     (void)c;
+    harness_draw(dc, "patblt", x, y, w, h);
     return (uint32_t)PatBlt(dc, x, y, w, h, rop);
 }
 
@@ -142,6 +146,7 @@ static uint32_t g_SetPixel(Cpu *c, Args *a)
     int x = arg_sword(a), y = arg_sword(a);
     COLORREF col = arg_long(a);
     (void)c;
+    harness_draw(dc, "pixel", x, y, 1, 1);
     return SetPixel(dc, x, y, col);
 }
 
@@ -155,6 +160,7 @@ static uint32_t g_TextOut(Cpu *c, Args *a)
     (void)c;
     g_str(s, buf, sizeof buf);
     if (len < 0 || (size_t)len > sizeof buf) len = (int)strlen(buf);
+    harness_text(dc, x, y, buf, len);
     return (uint32_t)TextOutA(dc, x, y, buf, len);
 }
 
@@ -191,6 +197,7 @@ static uint32_t g_ExtTextOut(Cpu *c, Args *a)
             for (i = 0; i < len; i++)
                 dx[i] = (int16_t)sel_rd16(sel, (uint16_t)(off + i * 2));
     }
+    harness_text(dc, x, y, buf, len);
     ok = ExtTextOutA(dc, x, y, flags, rp ? &r : NULL, buf, len, dx);
     free(dx);
     return (uint32_t)ok;
@@ -204,6 +211,7 @@ static uint32_t g_BitBlt(Cpu *c, Args *a)
     int sx = arg_sword(a), sy = arg_sword(a);
     DWORD rop = arg_long(a);
     (void)c;
+    harness_draw(dst, "bitblt", x, y, w, h);
     return (uint32_t)BitBlt(dst, x, y, w, h, src, sx, sy, rop);
 }
 

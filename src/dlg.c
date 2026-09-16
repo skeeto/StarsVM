@@ -23,6 +23,7 @@
 #include "res.h"
 #include "gmem.h"
 #include "msg16.h"
+#include "harness.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -351,6 +352,20 @@ static INT_PTR CALLBACK dlgproc_bridge(HWND hwnd, UINT msg,
     if (cpu_stop_latched()) {
         if (slot >= 0 && !dlgs[slot].modeless) EndDialog(hwnd, 0);
         return TRUE;
+    }
+
+    /* Pump here because a modal dialog's loop belongs to USER32: the guest is not
+   running its own loop, so GetMessage is not reached until the dialog closes.
+   Not on WM_INITDIALOG, though - the guest is mid-setup, and running commands
+   then is the same mistake winproc_bridge used to make. */
+    if (msg == WM_INITDIALOG) {
+        harness_event("dlg-open", (uintptr_t)hwnd, 0, 0);
+    } else {
+        harness_pump();
+        if (msg == WM_NCDESTROY)
+            harness_event("dlg-close", (uintptr_t)hwnd, 0, 0);
+        else if (msg == WM_COMMAND)
+            harness_event("cmd", (uintptr_t)hwnd, (long)LOWORD(wp), (long)HIWORD(wp));
     }
 
     r = winproc_call16(hwnd, proc16, hinst, msg, wp, lp, &ret_handle);

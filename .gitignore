@@ -4,6 +4,7 @@ StarsVM.exe
 StarsVM-fuzz.exe
 StarsVM-pack.exe
 StarsVM-prof.exe
+StarsVM-harness.exe
 Stars-x86.exe
 
 tags
@@ -27,6 +28,13 @@ __pycache__/
 # ours to redistribute.
 stars.exe
 Stars.ini
+
+# The tutorial writes a game of its own next to the module.  Game state, not
+# ours, and it appears the moment anyone runs the tutorial.
+tutorial.m1
+tutorial.m2
+tutorial.hst
+tutorial.xy
 
 # The benchmark: a saved game and a copy of the module beside it, plus the
 # blessed outputs.  See tools/bench.ps1.  The game is the user's and the module

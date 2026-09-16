@@ -17,6 +17,7 @@
 #include "dlg.h"
 #include "resobj.h"
 #include "hostclock.h"
+#include "harness.h"
 
 #include <stdio.h>
 #include <string.h>
@@ -393,6 +394,7 @@ static uint32_t u_GetMessage(Cpu *c, Args *a)
     BOOL r;
 
     (void)c;
+    harness_pump();
     r = GetMessageA(&m, HWND_32(hwnd), first, last);
     if (r == -1) return 0;
     put_msg16(p, &m);
@@ -408,6 +410,7 @@ static uint32_t u_PeekMessage(Cpu *c, Args *a)
     MSG m;
 
     (void)c;
+    harness_pump();
     if (!PeekMessageA(&m, HWND_32(hwnd), first, last, flags)) return 0;
     put_msg16(p, &m);
     return 1;
@@ -540,6 +543,11 @@ static uint32_t u_MessageBox(Cpu *c, Args *a)
     g_str(t, text, sizeof text);
     g_str(cap, caption, sizeof caption);
     log_msg("MessageBox: \"%s\" / \"%s\"\n", caption, text);
+    /* A host MessageBox is a modal loop of USER32's own, which our bridges
+       never see, so under the harness it would hang every request until it was
+       dismissed by hand.  Answer it instead; the text is recorded. */
+    if (harness_active())
+        return (uint32_t)harness_msgbox(caption, text, type);
     return (uint32_t)MessageBoxA(HWND_32(hwnd), text,
                                  caption[0] ? caption : "Stars!", type);
 }
@@ -701,8 +709,15 @@ static uint32_t u_GetCursorPos(Cpu *c, Args *a)
 {
     uint32_t p = arg_long(a);
     POINT pt;
+    int cx, cy;
     (void)c;
-    if (!GetCursorPos(&pt)) return 0;
+    /* When the harness is driving, the cursor it injected is the truth; the
+       host's real cursor would point wherever the developer left it. */
+    if (harness_input_cursor(&cx, &cy)) {
+        pt.x = cx; pt.y = cy;
+    } else if (!GetCursorPos(&pt)) {
+        return 0;
+    }
     put_point16(p, &pt);
     return 1;
 }
@@ -906,10 +921,22 @@ static uint32_t u_SetCursor(Cpu *c, Args *a)
 { (void)c; return h16(H_CURSOR, SetCursor((HCURSOR)h32(H_CURSOR, arg_word(a)))); }
 
 static uint32_t u_GetKeyState(Cpu *c, Args *a)
-{ (void)c; return (uint32_t)(uint16_t)GetKeyState(arg_sword(a)); }
+{
+    int vk = arg_sword(a);
+    (void)c;
+    /* Same as GetCursorPos: once the harness injects input, the modifier keys
+       it pressed are the ones the game should see, not the host's. */
+    if (harness_input_active()) return (uint32_t)(uint16_t)harness_input_key(vk);
+    return (uint32_t)(uint16_t)GetKeyState(vk);
+}
 
 static uint32_t u_GetAsyncKeyState(Cpu *c, Args *a)
-{ (void)c; return (uint32_t)(uint16_t)GetAsyncKeyState(arg_sword(a)); }
+{
+    int vk = arg_sword(a);
+    (void)c;
+    if (harness_input_active()) return (uint32_t)(uint16_t)harness_input_key(vk);
+    return (uint32_t)(uint16_t)GetAsyncKeyState(vk);
+}
 
 static uint32_t u_FlashWindow(Cpu *c, Args *a)
 {
@@ -1228,6 +1255,20 @@ static uint32_t u_TrackPopupMenu(Cpu *c, Args *a)
     uint32_t rp = arg_long(a);
     RECT r;
     (void)c; (void)reserved;
+    /* With the harness driving, show nothing: the host menu's own loop would
+       read the host mouse, which the agent cannot reach.  Record the items and
+       let the agent pick one by index instead. */
+    if (harness_active()) {
+        int id;
+        harness_menu_record(HMENU_32(menu));
+        id = harness_menu_wait();
+        /* Without TPM_RETURNCMD the caller expects WM_COMMAND, not the id. */
+        if (id && !(flags & 0x0100)) {
+            PostMessageA(HWND_32(hwnd), 0x0111 /*WM_COMMAND*/, MAKEWPARAM(id, 0), 0);
+            return 1;
+        }
+        return (uint32_t)id;
+    }
     if (rp) get_rect16(rp, &r);
     return (uint32_t)TrackPopupMenu(HMENU_32(menu), flags, x, y, 0,
                                     HWND_32(hwnd), rp ? &r : NULL);
@@ -1479,6 +1520,7 @@ static uint32_t u_BeginPaint(Cpu *c, Args *a)
 
     (void)c;
     upd("BeginPaint before", HWND_32(hwnd));
+    harness_text_begin(hwnd);
     dc = BeginPaint(HWND_32(hwnd), &ps);
     upd("BeginPaint after", HWND_32(hwnd));
     if (!dc) return 0;

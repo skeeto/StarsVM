@@ -22,6 +22,7 @@
 #include "sel.h"
 #include "log.h"
 #include "gmem.h"
+#include "harness.h"
 
 extern int trace_paint;   /* --trace-paint */
 
@@ -707,6 +708,15 @@ LRESULT CALLBACK winproc_bridge(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
     /* Nothing can run once a stop is latched, so let USER32 finish the teardown
        on its own rather than calling a guest that cannot execute. */
     if (cpu_stop_latched()) return DefWindowProcA(hwnd, msg, wp, lp);
+
+    /* No harness pump here.  Every window message is dispatched from the guest's
+   own loop, which reaches GetMessage and pumps there, so pumping again inside
+   the bridge only injects command execution into the middle of the guest's
+   window setup - which is enough to wedge the tutorial's game creation.  The
+   modal-dialog case, where the guest's loop is not running, is covered by
+   dlgproc_bridge. */
+    if (msg == WM_COMMAND)
+        harness_event("cmd", (uintptr_t)hwnd, (long)LOWORD(wp), (long)HIWORD(wp));
 
     r = winproc_call16(hwnd, proc16, hinst, msg, wp, lp, &ret_handle);
 
