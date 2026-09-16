@@ -35,6 +35,7 @@ tutorial.m1
 tutorial.m2
 tutorial.hst
 tutorial.xy
+tutorial.map
 
 # The benchmark: a saved game and a copy of the module beside it, plus the
 # blessed outputs.  See tools/bench.ps1.  The game is the user's and the module

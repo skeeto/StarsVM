@@ -22,6 +22,7 @@ harmless WM_NULL so the pump runs even when the game is idle in GetMessage.
 
 import base64
 import ctypes
+import io
 import ctypes.wintypes as wt
 import json
 import msvcrt
@@ -249,6 +250,158 @@ def _screenshot(h, args):
     ]
 
 
+ZOOM = {25: 3901, 38: 3902, 50: 3903, 75: 3904, 100: 3905,
+        125: 3906, 150: 3907, 200: 3908, 400: 3909}
+DUMP = {"universe": 85, "planets": 84, "fleets": 83}
+FIND, FIND_EDIT = 4200, 268
+
+
+def _windows(h):
+    return json.loads(h.request("OBSERVE", timeout=30.0))["windows"]
+
+
+def _one(ws, cls):
+    for w in ws:
+        if w["class"] == cls:
+            return w
+    return None
+
+
+def _settle(h, timeout=15.0):
+    end, since = time.time() + timeout, None
+    while time.time() < end:
+        try:
+            st = json.loads(h.request("IDLE", timeout=3.0))
+        except Exception:
+            st = {"idle": False}
+        if st.get("idle"):
+            if since is None:
+                since = time.time()
+            elif time.time() - since >= 0.15:
+                return True
+        else:
+            since = None
+        time.sleep(0.03)
+    return False
+
+
+def _find(h, name):
+    """View > Find.  It selects the object and scrolls the map until it is on
+    screen - which is the game's own answer to 'make this visible', and needs
+    no knowledge of where the map is looking."""
+    ws = _windows(h)
+    frame = _one(ws, "starsframe")
+    if not frame:
+        raise ValueError("no game frame")
+    h.request("COMMAND %s %d" % (frame["hwnd"], FIND))
+    _settle(h)
+    dlg = None
+    for w in _windows(h):
+        if w["class"] == "#32770" and w["title"] == "Find Planet or Fleet":
+            dlg = w["hwnd"]
+    if not dlg:
+        raise ValueError("the Find dialog did not open")
+    h.request("SETTEXT %s %d %s" % (dlg, FIND_EDIT, name))
+    h.request("CLICK %s 1" % dlg)
+    _settle(h)
+
+
+def _status(m, height):
+    """The scanner's own status line: the selected object's id and universe
+    coordinates, which the game puts at the bottom of the map."""
+    out = {}
+    for x, y, s in m["texts"]:
+        if y < height - 80:
+            continue
+        if s.startswith("X: "):
+            out["x"] = int(s[3:])
+        elif s.startswith("Y: "):
+            out["y"] = int(s[3:])
+        elif s.startswith("ID #"):
+            out["id"] = int(s[4:])
+        elif "x" in out and "y" in out and "name" not in out:
+            out["name"] = s
+    return out
+
+
+def _star_points(h, window, height):
+    h.request("REPAINT %s" % window)
+    _settle(h, 8.0)
+    m = json.loads(h.request("MAP %s" % window, timeout=20.0))
+    dots = [(d[1] + d[3] // 2, d[2] + d[4] // 2)
+            for d in m["draws"] if 0 < d[3] <= 6 and 0 < d[4] <= 6]
+    pts = {}
+    for x, y, s in m["texts"]:
+        if not s or y >= height - 80:
+            continue
+        ax, ay = x + 3 * len(s), y - 6
+        if dots:
+            bx, by = min(dots, key=lambda q: (q[0] - ax) ** 2 + (q[1] - ay) ** 2)
+            if (bx - ax) ** 2 + (by - ay) ** 2 <= 900:
+                ax, ay = bx, by
+        pts[s] = [ax, ay]
+    return pts, m
+
+
+def _universe(h):
+    """Every planet's universe coordinates, via Report > Dump to Text File.
+    The player has that menu item, so this is the game telling us what it
+    would tell them."""
+    text = _dump(h, "universe")
+    out = {}
+    for line in text.splitlines():
+        bits = line.rstrip().split(chr(9))
+        if len(bits) >= 4 and bits[0].isdigit():
+            out[bits[3]] = (int(bits[1]), int(bits[2]))
+    return out
+
+
+def _fit(pts, universe):
+    """screen = scale * universe + offset, each axis on its own so that a
+    non-square pixel would show up rather than be averaged away."""
+    pairs = [(universe[n], xy) for n, xy in pts.items() if n in universe]
+    if len(pairs) < 3:
+        return None
+    def axis(i):
+        us = [p[0][i] for p in pairs]
+        ss = [p[1][i] for p in pairs]
+        n = len(us)
+        mu, ms = sum(us) / float(n), sum(ss) / float(n)
+        den = sum((u - mu) ** 2 for u in us)
+        if den == 0:
+            return None
+        a = sum((us[k] - mu) * (ss[k] - ms) for k in range(n)) / den
+        return a, ms - a * mu
+    fx, fy = axis(0), axis(1)
+    if not fx or not fy:
+        return None
+    resid = max(max(abs(fx[0] * p[0][0] + fx[1] - p[1][0]),
+                    abs(fy[0] * p[0][1] + fy[1] - p[1][1])) for p in pairs)
+    return fx, fy, resid, len(pairs)
+
+
+def _dump(h, what):
+    """Ask the game to write one of its text reports, and read it back.  The
+    file it chose is named in the message box it puts up, which the harness
+    answers and records, so the name is never guessed."""
+    ws = _windows(h)
+    frame = _one(ws, "starsframe")
+    h.request("MSGBOX clear")
+    h.request("COMMAND %s %d" % (frame["hwnd"], DUMP[what]))
+    name = None
+    for i in range(40):
+        time.sleep(0.25)
+        box = json.loads(h.request("MSGBOX"))
+        if box.get("seq"):
+            text = box.get("text", "")
+            if "'" in text:
+                name = text.split("'")[1]
+            break
+    if not name:
+        raise ValueError("the game did not say where it wrote the report")
+    return io.open(os.path.join(ROOT, name), encoding="latin-1").read()
+
+
 def _wait_idle(h, args):
     timeout = float(args.get("timeout", 15.0))
     stable = float(args.get("stable", 0.15))
@@ -303,6 +456,8 @@ TOOLS = [
                 "hwnd": {"type": "string", "description": "hwnd of the control itself, from stars_observe"},
                 "dialog": {"type": "string", "description": "hwnd of the dialog, for id addressing"},
                 "id": {"type": "integer", "description": "control id, for dialog addressing"},
+                "shift": {"type": "boolean", "description": "hold Shift while pressing"},
+                "control": {"type": "boolean", "description": "hold Control while pressing"},
             },
         },
     },
@@ -467,8 +622,9 @@ TOOLS = [
         "description": (
             "The items of the last popup menu the game opened. The host popup "
             "menu cannot be clicked by injected input, so the harness records "
-            "the menu instead; right-click, then call this, then stars_menu_pick "
-            "and right-click again to choose; the game then sees the pick."),
+            "the menu instead and the game waits inside it: right-click, call "
+            "this, then stars_menu_pick. One right-click, not two - the game is "
+            "blocked in the menu the whole time, so do not dawdle."),
         "inputSchema": {"type": "object", "properties": {}},
     },
     {
@@ -593,6 +749,113 @@ TOOLS = [
             },
         },
     },
+    {
+        "name": "stars_zoom",
+        "description": "Set the scanner's zoom from the View menu. The game stops "
+                       "drawing star names below 50%, so stars_stars finds nothing there.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {"percent": {"type": "integer",
+                                       "description": "25 38 50 75 100 125 150 200 or 400"}},
+            "required": ["percent"],
+        },
+    },
+    {
+        "name": "stars_find",
+        "description": (
+            "View > Find: select a planet or fleet by name and scroll the map "
+            "until it is on screen. This is how you reach something that is off "
+            "screen. It selects on the map and reports the object id and universe "
+            "coordinates, but it does not move the Command pane - use "
+            "stars_select for that."),
+        "inputSchema": {
+            "type": "object",
+            "properties": {"name": {"type": "string", "description": "planet or fleet name"}},
+            "required": ["name"],
+        },
+    },
+    {
+        "name": "stars_select",
+        "description": (
+            "Select an object and bring it into the Command pane, wherever it is. "
+            "Finds it by name, then clicks it on the map at the point its universe "
+            "coordinates map to - the mapping is fitted from the stars currently "
+            "drawn against the universe report, so it follows any zoom or scroll. "
+            "Use this when you need to command a fleet, not just look at one."),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "name": {"type": "string", "description": "planet or fleet name"},
+                "double": {"type": "boolean", "description": "double-click (default true)"},
+            },
+            "required": ["name"],
+        },
+    },
+    {
+        "name": "stars_dump",
+        "description": (
+            "Report > Dump to Text File, read back. The game writes what this "
+            "player knows - planet coordinates and names, or what is known of "
+            "planets or fleets - and this returns the file's text. Far cheaper "
+            "than reading the same facts off the panes one at a time."),
+        "inputSchema": {
+            "type": "object",
+            "properties": {"what": {"type": "string",
+                                    "description": "universe, planets or fleets"}},
+            "required": ["what"],
+        },
+    },
+    {
+        "name": "stars_window",
+        "description": "One window and its child tree, for re-reading a dialog after "
+                       "acting on it. Cheaper than a whole stars_observe.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {"window": {"type": "string"}},
+            "required": ["window"],
+        },
+    },
+    {
+        "name": "stars_mem_read",
+        "description": (
+            "Read the game's own memory as hex. `sel` is a selector, from a "
+            "stars_mem_find hit. Bounded by the block the selector addresses, so "
+            "a bad range is an error rather than a peek at something else."),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "sel": {"type": "string", "description": "selector, hex"},
+                "off": {"type": "integer"},
+                "len": {"type": "integer", "description": "bytes, at most 65536"},
+            },
+            "required": ["sel", "off", "len"],
+        },
+    },
+    {
+        "name": "stars_mem_find",
+        "description": (
+            "Search the game's memory for a byte pattern and report where it sits. "
+            "This is how a structure is located: search for a string the UI shows, "
+            "or a value in little-endian, then read around the hit."),
+        "inputSchema": {
+            "type": "object",
+            "properties": {"hex": {"type": "string", "description": "pattern as hex bytes"}},
+            "required": ["hex"],
+        },
+    },
+    {
+        "name": "stars_mem_write",
+        "description": "Write the game's own memory. Bounded the same way as the read.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "sel": {"type": "string", "description": "selector, hex"},
+                "off": {"type": "integer"},
+                "hex": {"type": "string", "description": "bytes to write, as hex"},
+            },
+            "required": ["sel", "off", "hex"],
+        },
+    },
 ]
 
 
@@ -602,28 +865,33 @@ def call_tool(h, name, args):
     if name == "stars_observe":
         return [{"type": "text", "text": h.request("OBSERVE", timeout=30.0)}]
     if name == "stars_click":
+        mods = (4 if args.get("shift") else 0) | (8 if args.get("control") else 0)
         if args.get("hwnd"):
-            return [{"type": "text", "text": h.request("CLICKW %s" % args["hwnd"])}]
-        return [{"type": "text", "text": h.request("CLICK %s %d" % (args["dialog"], int(args["id"])))}]
+            return [{"type": "text", "text": h.request(
+                "CLICKW %s %d" % (args["hwnd"], mods))}]
+        return [{"type": "text", "text": h.request(
+            "CLICK %s %d %d" % (args["dialog"], int(args["id"]), mods))}]
     if name == "stars_move":
         return [{"type": "text", "text": h.request(
             "MOVE %s %d %d" % (args["window"], int(args["x"]), int(args["y"])))}]
     if name == "stars_stars":
+        # The status line is excluded by where the window ends, not by a fixed
+        # y.  The old cut-off was 690, which is neither: the status line sits
+        # at the foot of the client area - 1067 in a maximised game - and there
+        # are real star labels well below 690, which were silently dropped.
         hwnd = args["window"]
-        h.request("REPAINT %s" % hwnd)
-        info = json.loads(h.request("MAP %s" % hwnd))
-        dots = [(d[1] + d[3] // 2, d[2] + d[4] // 2)
-                for d in info["draws"] if 0 < d[3] <= 6 and 0 < d[4] <= 6]
-        out = {}
-        for x, y, s in info["texts"]:
-            if y >= 690 or not s:
-                continue
-            ex, ey = x + 3 * len(s), y - 6
-            if dots:
-                bx, by = min(dots, key=lambda p: (p[0] - ex) ** 2 + (p[1] - ey) ** 2)
-                if (bx - ex) ** 2 + (by - ey) ** 2 <= 900:
-                    ex, ey = bx, by
-            out[s] = [ex, ey]
+        w = None
+        for x in _windows(h):
+            if x["hwnd"] == hwnd:
+                w = x
+        if not w:
+            return [{"type": "text", "text": json.dumps({"ok": False, "error": "no such window"})}]
+        pts, info = _star_points(h, hwnd, w["rect"][3])
+        out = {"stars": pts, "count": len(pts),
+               "selected": _status(info, w["rect"][3])}
+        if not pts:
+            out["note"] = ("no named stars are drawn; the game hides star names "
+                           "below 50% zoom - try stars_zoom")
         return [{"type": "text", "text": json.dumps(out)}]
     if name == "stars_map":
         h.request("REPAINT %s" % args["window"])
@@ -680,6 +948,65 @@ def call_tool(h, name, args):
         return [{"type": "text", "text": h.request("MSGBOX")}]
     if name == "stars_text":
         return [{"type": "text", "text": h.request("TEXT %s" % args["window"], timeout=15.0)}]
+    if name == "stars_zoom":
+        pct = int(args["percent"])
+        if pct not in ZOOM:
+            raise ValueError("zoom must be one of %s" % sorted(ZOOM))
+        frame = _one(_windows(h), "starsframe")
+        return [{"type": "text", "text": h.request(
+            "COMMAND %s %d" % (frame["hwnd"], ZOOM[pct]))}]
+    if name == "stars_find":
+        _find(h, args["name"])
+        scan = _one(_windows(h), "starsscan")
+        h.request("REPAINT %s" % scan["hwnd"])
+        _settle(h, 8.0)
+        m = json.loads(h.request("MAP %s" % scan["hwnd"], timeout=20.0))
+        return [{"type": "text", "text": json.dumps(
+            {"ok": True, "selected": _status(m, scan["rect"][3])})}]
+    if name == "stars_select":
+        _find(h, args["name"])
+        scan = _one(_windows(h), "starsscan")
+        height = scan["rect"][3]
+        pts, m = _star_points(h, scan["hwnd"], height)
+        st = _status(m, height)
+        if "x" not in st or "y" not in st:
+            return [{"type": "text", "text": json.dumps(
+                {"ok": False, "error": "Find reported no coordinates",
+                 "status": st})}]
+        fit = _fit(pts, _universe(h))
+        if not fit:
+            return [{"type": "text", "text": json.dumps(
+                {"ok": False, "error": "too few named stars on screen to place it",
+                 "stars": len(pts)})}]
+        fx, fy, resid, n = fit
+        x = int(round(fx[0] * st["x"] + fx[1]))
+        y = int(round(fy[0] * st["y"] + fy[1]))
+        flags = 32 if args.get("double", True) else 0
+        h.request("CLICKAT %s %d %d %d" % (scan["hwnd"], x, y, flags))
+        _settle(h)
+        pane = _one(_windows(h), "starsplanet")
+        return [{"type": "text", "text": json.dumps(
+            {"ok": True, "universe": [st["x"], st["y"]], "client": [x, y],
+             "fitted_on": n, "residual_px": round(resid, 1),
+             "pane": pane["title"] if pane else None})}]
+    if name == "stars_dump":
+        what = args["what"].lower()
+        if what not in DUMP:
+            raise ValueError("what must be one of %s" % sorted(DUMP))
+        return [{"type": "text", "text": _dump(h, what)}]
+    if name == "stars_window":
+        return [{"type": "text", "text": h.request(
+            "WINDOW %s" % args["window"], timeout=30.0)}]
+    if name == "stars_mem_read":
+        return [{"type": "text", "text": h.request(
+            "MEMREAD %s %d %d" % (args["sel"], int(args["off"]), int(args["len"])),
+            timeout=30.0)}]
+    if name == "stars_mem_find":
+        return [{"type": "text", "text": h.request(
+            "MEMFIND %s" % args["hex"], timeout=60.0)}]
+    if name == "stars_mem_write":
+        return [{"type": "text", "text": h.request(
+            "MEMWRITE %s %d %s" % (args["sel"], int(args["off"]), args["hex"]))}]
     if name == "stars_journal":
         since = int(args.get("since", 0))
         return [{"type": "text", "text": h.request("JOURNAL %d" % since, timeout=15.0)}]
