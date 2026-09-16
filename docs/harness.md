@@ -92,6 +92,18 @@ The scanner has no scrollbars, and `Find` is the game's own answer:
   whatever took the mouse capture, which here is the popup rather than the
   pane, so aiming it back at the pane would be wrong even with the timing
   right.
+* **A real drag has to be walked.**  `stars_drag` posts its whole path in one
+  call, and since none of the guest runs until that call returns, a game that
+  follows the cursor rather than the messages sees only the final position.
+  The ship designer is the case that matters: dragging a part onto the hull
+  does nothing at all that way.  Walk it instead - `stars_press`, several
+  `stars_mouse` moves, `stars_release` - with a moment between each.
+* **A press must be aimed at the control it starts on.**  A posted message is
+  not hit-tested into child windows the way a real click is, so naming the
+  dialog and giving a point that happens to lie over its list box puts the
+  press on the dialog and the list never sees it.  Press the list; the moves
+  and the release then go to whatever took the capture, which is usually the
+  dialog, so give those in the dialog's own coordinates.
 * **Modifiers are explicit.**  A click sets them and leaves them set - it has
   to, because the click is read after the command returns - so `KEY` and
   `CLICK` take their own, and setting them to zero is how you get an unmodified

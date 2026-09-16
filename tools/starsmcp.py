@@ -612,6 +612,31 @@ TOOLS = [
         },
     },
     {
+        "name": "stars_mouse",
+        "description": (
+            "Move the mouse once, with whatever buttons `buttons` says are held. "
+            "Between a stars_press and a stars_release this is how a drag is "
+            "walked: stars_drag posts its whole path in one call and the game "
+            "sees only where the pointer ended up, which is no drag at all to "
+            "anything that follows the cursor. Note that a press must be aimed "
+            "at the control it starts on - a posted message is not hit-tested "
+            "into child windows - while the moves and the release go to whatever "
+            "took the capture, so give those in the coordinates of the window "
+            "being dropped on."),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "window": {"type": "string"},
+                "x": {"type": "integer"},
+                "y": {"type": "integer"},
+                "buttons": {"type": "boolean", "description": "left button held (default true)"},
+                "shift": {"type": "boolean"},
+                "control": {"type": "boolean"},
+            },
+            "required": ["window", "x", "y"],
+        },
+    },
+    {
         "name": "stars_press",
         "description": (
             "Press the mouse button and hold it. Use with stars_release when a "
@@ -986,6 +1011,11 @@ def call_tool(h, name, args):
             | (16 if args.get("right") else 0) | (32 if args.get("double") else 0)
         return [{"type": "text", "text": h.request(
             "CLICKAT %s %d %d %d" % (args["window"], int(args["x"]), int(args["y"]), flags))}]
+    if name == "stars_mouse":
+        flags = (1 if args.get("buttons", True) else 0)             | (4 if args.get("shift") else 0) | (8 if args.get("control") else 0)
+        return [{"type": "text", "text": h.request(
+            "MOUSE %s %d %d %d" % (args["window"], int(args["x"]),
+                                   int(args["y"]), flags))}]
     if name in ("stars_press", "stars_release"):
         flags = (4 if args.get("shift") else 0) | (8 if args.get("control") else 0)             | (16 if args.get("right") else 0)
         verb = "PRESS" if name == "stars_press" else "RELEASE"

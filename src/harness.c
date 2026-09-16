@@ -19,6 +19,7 @@
  *   PING                          liveness
  *   OBSERVE                       the whole window tree, with control ids
  *   WINDOW   <hwnd>               one window and its children
+ *   MOUSE    <hwnd> <x> <y> [f]   one mouse move, buttons per the MK_ flags
  *   PRESS    <hwnd> <x> <y> [f]   mouse button down, and held
  *   RELEASE  <hwnd> <x> <y> [f]   mouse button up, to whatever has capture
  *   CLICK    <hwnd> <id> [mods]   press a dialog control by id
@@ -1131,6 +1132,34 @@ static void hz_exec(char *line)
             }
         }
         hz_reply_ok();
+    } else if (!strcmp(line, "MOUSE") && arg) {
+        /* One move, with whatever buttons the flags say are down.  DRAG posts
+           its whole path in a single command, and nothing of the guest's runs
+           until that command returns, so a game that follows the cursor rather
+           than the messages sees only the final position and never a drag at
+           all.  Walking the path as separate commands - PRESS, MOUSE, MOUSE,
+           RELEASE - lets it run in between and see the pointer travel. */
+        char *rest;
+        uintptr_t hw = (uintptr_t)_strtoui64(arg, &rest, 16);
+        long x = strtol(rest, &rest, 10);
+        long y = strtol(rest, &rest, 10);
+        long flags = strtol(rest, NULL, 10);
+        HWND w = (HWND)hw;
+        int mk = (int)(flags & (MK_SHIFT | MK_CONTROL | MK_LBUTTON | MK_RBUTTON));
+        POINT pt, lp;
+        HWND cap;
+        if (!IsWindow(w)) { hz_reply_err("no such window"); return; }
+        pt.x = (int)x; pt.y = (int)y;
+        ClientToScreen(w, &pt);
+        hz_cursor = pt; hz_have_cursor = 1;
+        cap = GetCapture();
+        if (cap) w = cap;
+        lp = pt;
+        ScreenToClient(w, &lp);
+        PostMessageA(w, WM_MOUSEMOVE, (WPARAM)mk, MAKELPARAM(lp.x, lp.y));
+        hz_puts("{\"ok\":true,\"to\":\"");
+        hz_put_hex((uintptr_t)w);
+        hz_puts("\"}\n");
     } else if ((!strcmp(line, "PRESS") || !strcmp(line, "RELEASE")) && arg) {
         /* A click in two halves, so that the guest runs in between.  CLICKAT
            posts the down and the up together and nothing of the guest's runs
