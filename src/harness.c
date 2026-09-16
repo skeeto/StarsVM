@@ -19,6 +19,7 @@
  *   PING                          liveness
  *   OBSERVE                       the whole window tree, with control ids
  *   WINDOW   <hwnd>               one window and its children
+ *   POST     <hwnd> <msg> <wp> <lp>   one message, all hex
  *   MOUSE    <hwnd> <x> <y> [f]   one mouse move, buttons per the MK_ flags
  *   PRESS    <hwnd> <x> <y> [f]   mouse button down, and held
  *   RELEASE  <hwnd> <x> <y> [f]   mouse button up, to whatever has capture
@@ -86,27 +87,66 @@ static int   hz_mods;
 #define HZ_MENU_MAX 64
 
 static int  hz_menu_count;
+static int  hz_menu_raw;                /* items the menu really has */
 static int  hz_menu_id[HZ_MENU_MAX];
-static char hz_menu_text[HZ_MENU_MAX][64];
+static char hz_menu_text[HZ_MENU_MAX][96];
 static int  hz_menu_pick_set;
 static int  hz_menu_pick_idx;
+
+/* Walk a menu and every menu hanging off it, flattening as it goes: a leaf
+   under a submenu is recorded as "parent > child" and can be picked directly,
+   because what the game wants back is the item's command id and the path there
+   is only how a mouse would have reached it.
+
+   Submenus were being skipped entirely - GetMenuItemID returns -1 for one, the
+   same as for a separator - and that hid most of some menus.  The planet
+   report's mineral-concentration column appeared to offer nothing but "hide
+   the column" when three of its four entries are submenus holding the sorts
+   the tutorial asks for.  An owner-drawn item is kept too: it paints its own
+   text, so GetMenuString has none to give, but picking it still does a real
+   thing. */
+static void hz_menu_walk(HMENU m, const char *prefix)
+{
+    int n = GetMenuItemCount(m), i;
+
+    for (i = 0; i < n && hz_menu_count < HZ_MENU_MAX; i++) {
+        char text[96], path[96];
+        HMENU sub = GetSubMenu(m, i);
+        UINT id = GetMenuItemID(m, i);
+        MENUITEMINFOA mi;
+
+        text[0] = 0;
+        GetMenuStringA(m, i, text, (int)sizeof text, MF_BYPOSITION);
+        if (prefix[0] && text[0])
+            _snprintf(path, sizeof path, "%s > %s", prefix, text);
+        else
+            _snprintf(path, sizeof path, "%s", text[0] ? text : prefix);
+        path[sizeof path - 1] = 0;
+
+        if (sub) { hz_menu_walk(sub, path); continue; }
+        if (id == (UINT)-1) continue;                  /* separator */
+        if (!text[0]) {
+            memset(&mi, 0, sizeof mi);
+            mi.cbSize = sizeof mi;
+            mi.fMask = MIIM_FTYPE;
+            if (GetMenuItemInfoA(m, i, TRUE, &mi) && (mi.fType & MFT_SEPARATOR))
+                continue;
+            _snprintf(path, sizeof path, "%s%s<owner-drawn, id %u>",
+                      prefix, prefix[0] ? " > " : "", id);
+        }
+        _snprintf(hz_menu_text[hz_menu_count], sizeof hz_menu_text[0], "%s", path);
+        hz_menu_id[hz_menu_count] = (int)id;
+        hz_menu_count++;
+    }
+}
 
 void harness_menu_record(void *menu)
 {
     HMENU m = (HMENU)menu;
-    int n = GetMenuItemCount(m), i, k = 0;
 
     hz_menu_count = 0;
-    for (i = 0; i < n && k < HZ_MENU_MAX; i++) {
-        UINT id = GetMenuItemID(m, i);
-        if (id == (UINT)-1) continue;      /* separator */
-        hz_menu_text[k][0] = 0;
-        GetMenuStringA(m, i, hz_menu_text[k], (int)sizeof hz_menu_text[k], MF_BYPOSITION);
-        if (!hz_menu_text[k][0]) continue; /* owner-drawn separator */
-        hz_menu_id[k] = (int)id;
-        k++;
-    }
-    hz_menu_count = k;
+    hz_menu_raw = GetMenuItemCount(m);
+    hz_menu_walk(m, "");
 }
 
 /* Wait for the agent's pick.  The game is blocked here inside TrackPopupMenu,
@@ -1021,13 +1061,34 @@ static void hz_exec(char *line)
     } else if (!strcmp(line, "JOURNAL")) {
         hz_journal(arg ? strtol(arg, NULL, 10) : 0);
     } else if (!strcmp(line, "MOVE") && arg) {
+        /* With a width and a height it resizes as well.  The game's report
+           windows open at 600 pixels and draw columns out past 1400, clipped,
+           with a non-client scrollbar an injected click cannot reach - so
+           making the window bigger is the only way to read or click the
+           columns on the right. */
         char *rest;
         uintptr_t h = (uintptr_t)_strtoui64(arg, &rest, 16);
         int x = (int)strtol(rest, &rest, 10);
-        int y = (int)strtol(rest, NULL, 10);
-        SetWindowPos((HWND)h, NULL, x, y, 0, 0,
-                     SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE);
+        int y = (int)strtol(rest, &rest, 10);
+        int w = (int)strtol(rest, &rest, 10);
+        int ht = (int)strtol(rest, NULL, 10);
+        UINT f = SWP_NOZORDER | SWP_NOACTIVATE | (w > 0 && ht > 0 ? 0u : SWP_NOSIZE);
+        SetWindowPos((HWND)h, NULL, x, y, w, ht, f);
         hz_puts("{\"ok\":true}\n");
+    } else if (!strcmp(line, "POST") && arg) {
+        /* The escape hatch: one message, as given.  Some things the game can
+           be told have no gesture the harness can inject - a scrollbar in the
+           non-client area is the case that forced this - and a message is what
+           the gesture would have produced anyway.  Posted, like everything
+           else here, so a handler that opens a modal cannot hold the reply. */
+        char *rest;
+        uintptr_t h = (uintptr_t)_strtoui64(arg, &rest, 16);
+        unsigned long msg = strtoul(rest, &rest, 16);
+        unsigned long wp = strtoul(rest, &rest, 16);
+        unsigned long lp = strtoul(rest, NULL, 16);
+        if (!IsWindow((HWND)h)) { hz_reply_err("no such window"); return; }
+        PostMessageA((HWND)h, (UINT)msg, (WPARAM)wp, (LPARAM)lp);
+        hz_reply_ok();
     } else if (!strcmp(line, "REPAINT") && arg) {
         char *rest;
         uintptr_t h = (uintptr_t)_strtoui64(arg, &rest, 16);
@@ -1086,6 +1147,10 @@ static void hz_exec(char *line)
            the game's full attention and should spend it. */
         hz_puts("{\"ok\":true,\"waiting\":");
         hz_puts(hz_menu_count && !hz_menu_pick_set ? "true" : "false");
+        /* What the menu holds against what came back, so anything still being
+           dropped is visible rather than silently absent. */
+        hz_puts(",\"raw\":");
+        hz_putd((long)hz_menu_raw);
         hz_puts(",\"items\":[");
         for (i = 0; i < hz_menu_count; i++) {
             char num[32];
