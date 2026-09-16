@@ -19,7 +19,8 @@
  *   PING                          liveness
  *   OBSERVE                       the whole window tree, with control ids
  *   WINDOW   <hwnd>               one window and its children
- *   CLICK    <hwnd> <id>          press a dialog control by id
+ *   CLICK    <hwnd> <id> [mods]   press a dialog control by id
+ *   CLICKW   <hwnd> [mods]        press a control by its own handle
  *   COMMAND  <hwnd> <id>          WM_COMMAND, which is what a menu item is
  *   SETTEXT  <hwnd> <id> <text>   set a control's text
  *   KEY      <hwnd> <vk> [mods]   post a key down/up, with MK_ modifiers
@@ -909,11 +910,19 @@ static void hz_shot(HWND h, const char *path)
  * reply that cannot come until it acts on the dialog it has not been told
  * about - a deadlock by construction.  A real click is posted too, so this is
  * also the faithful thing: the effect lands on the next turn of the guest's
- * message loop, which the client reaches by observing or waiting. */
-static void hz_click_control(HWND c)
+ * message loop, which the client reaches by observing or waiting.
+ *
+ * `mods` are the MK_ flags the modifier keys should read as while the click is
+ * handled.  BM_CLICK carries none of them, and it does not need to: what the
+ * game reads is GetKeyState, which the harness owns once it has injected
+ * anything.  The tutorial needs this on its sixth page - shift held over the
+ * production queue's Add button adds ten at a time instead of one - and there
+ * was no way to ask for it. */
+static void hz_click_control(HWND c, int mods)
 {
     char cls[64];
 
+    hz_mods_set(mods);
     GetClassNameA(c, cls, sizeof cls);
     if (!_stricmp(cls, "Button")) {
         PostMessageA(c, BM_CLICK, 0, 0);
@@ -922,17 +931,17 @@ static void hz_click_control(HWND c)
         LPARAM lp;
         GetClientRect(c, &r);
         lp = MAKELPARAM((r.right - r.left) / 2, (r.bottom - r.top) / 2);
-        PostMessageA(c, WM_LBUTTONDOWN, MK_LBUTTON, lp);
-        PostMessageA(c, WM_LBUTTONUP, 0, lp);
+        PostMessageA(c, WM_LBUTTONDOWN, (WPARAM)(MK_LBUTTON | mods), lp);
+        PostMessageA(c, WM_LBUTTONUP, (WPARAM)mods, lp);
     }
     hz_reply_ok();
 }
 
-static void hz_click(HWND parent, long id)
+static void hz_click(HWND parent, long id, int mods)
 {
     HWND c = GetDlgItem(parent, (int)id);
     if (!c) { hz_reply_err("no such control"); return; }
-    hz_click_control(c);
+    hz_click_control(c, mods);
 }
 
 static void hz_exec(char *line)
@@ -1062,8 +1071,9 @@ static void hz_exec(char *line)
     } else if (!strcmp(line, "CLICK") && arg) {
         char *rest;
         uintptr_t h = (uintptr_t)_strtoui64(arg, &rest, 16);
-        long id = strtol(rest, NULL, 10);
-        hz_click((HWND)h, id);
+        long id = strtol(rest, &rest, 10);
+        long mods = strtol(rest, NULL, 10);
+        hz_click((HWND)h, id, (int)mods);
     } else if (!strcmp(line, "CLICKAT") && arg) {
         /* A click at client coordinates, for the map and other surfaces that
            are not a control.  Everything is injected into the guest's own
@@ -1155,7 +1165,8 @@ static void hz_exec(char *line)
            children no control id, so GetDlgItem cannot reach them. */
         char *rest;
         uintptr_t h = (uintptr_t)_strtoui64(arg, &rest, 16);
-        if (IsWindow((HWND)h)) hz_click_control((HWND)h);
+        long mods = strtol(rest, NULL, 10);
+        if (IsWindow((HWND)h)) hz_click_control((HWND)h, (int)mods);
         else hz_reply_err("no such window");
     } else if ((!strcmp(line, "COMMAND") || !strcmp(line, "MENU")) && arg) {
         char *rest;
