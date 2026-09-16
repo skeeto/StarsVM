@@ -19,6 +19,8 @@
  *   PING                          liveness
  *   OBSERVE                       the whole window tree, with control ids
  *   WINDOW   <hwnd>               one window and its children
+ *   PRESS    <hwnd> <x> <y> [f]   mouse button down, and held
+ *   RELEASE  <hwnd> <x> <y> [f]   mouse button up, to whatever has capture
  *   CLICK    <hwnd> <id> [mods]   press a dialog control by id
  *   CLICKW   <hwnd> [mods]        press a control by its own handle
  *   COMMAND  <hwnd> <id>          WM_COMMAND, which is what a menu item is
@@ -1129,6 +1131,57 @@ static void hz_exec(char *line)
             }
         }
         hz_reply_ok();
+    } else if ((!strcmp(line, "PRESS") || !strcmp(line, "RELEASE")) && arg) {
+        /* A click in two halves, so that the guest runs in between.  CLICKAT
+           posts the down and the up together and nothing of the guest's runs
+           until this command returns, so a button that is held, looked at, and
+           then let go cannot be expressed at all - and the game has gestures
+           that are exactly that: a bar in the summary pane puts up its popup
+           while the button is down and only acts on the release, so a CLICKAT
+           on it shows the popup and the tutorial never counts the step.
+
+           The release goes to whichever window took the mouse capture, which
+           is what Windows would do with it and is usually not the window that
+           was pressed - the popup takes the capture here.  The point travels
+           with it: it is turned into screen coordinates from the window named
+           and back into client coordinates of the window it is sent to.
+
+           The button also reads as held in between, through the emulated
+           GetKeyState, for a game that polls rather than waits. */
+        int down = (line[0] == 'P');
+        char *rest;
+        uintptr_t hw = (uintptr_t)_strtoui64(arg, &rest, 16);
+        long x = strtol(rest, &rest, 10);
+        long y = strtol(rest, &rest, 10);
+        long flags = strtol(rest, NULL, 10);
+        HWND w = (HWND)hw;
+        int mk = (int)(flags & (MK_SHIFT | MK_CONTROL));
+        int right = (flags & 16) != 0;
+        POINT pt, lp;
+        if (!IsWindow(w)) { hz_reply_err("no such window"); return; }
+        pt.x = (int)x; pt.y = (int)y;
+        ClientToScreen(w, &pt);
+        hz_cursor = pt; hz_have_cursor = 1;
+        hz_mods_set(mk);
+        hz_key_set(right ? VK_RBUTTON : VK_LBUTTON, down);
+        if (!down) {
+            HWND cap = GetCapture();
+            if (cap) w = cap;
+        }
+        lp = pt;
+        ScreenToClient(w, &lp);
+        if (down) {
+            PostMessageA(w, WM_MOUSEMOVE, (WPARAM)mk, MAKELPARAM(lp.x, lp.y));
+            PostMessageA(w, right ? WM_RBUTTONDOWN : WM_LBUTTONDOWN,
+                         (WPARAM)(mk | (right ? MK_RBUTTON : MK_LBUTTON)),
+                         MAKELPARAM(lp.x, lp.y));
+        } else {
+            PostMessageA(w, right ? WM_RBUTTONUP : WM_LBUTTONUP,
+                         (WPARAM)mk, MAKELPARAM(lp.x, lp.y));
+        }
+        hz_puts("{\"ok\":true,\"to\":\"");
+        hz_put_hex((uintptr_t)w);
+        hz_puts("\"}\n");
     } else if (!strcmp(line, "DRAG") && arg) {
         /* Press at (x1,y1), move to (x2,y2), release - all in `hwnd` client
            coordinates, all injected.  For gauges and waypoint drags. */

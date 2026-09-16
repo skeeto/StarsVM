@@ -101,6 +101,11 @@ class Harness:
         self.buf = b""
         self._last_nudge = 0.0
 
+        if launch and find_pid("StarsVM-harness.exe") is not None:
+            # One already running: attach to it rather than starting a second
+            # that would fight it for the pipe.  A stale instance left over
+            # from a crash is exactly when this matters.
+            launch = False
         if launch:
             args = [EXE, "--harness", pipe]
             if log:
@@ -588,6 +593,45 @@ TOOLS = [
         },
     },
     {
+        "name": "stars_press",
+        "description": (
+            "Press the mouse button and hold it. Use with stars_release when a "
+            "gesture is the holding: the summary pane's bars put up their popup "
+            "while the button is down and only act on the release, so a plain "
+            "click shows the popup and the game never sees the gesture finish."),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "window": {"type": "string"},
+                "x": {"type": "integer", "description": "client x"},
+                "y": {"type": "integer", "description": "client y"},
+                "right": {"type": "boolean"},
+                "shift": {"type": "boolean"},
+                "control": {"type": "boolean"},
+            },
+            "required": ["window", "x", "y"],
+        },
+    },
+    {
+        "name": "stars_release",
+        "description": (
+            "Let the mouse button go. Give the same window and point as the "
+            "press; the harness redirects it to whatever took the mouse capture, "
+            "which is what Windows would do. Settle between the two."),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "window": {"type": "string"},
+                "x": {"type": "integer"},
+                "y": {"type": "integer"},
+                "right": {"type": "boolean"},
+                "shift": {"type": "boolean"},
+                "control": {"type": "boolean"},
+            },
+            "required": ["window", "x", "y"],
+        },
+    },
+    {
         "name": "stars_drag",
         "description": "Press the left mouse at (x1,y1), drag to (x2,y2), release, "
                        "all injected. For gauges and sliders drawn by the game.",
@@ -919,6 +963,12 @@ def call_tool(h, name, args):
             | (16 if args.get("right") else 0) | (32 if args.get("double") else 0)
         return [{"type": "text", "text": h.request(
             "CLICKAT %s %d %d %d" % (args["window"], int(args["x"]), int(args["y"]), flags))}]
+    if name in ("stars_press", "stars_release"):
+        flags = (4 if args.get("shift") else 0) | (8 if args.get("control") else 0)             | (16 if args.get("right") else 0)
+        verb = "PRESS" if name == "stars_press" else "RELEASE"
+        return [{"type": "text", "text": h.request(
+            "%s %s %d %d %d" % (verb, args["window"], int(args["x"]),
+                                int(args["y"]), flags))}]
     if name == "stars_drag":
         return [{"type": "text", "text": h.request(
             "DRAG %s %d %d %d %d" % (args["window"], int(args["x1"]), int(args["y1"]),
