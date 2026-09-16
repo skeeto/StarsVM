@@ -109,9 +109,12 @@ The scanner has no scrollbars, and `Find` is the game's own answer:
   `CLICK` take their own, and setting them to zero is how you get an unmodified
   press after a shift-click.  `stars_click` takes `shift`, which is what the
   production queue's Add button reads to add ten at a time.
-* **Popup menus block the game.**  Right-click, then `stars_menu_items`, then
-  `stars_menu_pick` - one right-click, and the game is stopped inside
-  `TrackPopupMenu` the whole time, so do not dawdle.
+* **Popup menus block the game, and not only right-clicks open them.**
+  Right-click, then `stars_menu_items`, then `stars_menu_pick` - one click, and
+  the game is stopped inside `TrackPopupMenu` the whole time; `stars_menu_items`
+  reports `waiting` when it is.  A *left* click opens one too: clicking a column
+  heading in a report is how its sort is chosen.  So a click that appears to do
+  nothing may have opened a menu that nobody answered - always look.
 * **Message boxes are answered for you** with the default, and recorded.  Poll
   `stars_msgbox`: the tutorial's corrections ("you have given the fleet the
   wrong destination") arrive only that way.

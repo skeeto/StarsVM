@@ -112,16 +112,31 @@ void harness_menu_record(void *menu)
 /* Wait for the agent's pick.  The game is blocked here inside TrackPopupMenu,
    which is not a place the normal pump reaches, so we run it ourselves: the
    agent's next requests (MENUITEMS, then PICK) are served while we wait, and a
-   timeout keeps a menu nobody answers from wedging the game forever. */
+   timeout keeps a menu nobody answers from wedging the game forever.
+
+   The timeout used to be five seconds, and it returned the same nothing that a
+   deliberate cancel returns.  Both halves of that were wrong.  Five seconds is
+   less than a model takes to look at a menu and choose, and menus are not rare
+   here - clicking a column heading in a report opens one - so the usual outcome
+   was a click that silently did nothing at all, which is indistinguishable from
+   a click that missed.  A minute is long enough to think and still short enough
+   that a client which has gone away does not strand the game, and a timeout now
+   says so in the log and in the journal. */
+#define HZ_MENU_WAIT 6000               /* hundredths: a minute */
 int harness_menu_wait(void)
 {
     int i;
 
-    for (i = 0; i < 500 && !hz_menu_pick_set; i++) {
+    for (i = 0; i < HZ_MENU_WAIT && !hz_menu_pick_set; i++) {
         harness_pump();
         Sleep(10);
     }
-    if (!hz_menu_pick_set) return 0;
+    if (!hz_menu_pick_set) {
+        log_msg("harness: no answer to a %d-item popup menu in %d seconds,"
+                " treating it as cancelled\n", hz_menu_count, HZ_MENU_WAIT / 100);
+        harness_event("menu-timeout", 0, hz_menu_count, 0);
+        return 0;
+    }
     hz_menu_pick_set = 0;
     if (hz_menu_pick_idx < 0 || hz_menu_pick_idx >= hz_menu_count) return 0;
     return hz_menu_id[hz_menu_pick_idx];
@@ -1066,7 +1081,12 @@ static void hz_exec(char *line)
         }
     } else if (!strcmp(line, "MENUITEMS")) {
         int i;
-        hz_puts("{\"ok\":true,\"items\":[");
+        /* `waiting` is the thing worth knowing: the game is stopped inside
+           TrackPopupMenu until PICK answers, so a client that sees it true has
+           the game's full attention and should spend it. */
+        hz_puts("{\"ok\":true,\"waiting\":");
+        hz_puts(hz_menu_count && !hz_menu_pick_set ? "true" : "false");
+        hz_puts(",\"items\":[");
         for (i = 0; i < hz_menu_count; i++) {
             char num[32];
             if (i) hz_puts(",");
