@@ -14,6 +14,21 @@ the lookup is a real call whose effects the optimiser cannot discard even when
 the function it feeds compiles to nothing.  Hooks that only have the guest's
 own handle take the 16-bit handle and convert on the harness side.
 
+There is a second way to break it that leaves the size alone: a *branch* at the
+call site.  Writing the dialog bridge's pump and its three journal events out
+as an if/else there compiled to nothing, as every body was an empty inline -
+and still reordered three instruction pairs in `dlgproc_bridge`, because the
+branches were there while the scheduler was deciding even though they were gone
+by the time anything was emitted.  Give a call site one unconditional call and
+let the harness do the deciding.
+
+Checking it takes a build of master to compare against, not a memory of the
+size: `git worktree add`, `make` in both, and `objdump -d` each, which should
+come out identical.  The whole files will not - a worktree without `stars.exe`
+has no icon to embed, so `.rsrc` differs - but every other section is equal
+byte for byte.  Two leaks got as far as a finished tutorial before anyone
+looked this way, so it is worth doing rather than assuming.
+
 ## The windows, and what they are really called
 
 The class names do not all say what the pane is.
