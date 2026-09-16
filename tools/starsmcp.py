@@ -869,7 +869,10 @@ TOOLS = [
             "Finds it by name, then clicks it on the map at the point its universe "
             "coordinates map to - the mapping is fitted from the stars currently "
             "drawn against the universe report, so it follows any zoom or scroll. "
-            "Use this when you need to command a fleet, not just look at one."),
+            "With no modifier it takes the object out of the right-click menu by "
+            "name, because a planet and every fleet in orbit share a point and a "
+            "plain click takes whichever the game prefers. With shift it clicks "
+            "instead, which on the map adds a waypoint there."),
         "inputSchema": {
             "type": "object",
             "properties": {
@@ -1084,14 +1087,35 @@ def call_tool(h, name, args):
         fx, fy, resid, n = fit
         x = int(round(fx[0] * st["x"] + fx[1]))
         y = int(round(fy[0] * st["y"] + fy[1]))
-        flags = (32 if args.get("double", True) else 0)             | (4 if args.get("shift") else 0)             | (8 if args.get("control") else 0)             | (16 if args.get("right") else 0)
-        h.request("CLICKAT %s %d %d %d" % (scan["hwnd"], x, y, flags))
+        mods = (4 if args.get("shift") else 0) | (8 if args.get("control") else 0)             | (16 if args.get("right") else 0)
+        picked = None
+        if not mods:
+            # Several things share a point - a planet and every fleet in orbit -
+            # and a plain click takes whichever the game feels like.  The
+            # right-click menu lists them by name, so ask for the one wanted.
+            h.request("CLICKAT %s %d %d 16" % (scan["hwnd"], x, y))
+            for i in range(30):
+                time.sleep(0.25)
+                items = json.loads(h.request("MENUITEMS", timeout=5.0))["items"]
+                if not items:
+                    continue
+                hit = [it for it in items if it["text"].strip() == args["name"]] or                       [it for it in items if args["name"] in it["text"]]
+                h.request("PICK %d" % (hit[0]["i"] if hit else -1))
+                picked = hit[0]["text"].strip() if hit else None
+                if not hit:
+                    return [{"type": "text", "text": json.dumps(
+                        {"ok": False, "error": "not among the objects there",
+                         "there": [it["text"].strip() for it in items]})}]
+                break
+        if picked is None:
+            flags = mods | (32 if args.get("double", True) else 0)
+            h.request("CLICKAT %s %d %d %d" % (scan["hwnd"], x, y, flags))
         _settle(h)
         pane = _one(_windows(h), "starsplanet")
         return [{"type": "text", "text": json.dumps(
             {"ok": True, "universe": [st["x"], st["y"]], "client": [x, y],
              "fitted_on": n, "residual_px": round(resid, 1),
-             "pane": pane["title"] if pane else None})}]
+             "picked": picked, "pane": pane["title"] if pane else None})}]
     if name == "stars_dump":
         what = args["what"].lower()
         if what not in DUMP:
