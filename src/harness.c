@@ -307,6 +307,12 @@ void harness_text(void *hdc, int x, int y, const char *s, int len)
     }
 }
 
+void harness_text16(unsigned hdc16, int x, int y, const char *s, int len)
+{
+    if (!hz_started) return;
+    harness_text(HDC_32((uint16_t)hdc16), x, y, s, len);
+}
+
 void harness_draw(void *hdc, const char *kind, int x, int y, int w, int h)
 {
     int i;

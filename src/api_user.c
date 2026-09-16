@@ -901,6 +901,21 @@ static uint32_t u_DrawText(Cpu *c, Args *a)
     (void)c;
     g_str(textp, buf, sizeof buf);
     get_rect16(p, &r);
+    /* Recorded before the call, because DT_CALCRECT rewrites the rectangle,
+       and that form measures without drawing so there is nothing to record.
+       The game wraps its prose with DrawText and draws everything else with
+       TextOut, so a harness watching only TextOut reads the messages pane's
+       heading and none of the message.
+
+       The guest's own handle is what goes across, not HDC_32 of it, and that
+       is the whole reason this hook exists rather than a call to harness_text.
+       HDC_32 is a real lookup whose effects the optimiser cannot discard, so
+       as an argument it would survive into a release build even though the
+       function it feeds is an empty inline there.  Measured: passing it grew
+       StarsVM.exe by 128 bytes, and holding it in a local instead left the
+       size alone but reordered this function. */
+    if (!(fmt & DT_CALCRECT))
+        harness_text16(hdc, r.left, r.top, buf, len < 0 ? -1 : len);
     n = DrawTextA(HDC_32(hdc), buf, len < 0 ? -1 : len, &r, fmt);
     if (fmt & DT_CALCRECT) put_rect16(p, &r);
     return (uint32_t)n;

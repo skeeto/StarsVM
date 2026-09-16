@@ -39,6 +39,10 @@ void harness_event(const char *kind, uintptr_t hwnd, long a, long b);
    windows.h. */
 void harness_text_begin(unsigned hwnd16);
 void harness_text(void *hdc, int x, int y, const char *s, int len);
+/* The same, for a call site that has only the guest's own DC handle.  Taking
+   the 16-bit handle rather than HDC_32 of it keeps the release build exactly
+   as it was: see the note at u_DrawText. */
+void harness_text16(unsigned hdc16, int x, int y, const char *s, int len);
 void harness_draw(void *hdc, const char *kind, int x, int y, int w, int h);
 
 /* Emulated input state.  The harness drives the game by injecting messages into
@@ -76,6 +80,8 @@ static inline void harness_event(const char *kind, uintptr_t hwnd, long a, long 
 static inline void harness_text_begin(unsigned hwnd16) { (void)hwnd16; }
 static inline void harness_text(void *hdc, int x, int y, const char *s, int len)
 { (void)hdc; (void)x; (void)y; (void)s; (void)len; }
+static inline void harness_text16(unsigned hdc16, int x, int y, const char *s, int len)
+{ (void)hdc16; (void)x; (void)y; (void)s; (void)len; }
 static inline void harness_draw(void *hdc, const char *kind, int x, int y, int w, int h)
 { (void)hdc; (void)kind; (void)x; (void)y; (void)w; (void)h; }
 static inline int harness_input_active(void) { return 0; }
