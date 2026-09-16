@@ -82,6 +82,16 @@ The scanner has no scrollbars, and `Find` is the game's own answer:
   behind that.  `stars_wait_idle` is the right instrument; a fixed sleep under
   about three seconds will intermittently read the previous state and look like
   the click missed.
+* **Some gestures are the holding of the button, not the clicking of it.**
+  `stars_click_at` posts the down and the up together and the guest runs
+  neither until the command returns, so it cannot express a button that is
+  held.  The summary pane's bars are the case that matters: they put up their
+  explanatory popup while the button is down and only act on the release, and
+  a plain click on one leaves the game having never seen the gesture finish.
+  Use `stars_press`, settle, `stars_release`.  The release is delivered to
+  whatever took the mouse capture, which here is the popup rather than the
+  pane, so aiming it back at the pane would be wrong even with the timing
+  right.
 * **Modifiers are explicit.**  A click sets them and leaves them set - it has
   to, because the click is read after the command returns - so `KEY` and
   `CLICK` take their own, and setting them to zero is how you get an unmodified
@@ -96,11 +106,6 @@ The scanner has no scrollbars, and `Find` is the game's own answer:
 
 ## Things that are known to be rough
 
-* The tutorial's page 28 does not advance, with every step in its text
-  performed and verified - the message filtered, the last message read, Wallaby
-  selected, the radiation bar's popup read, and the Research dialog opened with
-  F5.  Generating is refused with "you have not yet completed all of the
-  tutorial tasks for this turn".  Unresolved.
 * Colour is not captured, so instructions that name one cannot be checked.
 * `MoveTo`/`LineTo`, `StretchDIBits`, `FillRect`, `FrameRect` and `DrawIcon`
   are not recorded, and `WindowFromDC` gives nothing for a memory DC, so
