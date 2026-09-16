@@ -32,6 +32,12 @@ int harness_active(void);
    the game's thread and needs no locking. */
 void harness_event(const char *kind, uintptr_t hwnd, long a, long b);
 
+/* Everything the modal-dialog bridge owes the harness, in one call: the pump,
+   and whichever event the message is.  It is one call rather than the pump and
+   three events at the call site because branches there survive into the release
+   build as a different instruction schedule even when their bodies do not. */
+void harness_dlg(void *hwnd, unsigned msg, uintptr_t wp);
+
 /* Text drawn to a window, so the game's own-drawn panes can be read as text
    instead of by eye.  harness_text_begin resets a window's text when its paint
    starts; harness_text appends one drawn string, attributed to the window the
@@ -77,6 +83,8 @@ static inline void harness_pump(void) {}
 static inline int  harness_active(void) { return 0; }
 static inline void harness_event(const char *kind, uintptr_t hwnd, long a, long b)
 { (void)kind; (void)hwnd; (void)a; (void)b; }
+static inline void harness_dlg(void *hwnd, unsigned msg, uintptr_t wp)
+{ (void)hwnd; (void)msg; (void)wp; }
 static inline void harness_text_begin(unsigned hwnd16) { (void)hwnd16; }
 static inline void harness_text(void *hdc, int x, int y, const char *s, int len)
 { (void)hdc; (void)x; (void)y; (void)s; (void)len; }

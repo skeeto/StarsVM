@@ -354,19 +354,11 @@ static INT_PTR CALLBACK dlgproc_bridge(HWND hwnd, UINT msg,
         return TRUE;
     }
 
-    /* Pump here because a modal dialog's loop belongs to USER32: the guest is not
-   running its own loop, so GetMessage is not reached until the dialog closes.
-   Not on WM_INITDIALOG, though - the guest is mid-setup, and running commands
-   then is the same mistake winproc_bridge used to make. */
-    if (msg == WM_INITDIALOG) {
-        harness_event("dlg-open", (uintptr_t)hwnd, 0, 0);
-    } else {
-        harness_pump();
-        if (msg == WM_NCDESTROY)
-            harness_event("dlg-close", (uintptr_t)hwnd, 0, 0);
-        else if (msg == WM_COMMAND)
-            harness_event("cmd", (uintptr_t)hwnd, (long)LOWORD(wp), (long)HIWORD(wp));
-    }
+    /* One call, and the harness decides what the message means.  Writing the
+       pump and the three events out here instead left branches behind that
+       changed the release build's instruction scheduling, although every one
+       of them compiled to nothing - the same trap as the DrawText hook. */
+    harness_dlg(hwnd, msg, wp);
 
     r = winproc_call16(hwnd, proc16, hinst, msg, wp, lp, &ret_handle);
 

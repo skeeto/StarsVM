@@ -1571,6 +1571,24 @@ void harness_pump(void)
     hz_pumping = 0;
 }
 
+/* The modal-dialog bridge's whole obligation, in one call.  Pump here because
+   a modal dialog's loop belongs to USER32: the guest is not running its own
+   loop, so GetMessage is not reached until the dialog closes.  Not on
+   WM_INITDIALOG, though - the guest is mid-setup, and running commands then is
+   the same mistake winproc_bridge used to make. */
+void harness_dlg(void *hwnd, unsigned msg, uintptr_t wp)
+{
+    if (msg == WM_INITDIALOG) {
+        harness_event("dlg-open", (uintptr_t)hwnd, 0, 0);
+        return;
+    }
+    harness_pump();
+    if (msg == WM_NCDESTROY)
+        harness_event("dlg-close", (uintptr_t)hwnd, 0, 0);
+    else if (msg == WM_COMMAND)
+        harness_event("cmd", (uintptr_t)hwnd, (long)LOWORD(wp), (long)HIWORD(wp));
+}
+
 int harness_active(void)
 {
     return hz_started && hz_connected;
