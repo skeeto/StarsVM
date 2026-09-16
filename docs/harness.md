@@ -119,6 +119,30 @@ The scanner has no scrollbars, and `Find` is the game's own answer:
   `stars_msgbox`: the tutorial's corrections ("you have given the fleet the
   wrong destination") arrive only that way.
 
+## Smaller things worth knowing
+
+* **A dialog's handles go stale when it is reopened.**  The game destroys and
+  remakes these dialogs, so a handle cached across a close-and-reopen names a
+  dead window and every click on it silently does nothing.  Re-observe after
+  anything that could have closed a dialog.  This cost half an hour on the
+  merge dialog, where the clicks looked fine and the fleets never merged.
+* **A multi-select list box's selection is invisible.**  `LIST` reports the
+  focused item, not the set, so the merge dialog's list reads the same whether
+  nothing or everything is chosen; the asterisks in its text mean something
+  else entirely.  Drive it with the keyboard - arrows then space, aimed at the
+  list - and confirm by the outcome or a screenshot, not by reading it back.
+* **Gauges are set by where the pointer is, not by how far it moved.**  The
+  cargo, fuel and warp gauges all take an absolute position, so the way to hit
+  an exact value is to press, release and read, and bisect: the fuel gauge
+  reached exactly 383mg in seven steps that way.
+* **Reports open too small to use.**  The planet report is 600 pixels wide and
+  draws columns out past 1400, and its scrollbar is in the non-client area
+  where an injected click cannot go.  Resize it with `stars_move` and give a
+  width; at 1500 all fifteen columns are reachable.
+* **A column heading opens a menu, and the menu has submenus.**  Clicking one
+  is how a report's sort is chosen, and several of the entries are submenus -
+  "Reverse Sort by Min Conc > Weighted Average" is one leaf of one of them.
+
 ## Things that are known to be rough
 
 * Colour is not captured, so instructions that name one cannot be checked.
