@@ -30,12 +30,9 @@ stars.exe
 Stars.ini
 
 # The tutorial writes a game of its own next to the module.  Game state, not
-# ours, and it appears the moment anyone runs the tutorial.
-tutorial.m1
-tutorial.m2
-tutorial.hst
-tutorial.xy
-tutorial.map
+# ours, and it appears the moment anyone runs the tutorial: the turn and
+# history files, the backups it keeps, and any report it is asked to dump.
+tutorial.*
 
 # The benchmark: a saved game and a copy of the module beside it, plus the
 # blessed outputs.  See tools/bench.ps1.  The game is the user's and the module
