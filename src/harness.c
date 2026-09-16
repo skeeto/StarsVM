@@ -22,8 +22,16 @@
  *   CLICK    <hwnd> <id>          press a dialog control by id
  *   COMMAND  <hwnd> <id>          WM_COMMAND, which is what a menu item is
  *   SETTEXT  <hwnd> <id> <text>   set a control's text
- *   KEY      <hwnd> <vk>          post a key down/up
+ *   KEY      <hwnd> <vk> [mods]   post a key down/up, with MK_ modifiers
  *   TYPE     <hwnd> <text>        post each character as WM_CHAR
+ *
+ * KEY is for the keys that are not characters - the arrows, the function
+ * keys - and TYPE is for the ones that are.  The difference is not cosmetic.
+ * A posted WM_KEYDOWN is translated by the guest's own message loop into a
+ * WM_CHAR as well, and the game acts on both, so a letter sent with KEY
+ * arrives twice: KEY n on the frame advances two fleets, not one.  Measured
+ * against the arrows, which have no character to translate to and step
+ * exactly once.
  *   MEMREAD  <sel> <off> <len>    guest bytes as hex
  *   MEMFIND  <hex>                search the selector arena for a pattern
  *   MEMWRITE <sel> <off> <hex>    write guest bytes
@@ -1165,9 +1173,18 @@ static void hz_exec(char *line)
         SetDlgItemTextA((HWND)h, (int)id, rest);
         hz_reply_ok();
     } else if (!strcmp(line, "KEY") && arg) {
+        /* An optional third argument, the MK_ flags, so a key can be pressed
+           with Shift or Control held.  They are set even when zero, and that
+           is the point: a click leaves its own modifiers standing - it has to,
+           because the click is posted and read after this command returns - so
+           a key pressed after a shift-click would otherwise arrive shifted.
+           On the map that is not a subtle difference: n is the next fleet and
+           shift-n is not. */
         char *rest;
         uintptr_t h = (uintptr_t)_strtoui64(arg, &rest, 16);
-        long vk = strtol(rest, NULL, 16);
+        long vk = strtol(rest, &rest, 16);
+        long mods = strtol(rest, NULL, 10);
+        hz_mods_set((int)mods);
         PostMessageA((HWND)h, WM_KEYDOWN, (WPARAM)vk, 1);
         PostMessageA((HWND)h, WM_KEYUP, (WPARAM)vk, 1);
         hz_reply_ok();
@@ -1175,6 +1192,7 @@ static void hz_exec(char *line)
         char *rest;
         uintptr_t h = (uintptr_t)_strtoui64(arg, &rest, 16);
         while (*rest == ' ') rest++;
+        hz_mods_set(0);                               /* see KEY */
         for (; *rest; rest++)
             PostMessageA((HWND)h, WM_CHAR, (WPARAM)(unsigned char)*rest, 1);
         hz_reply_ok();
