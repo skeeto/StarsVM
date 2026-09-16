@@ -404,6 +404,46 @@ def _fit(pts, universe):
     return fx, fy, err[-1][0], len(pairs)
 
 
+def _zoom_to(h, pct):
+    frame = _one(_windows(h), "starsframe")
+    h.request("COMMAND %s %d" % (frame["hwnd"], ZOOM[pct]))
+    _settle(h)
+
+
+def _crowded(m, x, y):
+    """Is anything but the planet's own dot sitting on this point?
+
+    A planet with fleets in orbit draws them all within a pixel or two of each
+    other, and the game's hit test then picks whichever it likes - so a
+    shift-click meant for the planet lands on a freighter and adds no waypoint
+    at all.  The planet is a small dot; a fleet marker is bigger."""
+    for d in m["draws"]:
+        if d[3] <= 6 and d[4] <= 6:
+            continue
+        cx, cy = d[1] + d[3] // 2, d[2] + d[4] // 2
+        if abs(cx - x) <= 10 and abs(cy - y) <= 10:
+            return True
+    return False
+
+
+def _place(h, name):
+    """Find `name`, and return the scanner, the point it is at, and the fit."""
+    _find(h, name)
+    scan = _one(_windows(h), "starsscan")
+    height = scan["rect"][3]
+    pts, m = _star_points(h, scan["hwnd"], height)
+    st = _status(m, height)
+    if "x" not in st or "y" not in st:
+        return scan, None, None, st, m
+    fit = _fit(pts, _universe(h))
+    if not fit:
+        return scan, None, None, st, m
+    fx, fy, resid, n = fit
+    x = int(round(fx[0] * st["x"] + fx[1]))
+    y = int(round(fy[0] * st["y"] + fy[1]))
+    return scan, (x, y), (fx, fy, resid, n), st, m
+
+
 def _dump(h, what):
     """Ask the game to write one of its text reports, and read it back.  The
     file it chose is named in the message box it puts up, which the harness
@@ -1070,16 +1110,36 @@ def call_tool(h, name, args):
         return [{"type": "text", "text": json.dumps(
             {"ok": True, "selected": _status(m, scan["rect"][3])})}]
     if name == "stars_select":
-        _find(h, args["name"])
+        # A planet's coordinates are already in the universe report, so it can
+        # be placed without asking Find - which matters, because Find *selects*
+        # what it finds, and selecting something resets which waypoint of the
+        # commanded fleet is current.  A shift-click meant to append a waypoint
+        # then goes somewhere else entirely, or nowhere.  Find is still the
+        # route for a fleet, and for a planet that has scrolled off screen.
         scan = _one(_windows(h), "starsscan")
         height = scan["rect"][3]
-        pts, m = _star_points(h, scan["hwnd"], height)
-        st = _status(m, height)
+        universe = _universe(h)
+        st = None
+        if args["name"] in universe:
+            pts, m = _star_points(h, scan["hwnd"], height)
+            fit = _fit(pts, universe)
+            if fit:
+                ux, uy = universe[args["name"]]
+                px = int(round(fit[0][0] * ux + fit[0][1]))
+                py = int(round(fit[1][0] * uy + fit[1][1]))
+                if 0 <= px < scan["rect"][2] and 0 <= py < height - 80:
+                    st = {"x": ux, "y": uy, "name": args["name"]}
+        if st is None:
+            _find(h, args["name"])
+            scan = _one(_windows(h), "starsscan")
+            height = scan["rect"][3]
+            pts, m = _star_points(h, scan["hwnd"], height)
+            st = _status(m, height)
         if "x" not in st or "y" not in st:
             return [{"type": "text", "text": json.dumps(
                 {"ok": False, "error": "Find reported no coordinates",
                  "status": st})}]
-        fit = _fit(pts, _universe(h))
+        fit = _fit(pts, universe)
         if not fit:
             return [{"type": "text", "text": json.dumps(
                 {"ok": False, "error": "too few named stars on screen to place it",
@@ -1088,6 +1148,45 @@ def call_tool(h, name, args):
         x = int(round(fx[0] * st["x"] + fx[1]))
         y = int(round(fy[0] * st["y"] + fy[1]))
         mods = (4 if args.get("shift") else 0) | (8 if args.get("control") else 0)             | (16 if args.get("right") else 0)
+        note = None
+        if mods & 4 and _crowded(m, x, y):
+            # Fleets in orbit share the planet's pixel, and the hit test will
+            # take one of them, so the waypoint is never added.  Zoom in far
+            # enough to separate them, click there, and put the view back - the
+            # scale is recovered from the fit rather than remembered, so it
+            # comes back to whatever it was.
+            # Only the fit is redone, never the Find: Find selects an object,
+            # and selecting one resets which waypoint of the fleet is current,
+            # so the new waypoint would be inserted in the wrong place - or,
+            # as it turned out, not at all.  The object's universe coordinates
+            # are already known and do not change with the zoom.
+            was = fx[0]
+            _zoom_to(h, 400)
+            pts2, m2 = _star_points(h, scan["hwnd"], scan["rect"][3])
+            fit2 = _fit(pts2, _universe(h))
+            if fit2:
+                fx2, fy2, resid2, n2 = fit2
+                x2 = int(round(fx2[0] * st["x"] + fx2[1]))
+                y2 = int(round(fy2[0] * st["y"] + fy2[1]))
+                w, hgt = scan["rect"][2], scan["rect"][3]
+                if 0 <= x2 < w and 0 <= y2 < hgt - 80:
+                    h.request("CLICKAT %s %d %d %d" % (scan["hwnd"], x2, y2, mods))
+                    _settle(h)
+                    back = min(ZOOM, key=lambda p: abs(p - 400.0 * was / fx2[0]))
+                    _zoom_to(h, back)
+                    pane = _one(_windows(h), "starsplanet")
+                    return [{"type": "text", "text": json.dumps(
+                        {"ok": True, "universe": [st["x"], st["y"]],
+                         "client": [x2, y2], "fitted_on": n2,
+                         "residual_px": round(resid2, 1),
+                         "note": "zoomed in to separate objects sharing the point,"
+                                 " then back to %d%%" % back,
+                         "pane": pane["title"] if pane else None})}]
+                note = "zoomed in but the object fell off screen"
+                _zoom_to(h, min(ZOOM, key=lambda p: abs(p - 400.0 * was / fx2[0])))
+            else:
+                note = "zoomed in but too few stars on screen to fit"
+                _zoom_to(h, 100)
         picked = None
         if not mods:
             # Several things share a point - a planet and every fleet in orbit -
@@ -1112,10 +1211,12 @@ def call_tool(h, name, args):
             h.request("CLICKAT %s %d %d %d" % (scan["hwnd"], x, y, flags))
         _settle(h)
         pane = _one(_windows(h), "starsplanet")
-        return [{"type": "text", "text": json.dumps(
-            {"ok": True, "universe": [st["x"], st["y"]], "client": [x, y],
-             "fitted_on": n, "residual_px": round(resid, 1),
-             "picked": picked, "pane": pane["title"] if pane else None})}]
+        out = {"ok": True, "universe": [st["x"], st["y"]], "client": [x, y],
+               "fitted_on": n, "residual_px": round(resid, 1),
+               "picked": picked, "pane": pane["title"] if pane else None}
+        if note:
+            out["note"] = note
+        return [{"type": "text", "text": json.dumps(out)}]
     if name == "stars_dump":
         what = args["what"].lower()
         if what not in DUMP:
