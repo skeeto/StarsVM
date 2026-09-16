@@ -139,6 +139,22 @@ The scanner has no scrollbars, and `Find` is the game's own answer:
   draws columns out past 1400, and its scrollbar is in the non-client area
   where an injected click cannot go.  Resize it with `stars_move` and give a
   width; at 1500 all fifteen columns are reachable.
+* **The battle replay is in a report, not in the message.**  A battle message
+  offers only Goto, which moves the view or selects a fleet; the replay is
+  Report > Battles (F3), whose rows are drawn text with no controls.  Find a
+  row by the y of its name in `MAP` and click it *once* - a second click lands
+  on the VCR that the first one opened.  The VCR is a `#32770` called
+  `Battle VCR`; its transport is ids 161-165, `>/||` (163) plays the whole
+  battle in a few seconds, and Done is 1.
+* **The ship detail popup has no controls, and a second one strands the
+  first.**  Clicking a ship in a fleet's Composition list puts up a captionless
+  `starspopup` at the top-left corner, dismissed by clicking it.  Click another
+  ship before dismissing it and only one of them ever goes away: the rest
+  answer to nothing - not a click on themselves, not a click on each other, not
+  a click anywhere else.  While the one the game still tracks is up the
+  tutorial will not count the turn, which is what stopped page 76 dead.  So
+  dismiss each one before clicking the next ship.
+
 * **A column heading opens a menu, and the menu has submenus.**  Clicking one
   is how a report's sort is chosen, and several of the entries are submenus -
   "Reverse Sort by Min Conc > Weighted Average" is one leaf of one of them.
@@ -149,6 +165,11 @@ The scanner has no scrollbars, and `Find` is the game's own answer:
 * `MoveTo`/`LineTo`, `StretchDIBits`, `FillRect`, `FrameRect` and `DrawIcon`
   are not recorded, and `WindowFromDC` gives nothing for a memory DC, so
   anything double-buffered would be invisible.
+* A stranded `starspopup` cannot be closed by any injected gesture, so the
+  only way back is not to make a second one.  It also carries a taskbar button
+  it should not have: the `WS_EX_APPWINDOW` rule in `api_user.c` was written
+  for the splash screen, and this popup is the same shape - a captionless
+  top-level created visible - so it matches too.
 * The harness only runs when the guest reaches its message loop, so it is
   unresponsive for as long as a turn takes to generate.  The tutorial's game is
   small enough that this is under two seconds; a large game would not be.
