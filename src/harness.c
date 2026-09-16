@@ -226,12 +226,27 @@ static struct {
     struct { char kind[8]; int x, y, w, h; } draw[HZ_DMAX];
 } hz_texts[HZ_TEXTS];
 
+/* The slot a window's last paint is kept in.  Dialogs come and go constantly -
+   every Find, every production queue, every cargo transfer is a new window -
+   so without reclaiming, thirty-two of them is an afternoon's play, and after
+   that a new window silently records nothing and reads back as though it had
+   drawn nothing at all.  Reclaim the same way the handle table does: when the
+   table is full, sweep for slots whose window is gone.  A sweep costs
+   thirty-two IsWindow calls and only happens when a slot is actually
+   needed. */
 static int hz_text_slot(HWND h, int create)
 {
     int i, free_slot = -1;
     for (i = 0; i < HZ_TEXTS; i++) {
         if (hz_texts[i].hwnd == h) return i;
         if (create && !hz_texts[i].hwnd && free_slot < 0) free_slot = i;
+    }
+    if (create && free_slot < 0) {
+        for (i = 0; i < HZ_TEXTS; i++) {
+            if (!hz_texts[i].hwnd || IsWindow(hz_texts[i].hwnd)) continue;
+            hz_texts[i].hwnd = NULL;
+            if (free_slot < 0) free_slot = i;
+        }
     }
     if (create && free_slot >= 0) {
         hz_texts[free_slot].hwnd = h;
@@ -670,7 +685,9 @@ static void hz_map(HWND h)
 {
     int i = hz_text_slot(h, 0), k;
 
-    hz_puts("{\"ok\":true,\"texts\":[");
+    hz_puts("{\"ok\":true,\"recorded\":");
+    hz_puts(i >= 0 ? "true" : "false");
+    hz_puts(",\"texts\":[");
     if (i >= 0)
         for (k = 0; k < hz_texts[i].ntext; k++) {
             if (k) hz_putc(',');
@@ -818,7 +835,9 @@ static void hz_memwrite(uint16_t sel, long off, const char *hex)
 static void hz_text_show(HWND h)
 {
     int i = hz_text_slot(h, 0);
-    hz_puts("{\"ok\":true,\"hwnd\":\"");
+    hz_puts("{\"ok\":true,\"recorded\":");
+    hz_puts(i >= 0 ? "true" : "false");
+    hz_puts(",\"hwnd\":\"");
     hz_put_hex((uintptr_t)h);
     hz_puts("\",\"text\":");
     hz_put_str(i >= 0 ? hz_texts[i].buf : "");
