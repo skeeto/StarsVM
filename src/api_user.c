@@ -191,6 +191,37 @@ static uint32_t u_RegisterClass(Cpu *c, Args *a)
     return at;
 }
 
+/* Win16 and Win32 disagree about a combo box's dropped-down height the same way
+   they disagree about a list box's, and for the same reason: the height the
+   program asks for has to hold a whole number of rows, and Win32 measures that
+   against the list's CLIENT area where Win16 measured its window.  The game
+   asks for a 162-pixel Waypoint Task combo, which is the closed box plus
+   exactly ten 14-pixel rows; Win32 spends two of those pixels on the list's
+   border, drops a row, and the list comes up one short with a scroll bar where
+   the original had all ten and none.  Give the border back.
+
+   Unlike the list box this cannot be settled with a style bit: turning integral
+   height off leaves the list the height it was given and shows nine rows and a
+   sliver of the tenth, which is not what the game drew either.
+
+   A CBS_SIMPLE combo keeps its height exactly: there the list is part of the
+   control, so the number is a layout on screen and not a row count implied. */
+static int combo_height_for(const char *cls, uint32_t style, int h)
+{
+    if (h <= 0 || _stricmp(cls, "combobox")) return h;
+    if ((style & 3) == CBS_SIMPLE) return h;
+    return h + 2 * GetSystemMetrics(SM_CYBORDER);
+}
+
+/* The same accommodation for a combo box that is sized after it is created,
+   which is how this game lays out every pane. */
+static int combo_height_of(HWND hwnd, int h)
+{
+    char cls[16];
+    if (h <= 0 || !GetClassNameA(hwnd, cls, sizeof cls)) return h;
+    return combo_height_for(cls, (uint32_t)GetWindowLongA(hwnd, GWL_STYLE), h);
+}
+
 static uint32_t u_CreateWindow(Cpu *c, Args *a)
 {
     char cls[128], name[256];
@@ -229,6 +260,10 @@ static uint32_t u_CreateWindow(Cpu *c, Args *a)
        size the guest asked for is both the faithful reading and the one that
        terminates. */
     if (!_stricmp(cls, "listbox")) style |= 0x0100;   /* LBS_NOINTEGRALHEIGHT */
+
+    /* A combo box's dropped-down list is the same argument one level down, and
+       it cannot be settled by a style bit: see combo_height_for. */
+    if (h != (int16_t)0x8000) h = (int16_t)combo_height_for(cls, style, h);
 
     /* Taskbar presence.  Windows gives a taskbar button to a top-level window
        that nothing owns; this game owns its splash screen off the main frame,
@@ -626,7 +661,10 @@ static uint32_t u_MoveWindow(Cpu *c, Args *a)
     int16_t w = arg_sword(a), h = arg_sword(a);
     uint16_t repaint = arg_word(a);
     (void)c;
-    { uint32_t r = (uint32_t)MoveWindow(HWND_32(hwnd), x, y, w, h, repaint); updc("MoveWindow"); return r; }
+    { HWND hw = HWND_32(hwnd);
+      uint32_t r = (uint32_t)MoveWindow(hw, x, y, w, combo_height_of(hw, h),
+                                        repaint);
+      updc("MoveWindow"); return r; }
 }
 
 static uint32_t u_SetWindowPos(Cpu *c, Args *a)
@@ -643,7 +681,10 @@ static uint32_t u_SetWindowPos(Cpu *c, Args *a)
     ins = (after <= 1 || after == 0xFFFF || after == 0xFFFE)
         ? (HWND)(INT_PTR)(int16_t)after : HWND_32(after);
     { HWND hw = HWND_32(hwnd);
-      uint32_t r = (uint32_t)SetWindowPos(hw, ins, x, y, w, h, flags);
+      uint32_t r = (uint32_t)SetWindowPos(hw, ins, x, y, w,
+                                          (flags & SWP_NOSIZE)
+                                              ? h : combo_height_of(hw, h),
+                                          flags);
       if (trace_paint && painting) {
           RECT got; POINT tl;
           GetWindowRect(hw, &got);
