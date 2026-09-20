@@ -385,6 +385,23 @@ static void get_msg16(uint32_t p, MSG *m)
     m->pt.y    = (int16_t)sel_rd16(sel, (uint16_t)(off + 16));
 }
 
+/* A wheel message must not reach the guest's loop.  MSG16's wParam is 16 bits
+   and the wheel's delta lives in the high half of the 32-bit one, so what the
+   guest would hand back to DispatchMessage is a turn of exactly zero - which is
+   why the same list box scrolled in a dialog, where USER32's own modal loop
+   pumps, and sat still in a pane, where the guest's loop does.  Take the wheel
+   out of the queue first and dispatch it here, delta intact; winproc_wheel then
+   answers it as the window in question can actually be scrolled.
+
+   The queue is drained regardless of what the caller asked for: a wheel message
+   outside the guest's filter would otherwise sit there for good. */
+static void wheel_dispatch(void)
+{
+    MSG m;
+    while (PeekMessageA(&m, NULL, WM_MOUSEWHEEL, WM_MOUSEWHEEL, PM_REMOVE))
+        DispatchMessageA(&m);
+}
+
 static uint32_t u_GetMessage(Cpu *c, Args *a)
 {
     uint32_t p = arg_long(a);
@@ -394,9 +411,16 @@ static uint32_t u_GetMessage(Cpu *c, Args *a)
     BOOL r;
 
     (void)c;
-    harness_pump();
-    r = GetMessageA(&m, HWND_32(hwnd), first, last);
-    if (r == -1) return 0;
+    /* Draining before the call is not enough on its own: this blocks, and a
+       wheel turned while it is blocked comes back as the message it returns. */
+    for (;;) {
+        harness_pump();
+        wheel_dispatch();
+        r = GetMessageA(&m, HWND_32(hwnd), first, last);
+        if (r == -1) return 0;
+        if (!r || m.message != WM_MOUSEWHEEL) break;
+        DispatchMessageA(&m);
+    }
     put_msg16(p, &m);
     return r ? 1u : 0u;
 }
@@ -411,6 +435,7 @@ static uint32_t u_PeekMessage(Cpu *c, Args *a)
 
     (void)c;
     harness_pump();
+    wheel_dispatch();
     if (!PeekMessageA(&m, HWND_32(hwnd), first, last, flags)) return 0;
     put_msg16(p, &m);
     return 1;

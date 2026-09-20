@@ -680,6 +680,88 @@ LRESULT winproc_ret_handle(int type, uint32_t r)
     return (LRESULT)(uintptr_t)h32_quiet(type, (uint16_t)r);
 }
 
+/* ---- the wheel ------------------------------------------------------------ */
+
+/* The wheel is two years younger than Win16, so no window here has a handler
+   for one and none ever will.  Left at that, a turn of the wheel does nothing
+   anywhere in the game; answered here, in terms of what the window under the
+   pointer already knows how to do, it does what every other program does.
+   There are only two shapes to answer:
+
+     - a stock control the guest has subclassed, which is every list in the
+       game.  The scrolling is in its class procedure, and DefWindowProc is not
+       that procedure - answering there is what left the lists sitting still
+       while an untouched combo box in the same dialog scrolled fine.
+
+     - a window of the guest's own, which scrolls by acting on WM_VSCROLL.
+       Turning a notch into line messages is what the wheel drivers of the day
+       did for Win16 programs, and it is all the game needs to be told. */
+
+/* The vertical scroll bar a guest window scrolls with.  Win16 code either puts
+   one in the non-client area or spends a SCROLLBAR control on it; this game
+   does both - the panes' lists take the first, the report windows the second -
+   and the same WM_VSCROLL drives either, distinguished by the control handle in
+   lParam. */
+static BOOL CALLBACK wheel_child_vbar(HWND h, LPARAM lp)
+{
+    char cls[16];
+    int lo, hi;
+
+    if (!IsWindowVisible(h) || !IsWindowEnabled(h)) return TRUE;
+    if (!GetClassNameA(h, cls, sizeof cls) || _stricmp(cls, "scrollbar"))
+        return TRUE;
+    if (!(GetWindowLongA(h, GWL_STYLE) & SBS_VERT)) return TRUE;
+    if (!GetScrollRange(h, SB_CTL, &lo, &hi) || lo >= hi) return TRUE;
+    *(HWND *)lp = h;
+    return FALSE;
+}
+
+LRESULT winproc_wheel(HWND hwnd, WPARAM wp, LPARAM lp)
+{
+    /* A wheel that reports finer than a notch - a trackpad - is worth nothing
+       to a program that scrolls in whole lines, so the remainder is carried to
+       the next message rather than thrown away. */
+    static HWND last;
+    static int  carry;
+
+    WNDPROC cls_proc = (WNDPROC)(uintptr_t)GetClassLongPtrA(hwnd, GCLP_WNDPROC);
+    HWND bar = NULL;
+    UINT per_notch = 3;
+    int lo, hi, notches, code, count;
+
+    if (cls_proc && cls_proc != winproc_bridge)
+        return CallWindowProcA(cls_proc, hwnd, WM_MOUSEWHEEL, wp, lp);
+
+    if (!GetScrollRange(hwnd, SB_VERT, &lo, &hi) || lo >= hi) {
+        EnumChildWindows(hwnd, wheel_child_vbar, (LPARAM)&bar);
+        /* Nothing here scrolls.  DefWindowProc offers the wheel to the parent,
+           which is how a pane gets a turn at one its child could not use. */
+        if (!bar) return DefWindowProcA(hwnd, WM_MOUSEWHEEL, wp, lp);
+    }
+
+    if (hwnd != last) { last = hwnd; carry = 0; }
+    carry += GET_WHEEL_DELTA_WPARAM(wp);
+    notches = carry / WHEEL_DELTA;            /* toward zero, which is right */
+    if (!notches) return 0;
+    carry -= notches * WHEEL_DELTA;
+
+    if (!SystemParametersInfoA(SPI_GETWHEELSCROLLLINES, 0, &per_notch, 0))
+        per_notch = 3;
+    count = notches < 0 ? -notches : notches;
+    if (per_notch == WHEEL_PAGESCROLL) {
+        code = notches > 0 ? SB_PAGEUP : SB_PAGEDOWN;
+    } else {
+        code = notches > 0 ? SB_LINEUP : SB_LINEDOWN;
+        count *= (int)per_notch;
+        if (count > 64) count = 64;           /* a silly setting is still a cap */
+    }
+
+    while (count-- > 0)
+        SendMessageA(hwnd, WM_VSCROLL, MAKEWPARAM(code, 0), (LPARAM)bar);
+    SendMessageA(hwnd, WM_VSCROLL, MAKEWPARAM(SB_ENDSCROLL, 0), (LPARAM)bar);
+    return 0;
+}
+
 LRESULT CALLBACK winproc_bridge(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
 {
     uint32_t proc16 = winproc_get(hwnd);
@@ -701,13 +783,13 @@ LRESULT CALLBACK winproc_bridge(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
     i = win_slot(hwnd);
     hinst = (i >= 0) ? wins[i].hinstance : task.hinstance;
 
-    /* Win16 has no wheel, and delivering one with a truncated delta would be
-       worse than not delivering it. */
-    if (msg == WM_MOUSEWHEEL) return DefWindowProcA(hwnd, msg, wp, lp);
-
     /* Nothing can run once a stop is latched, so let USER32 finish the teardown
        on its own rather than calling a guest that cannot execute. */
     if (cpu_stop_latched()) return DefWindowProcA(hwnd, msg, wp, lp);
+
+    /* Win16 has no wheel, so the guest procedure is not offered one: it is
+       answered on this side, where the delta is still 32 bits wide. */
+    if (msg == WM_MOUSEWHEEL) return winproc_wheel(hwnd, wp, lp);
 
     /* No harness pump here.  Every window message is dispatched from the guest's
    own loop, which reaches GetMessage and pumps there, so pumping again inside

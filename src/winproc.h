@@ -8,6 +8,10 @@
 LRESULT CALLBACK winproc_bridge(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp);
 LRESULT winproc_default(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp);
 
+/* Answer a wheel turn the only ways a Win16 window can be scrolled: through a
+   stock control's own class procedure, or as WM_VSCROLL. */
+LRESULT winproc_wheel(HWND hwnd, WPARAM wp, LPARAM lp);
+
 /* Rebuild the guest's 16-bit copy of a struct DefWindowProc just wrote to. */
 void    winproc_refresh_struct(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp,
                                uint32_t guest_lp);
