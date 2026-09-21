@@ -433,8 +433,21 @@ static void get_msg16(uint32_t p, MSG *m)
 static void wheel_dispatch(void)
 {
     MSG m;
-    while (PeekMessageA(&m, NULL, WM_MOUSEWHEEL, WM_MOUSEWHEEL, PM_REMOVE))
+
+    /* Look before removing.  A pending quit is handed back by a peek whatever
+       the message filter says, and a peek that removes it consumes the quit
+       flag, which is the only record there is - so a drain written as one
+       PM_REMOVE loop swallows the game's own Exit.  It then destroys its
+       windows, posts the quit nobody will ever see, and sits in GetMessage
+       forever with nothing on screen. */
+    for (;;) {
+        if (!PeekMessageA(&m, NULL, WM_MOUSEWHEEL, WM_MOUSEWHEEL, PM_NOREMOVE))
+            return;
+        if (m.message != WM_MOUSEWHEEL) return;      /* the quit; leave it be */
+        if (!PeekMessageA(&m, NULL, WM_MOUSEWHEEL, WM_MOUSEWHEEL, PM_REMOVE))
+            return;
         DispatchMessageA(&m);
+    }
 }
 
 static uint32_t u_GetMessage(Cpu *c, Args *a)
