@@ -429,8 +429,10 @@ static void get_msg16(uint32_t p, MSG *m)
    answers it as the window in question can actually be scrolled.
 
    The queue is drained regardless of what the caller asked for: a wheel message
-   outside the guest's filter would otherwise sit there for good. */
-static void wheel_dispatch(void)
+   outside the guest's filter would otherwise sit there for good.  The two
+   wheels are drained separately rather than as a range, because the range
+   between them is the X buttons, which are the guest's business. */
+static int wheel_drain_one(UINT wheel)
 {
     MSG m;
 
@@ -440,14 +442,19 @@ static void wheel_dispatch(void)
        PM_REMOVE loop swallows the game's own Exit.  It then destroys its
        windows, posts the quit nobody will ever see, and sits in GetMessage
        forever with nothing on screen. */
-    for (;;) {
-        if (!PeekMessageA(&m, NULL, WM_MOUSEWHEEL, WM_MOUSEWHEEL, PM_NOREMOVE))
-            return;
-        if (m.message != WM_MOUSEWHEEL) return;      /* the quit; leave it be */
-        if (!PeekMessageA(&m, NULL, WM_MOUSEWHEEL, WM_MOUSEWHEEL, PM_REMOVE))
-            return;
-        DispatchMessageA(&m);
-    }
+    if (!PeekMessageA(&m, NULL, wheel, wheel, PM_NOREMOVE)) return 0;
+    if (m.message != wheel) return 0;                /* the quit; leave it be */
+    if (!PeekMessageA(&m, NULL, wheel, wheel, PM_REMOVE)) return 0;
+    DispatchMessageA(&m);
+    return 1;
+}
+
+static void wheel_dispatch(void)
+{
+    while (wheel_drain_one(WM_MOUSEWHEEL))
+        ;
+    while (wheel_drain_one(WM_MOUSEHWHEEL))
+        ;
 }
 
 static uint32_t u_GetMessage(Cpu *c, Args *a)
@@ -466,7 +473,8 @@ static uint32_t u_GetMessage(Cpu *c, Args *a)
         wheel_dispatch();
         r = GetMessageA(&m, HWND_32(hwnd), first, last);
         if (r == -1) return 0;
-        if (!r || m.message != WM_MOUSEWHEEL) break;
+        if (!r || (m.message != WM_MOUSEWHEEL && m.message != WM_MOUSEHWHEEL))
+            break;
         DispatchMessageA(&m);
     }
     put_msg16(p, &m);

@@ -8,9 +8,18 @@
 LRESULT CALLBACK winproc_bridge(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp);
 LRESULT winproc_default(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp);
 
+/* The wheel messages and metrics postdate the Windows version these headers
+   are written against, and each is nothing but a number. */
+#ifndef WM_MOUSEHWHEEL
+#define WM_MOUSEHWHEEL 0x020E
+#endif
+#ifndef SPI_GETWHEELSCROLLCHARS
+#define SPI_GETWHEELSCROLLCHARS 0x006C
+#endif
+
 /* Answer a wheel turn the only ways a Win16 window can be scrolled: through a
-   stock control's own class procedure, or as WM_VSCROLL. */
-LRESULT winproc_wheel(HWND hwnd, WPARAM wp, LPARAM lp);
+   stock control's own class procedure, or as WM_VSCROLL or WM_HSCROLL. */
+LRESULT winproc_wheel(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp);
 
 /* Rebuild the guest's 16-bit copy of a struct DefWindowProc just wrote to. */
 void    winproc_refresh_struct(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp,

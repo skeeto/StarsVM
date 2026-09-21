@@ -345,7 +345,7 @@ static INT_PTR CALLBACK dlgproc_bridge(HWND hwnd, UINT msg,
     slot = dlg_slot(hwnd);
     hinst = (slot >= 0) ? dlgs[slot].hinstance : task.hinstance;
 
-    if (msg == WM_MOUSEWHEEL) return FALSE;
+    if (msg == WM_MOUSEWHEEL || msg == WM_MOUSEHWHEEL) return FALSE;
 
     /* Once a stop is latched no guest instruction can run, so a modal dialog
        would spin forever in USER32's loop with nothing behind it.  Close it. */

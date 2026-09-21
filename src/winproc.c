@@ -693,60 +693,87 @@ LRESULT winproc_ret_handle(int type, uint32_t r)
        that procedure - answering there is what left the lists sitting still
        while an untouched combo box in the same dialog scrolled fine.
 
-     - a window of the guest's own, which scrolls by acting on WM_VSCROLL.
-       Turning a notch into line messages is what the wheel drivers of the day
-       did for Win16 programs, and it is all the game needs to be told. */
+     - a window of the guest's own, which scrolls by acting on WM_VSCROLL or
+       WM_HSCROLL.  Turning a notch into line messages is what the wheel
+       drivers of the day did for Win16 programs, and it is all the game needs
+       to be told.
 
-/* The vertical scroll bar a guest window scrolls with.  Win16 code either puts
-   one in the non-client area or spends a SCROLLBAR control on it; this game
-   does both - the panes' lists take the first, the report windows the second -
-   and the same WM_VSCROLL drives either, distinguished by the control handle in
-   lParam. */
-static BOOL CALLBACK wheel_child_vbar(HWND h, LPARAM lp)
+   Sideways is either held shift, which is the convention every browser taught,
+   or a tilt wheel saying so in its own message.  The scanner is the one that
+   wanted it: zoomed in far enough it grows both scroll bars, and the game has
+   never offered another way to pan. */
+
+struct wheel_bar { HWND found; int horz; };
+
+/* The scroll bar a guest window scrolls with.  Win16 code either puts one in
+   the non-client area or spends a SCROLLBAR control on it; this game does both
+   - the scanner and the panes' lists take the first, the report windows the
+   second - and the same message drives either, distinguished by the control
+   handle in lParam. */
+static BOOL CALLBACK wheel_child_bar(HWND h, LPARAM lp)
 {
+    struct wheel_bar *want = (struct wheel_bar *)lp;
     char cls[16];
-    int lo, hi;
+    int is_vert, lo, hi;
 
     if (!IsWindowVisible(h) || !IsWindowEnabled(h)) return TRUE;
     if (!GetClassNameA(h, cls, sizeof cls) || _stricmp(cls, "scrollbar"))
         return TRUE;
-    if (!(GetWindowLongA(h, GWL_STYLE) & SBS_VERT)) return TRUE;
+    is_vert = (GetWindowLongA(h, GWL_STYLE) & SBS_VERT) != 0;
+    if (is_vert == want->horz) return TRUE;              /* the other axis */
     if (!GetScrollRange(h, SB_CTL, &lo, &hi) || lo >= hi) return TRUE;
-    *(HWND *)lp = h;
+    want->found = h;
     return FALSE;
 }
 
-LRESULT winproc_wheel(HWND hwnd, WPARAM wp, LPARAM lp)
+LRESULT winproc_wheel(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
 {
     /* A wheel that reports finer than a notch - a trackpad - is worth nothing
        to a program that scrolls in whole lines, so the remainder is carried to
-       the next message rather than thrown away. */
+       the next message rather than thrown away.  One carry per axis. */
     static HWND last;
-    static int  carry;
+    static int  carry[2];
 
     WNDPROC cls_proc = (WNDPROC)(uintptr_t)GetClassLongPtrA(hwnd, GCLP_WNDPROC);
-    HWND bar = NULL;
-    UINT per_notch = 3;
-    int lo, hi, notches, code, count;
+    struct wheel_bar want;
+    UINT per_notch = 3, scroll;
+    int delta, lo, hi, notches, code, count;
 
     if (cls_proc && cls_proc != winproc_bridge)
-        return CallWindowProcA(cls_proc, hwnd, WM_MOUSEWHEEL, wp, lp);
+        return CallWindowProcA(cls_proc, hwnd, msg, wp, lp);
 
-    if (!GetScrollRange(hwnd, SB_VERT, &lo, &hi) || lo >= hi) {
-        EnumChildWindows(hwnd, wheel_child_vbar, (LPARAM)&bar);
-        /* Nothing here scrolls.  DefWindowProc offers the wheel to the parent,
-           which is how a pane gets a turn at one its child could not use. */
-        if (!bar) return DefWindowProcA(hwnd, WM_MOUSEWHEEL, wp, lp);
+    want.found = NULL;
+    want.horz = (msg == WM_MOUSEHWHEEL) ||
+                (GET_KEYSTATE_WPARAM(wp) & MK_SHIFT) != 0;
+
+    if (!GetScrollRange(hwnd, want.horz ? SB_HORZ : SB_VERT, &lo, &hi) ||
+        lo >= hi) {
+        EnumChildWindows(hwnd, wheel_child_bar, (LPARAM)&want);
+        /* Nothing here scrolls that way.  DefWindowProc offers the wheel to the
+           parent, which is how a pane gets a turn at one its child could not
+           use. */
+        if (!want.found) return DefWindowProcA(hwnd, msg, wp, lp);
     }
 
-    if (hwnd != last) { last = hwnd; carry = 0; }
-    carry += GET_WHEEL_DELTA_WPARAM(wp);
-    notches = carry / WHEEL_DELTA;            /* toward zero, which is right */
-    if (!notches) return 0;
-    carry -= notches * WHEEL_DELTA;
+    /* A tilt wheel's delta runs the other way from a turned one: tilting right
+       is a scroll right, where turning away is a scroll up. */
+    delta = GET_WHEEL_DELTA_WPARAM(wp);
+    if (msg == WM_MOUSEHWHEEL) delta = -delta;
 
-    if (!SystemParametersInfoA(SPI_GETWHEELSCROLLLINES, 0, &per_notch, 0))
+    if (hwnd != last) { last = hwnd; carry[0] = carry[1] = 0; }
+    carry[want.horz] += delta;
+    notches = carry[want.horz] / WHEEL_DELTA;  /* toward zero, which is right */
+    if (!notches) return 0;
+    carry[want.horz] -= notches * WHEEL_DELTA;
+
+    if (!SystemParametersInfoA(want.horz ? SPI_GETWHEELSCROLLCHARS
+                                         : SPI_GETWHEELSCROLLLINES,
+                               0, &per_notch, 0))
         per_notch = 3;
+
+    /* SB_LINEUP and SB_LINELEFT are the same number, as are their opposites and
+       the page pair: which axis is meant is carried by the message, not by the
+       code, so one set serves both. */
     count = notches < 0 ? -notches : notches;
     if (per_notch == WHEEL_PAGESCROLL) {
         code = notches > 0 ? SB_PAGEUP : SB_PAGEDOWN;
@@ -756,9 +783,10 @@ LRESULT winproc_wheel(HWND hwnd, WPARAM wp, LPARAM lp)
         if (count > 64) count = 64;           /* a silly setting is still a cap */
     }
 
+    scroll = want.horz ? WM_HSCROLL : WM_VSCROLL;
     while (count-- > 0)
-        SendMessageA(hwnd, WM_VSCROLL, MAKEWPARAM(code, 0), (LPARAM)bar);
-    SendMessageA(hwnd, WM_VSCROLL, MAKEWPARAM(SB_ENDSCROLL, 0), (LPARAM)bar);
+        SendMessageA(hwnd, scroll, MAKEWPARAM(code, 0), (LPARAM)want.found);
+    SendMessageA(hwnd, scroll, MAKEWPARAM(SB_ENDSCROLL, 0), (LPARAM)want.found);
     return 0;
 }
 
@@ -789,7 +817,8 @@ LRESULT CALLBACK winproc_bridge(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
 
     /* Win16 has no wheel, so the guest procedure is not offered one: it is
        answered on this side, where the delta is still 32 bits wide. */
-    if (msg == WM_MOUSEWHEEL) return winproc_wheel(hwnd, wp, lp);
+    if (msg == WM_MOUSEWHEEL || msg == WM_MOUSEHWHEEL)
+        return winproc_wheel(hwnd, msg, wp, lp);
 
     /* No harness pump here.  Every window message is dispatched from the guest's
    own loop, which reaches GetMessage and pumps there, so pumping again inside
