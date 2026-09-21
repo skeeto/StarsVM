@@ -27,6 +27,16 @@
 
 /* When disabled, supply a fixed GlobalSettings for Stars.ini */
 #define GLOBAL_SETTINGS_PRESET "cXK3c0vpLLSpdAgeAMJdjUcWXpnp"  // EGGSWAIN
+
+/* Window Layout: 0 large, 1 medium, 2 small.  Asked with nothing in the file to
+   answer from, the game says medium, which is a 1995 reading of a roomy screen
+   - 800x600.  Every screen is large by that standard now, so a first run gets
+   the large layout instead.
+
+   A default, not an override: the game writes the layout back to Stars.ini on
+   the way out, so the moment a player picks one from the Window Layout menu
+   their choice is in the file and this never applies again. */
+#define LAYOUT_LARGE 0
 int prompt_serial = 0;
 
 static void pstr(uint32_t segptr, const char *s, unsigned max)
@@ -315,8 +325,12 @@ static uint32_t p_GetPrivateProfileInt(Cpu *c, Args *a)
     g_str(filep, file, sizeof file);
     ini_path(file, path, sizeof path / sizeof *path);
 
-    if (!ini_get(path, sec, key, value, sizeof value)) v = def;
-    else v = strtol(value, NULL, 0);
+    if (ini_get(path, sec, key, value, sizeof value))
+        v = strtol(value, NULL, 0);
+    else if (!_stricmp(sec, "Windows") && !_stricmp(key, "Layout"))
+        v = LAYOUT_LARGE;
+    else
+        v = def;
     if (log_verbose)
         log_msg("GetPrivateProfileInt [%s] %s -> %ld (%s)\n", sec, key, v,
                 log_wide(path));
