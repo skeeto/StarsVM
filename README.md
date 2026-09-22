@@ -20,7 +20,14 @@ the game never calls.
 [otvdm]: https://github.com/otya128/winevdm
 [Stars!]: https://en.wikipedia.org/wiki/Stars!
 
-What is in the box:
+## How to play?
+
+Refer to the [official manual][] and play the built-in tutorial (New Game,
+then Begin Tutorial).
+
+[official manual]: https://dn790003.ca.archive.org/0/items/manual_Stars/Stars.pdf
+
+## What is in the box?
 
 - a 16-bit x86 interpreter (`src/cpu.c`) covering 8086/80186/80286 plus the 386
   additions a 16-bit MS C compiler emits, differentially tested against the host
