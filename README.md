@@ -286,10 +286,23 @@ Windows 3.1 help file that modern Windows has no viewer for. What survives is
 the book that help was written alongside: the Player's Guide, scanned at the
 [Internet Archive](https://archive.org/details/manual_Stars). Both items open
 it in your default browser, and since PDF viewers understand Adobe's `#page=`
-fragment, Introduction lands on the guide's Introduction page rather than the
-cover. That is the one context id that can be translated — the rest belong to
-the Help buttons inside dialogs, and mapping those would take the `[MAP]`
-section of a `.hlp` file the game does not ship.
+fragment, a request can land on the page that answers it rather than the cover.
+
+So do the **Help buttons inside the dialogs**, which ask by context id —
+numbers that mean something only to the help file. `tools/helpmap.py` recovers
+the `[MAP]` section from a copy of `stars!.hlp`, turns each id back into the
+title of the topic it opened, and matches those titles against the guide's
+headings; `src/helpmap.inc` is the result, 246 of the help file's 419 ids. The
+join is not clean — the scan's text is OCR, the book and the help file were
+edited separately, and the book sets headings in spaced small caps — so it is
+checked against the book's own contents, an independent route to the same
+answer via the chapter-relative labels in every running head. The two agree on
+100 topics of the 101 where both fire. Ids the book has no heading for are left
+out and open the cover, which is what they did before.
+
+A different edition renumbers every page: the CD's own `MANUAL.PDF` runs to 280
+pages against this scan's 277, so `helpmap.inc` belongs to the scan it was
+built against.
 
 Put a copy of the guide named `Stars.pdf` next to the game module — beside
 `Stars-x86.exe` for a one-file build, beside `stars.exe` otherwise, the same

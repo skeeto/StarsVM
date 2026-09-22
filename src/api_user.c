@@ -1393,12 +1393,32 @@ static uint32_t u_TrackPopupMenu(Cpu *c, Args *a)
 #define MANUAL_URL  "https://archive.org/download/manual_Stars/Stars.pdf"
 #define MANUAL_FILE "Stars.pdf"         /* a local copy, if one is installed */
 
-/* Help menu, Introduction: the guide's own Introduction page.  This is the
-   only context id that can be translated - the rest belong to the Help buttons
-   scattered through the dialogs, and mapping those would take the [MAP] section
-   of a .hlp file that is not shipped with the game, so they open the cover. */
-#define HELP_CONTEXT_INTRODUCTION 0x1195
-#define MANUAL_PAGE_INTRODUCTION  11
+/* Which page a context id wants.  The ids are the game's own, from the [MAP]
+   section of a help file it does not ship; tools/helpmap.py recovers that
+   section from a copy of stars!.hlp, turns each id back into the title of the
+   topic it opened, and matches those titles against the guide's headings.  Its
+   header has the method and what it is worth.  Sorted by context id, which is
+   what lets the lookup below bisect. */
+static const struct { uint16_t context, page; } help_map[] = {
+#define HELP(context, page) { (uint16_t)(context), (uint16_t)(page) },
+#include "helpmap.inc"
+#undef HELP
+};
+
+/* Topics the book has no heading for are absent, and open it at the cover. */
+static int manual_page(uint16_t cmd, uint32_t context)
+{
+    size_t lo = 0, hi = sizeof help_map / sizeof *help_map;
+
+    if (cmd != HELP_CONTEXT || context > 0xFFFF) return 0;
+    while (lo < hi) {
+        size_t mid = lo + (hi - lo) / 2;
+        if (help_map[mid].context < context) lo = mid + 1;
+        else if (help_map[mid].context > context) hi = mid;
+        else return help_map[mid].page;
+    }
+    return 0;
+}
 
 static uint32_t u_WinHelp(Cpu *c, Args *a)
 {
@@ -1415,8 +1435,7 @@ static uint32_t u_WinHelp(Cpu *c, Args *a)
     /* HELP_QUIT tears down the help window at exit.  There is none. */
     if (cmd == HELP_QUIT) return 1;
 
-    if (cmd == HELP_CONTEXT && data == HELP_CONTEXT_INTRODUCTION)
-        page = MANUAL_PAGE_INTRODUCTION;
+    page = manual_page(cmd, data);
 
     /* A copy sitting beside the emulator wins, so the guide still opens with no
        network and keeps working if the archive's URL ever moves. */
