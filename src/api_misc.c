@@ -220,12 +220,84 @@ static uint32_t commdlg_file(Cpu *c, Args *a, int save)
 static uint32_t cd_GetOpenFileName(Cpu *c, Args *a) { return commdlg_file(c, a, 0); }
 static uint32_t cd_GetSaveFileName(Cpu *c, Args *a) { return commdlg_file(c, a, 1); }
 
+/* PRINTDLG16 is 52 bytes.  The game passes no hooks and no templates, so only
+   the fields it reads back matter.  PD_RETURNDC is the whole point: Stars!
+   never imports CreateDC, so the only printer DC it can ever hold is the one
+   this call hands back. */
+#define PD16_hwndOwner  0x04
+#define PD16_hDevMode   0x06
+#define PD16_hDevNames  0x08
+#define PD16_hDC        0x0A
+#define PD16_Flags      0x0C
+#define PD16_nFromPage  0x10
+#define PD16_nToPage    0x12
+#define PD16_nMinPage   0x14
+#define PD16_nMaxPage   0x16
+#define PD16_nCopies    0x18
+
 static uint32_t cd_PrintDlg(Cpu *c, Args *a)
 {
+    uint32_t p = arg_long(a);
+    uint16_t sel = SEGPTR_SEL(p), off = SEGPTR_OFF(p);
+    static HGLOBAL keep_mode, keep_names;
+    PRINTDLGA pd;
+    uint32_t flags;
+
     (void)c;
-    arg_long(a);
-    log_msg("PrintDlg is stubbed; printing is out of scope\n");
-    return 0;
+    if (!p) return 0;
+    flags = sel_rd32(sel, (uint16_t)(off + PD16_Flags));
+
+    memset(&pd, 0, sizeof pd);
+    pd.lStructSize = sizeof pd;
+    pd.hwndOwner = HWND_32(sel_rd16(sel, (uint16_t)(off + PD16_hwndOwner)));
+    /* The hook and template flags are the only ones that cannot survive: they
+       name 16-bit code and resources.  Everything else the game asks for means
+       the same thing in Win32, including PD_RETURNDEFAULT - the game's first
+       call, which wants the default printer's DC and no dialog at all. */
+    pd.Flags = (flags & ~(DWORD)(PD_ENABLEPRINTHOOK | PD_ENABLESETUPHOOK |
+                                 PD_ENABLEPRINTTEMPLATE |
+                                 PD_ENABLESETUPTEMPLATE |
+                                 PD_ENABLEPRINTTEMPLATEHANDLE |
+                                 PD_ENABLESETUPTEMPLATEHANDLE)) | PD_RETURNDC;
+    /* The two shell handles stay on this side: they are opaque to the guest,
+       which only passes them back, and a Win16 global handle for them would be
+       a lie we would then have to keep up.  PD_RETURNDEFAULT insists on having
+       neither. */
+    if (!(pd.Flags & PD_RETURNDEFAULT)) {
+        pd.hDevMode  = keep_mode;
+        pd.hDevNames = keep_names;
+    }
+    pd.nFromPage = sel_rd16(sel, (uint16_t)(off + PD16_nFromPage));
+    pd.nToPage   = sel_rd16(sel, (uint16_t)(off + PD16_nToPage));
+    pd.nMinPage  = sel_rd16(sel, (uint16_t)(off + PD16_nMinPage));
+    pd.nMaxPage  = sel_rd16(sel, (uint16_t)(off + PD16_nMaxPage));
+    pd.nCopies   = sel_rd16(sel, (uint16_t)(off + PD16_nCopies));
+
+    if (!PrintDlgA(&pd)) {
+        DWORD err = CommDlgExtendedError();
+        /* No error at all is the Cancel button, which is not worth a word. */
+        if (err) log_msg("PrintDlg failed (%lu)\n", err);
+        return 0;
+    }
+    if (pd.hDevMode && pd.hDevMode != keep_mode) {
+        if (keep_mode) GlobalFree(keep_mode);
+        keep_mode = pd.hDevMode;
+    }
+    if (pd.hDevNames && pd.hDevNames != keep_names) {
+        if (keep_names) GlobalFree(keep_names);
+        keep_names = pd.hDevNames;
+    }
+    if (log_verbose)
+        log_msg("PrintDlg: dc=%p %dx%d at %d dpi\n", (void *)pd.hDC,
+                GetDeviceCaps(pd.hDC, HORZRES), GetDeviceCaps(pd.hDC, VERTRES),
+                GetDeviceCaps(pd.hDC, LOGPIXELSX));
+
+    sel_wr16(sel, (uint16_t)(off + PD16_hDC), HDC_16(pd.hDC));
+    sel_wr32(sel, (uint16_t)(off + PD16_Flags), pd.Flags);
+    sel_wr16(sel, (uint16_t)(off + PD16_nFromPage), (uint16_t)pd.nFromPage);
+    sel_wr16(sel, (uint16_t)(off + PD16_nToPage),   (uint16_t)pd.nToPage);
+    sel_wr16(sel, (uint16_t)(off + PD16_nCopies),   (uint16_t)pd.nCopies);
+    return 1;
 }
 
 void api_misc_register(void)

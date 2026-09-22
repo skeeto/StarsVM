@@ -257,6 +257,28 @@ is no music data anywhere to substitute. `mciSendCommand` reports "no such
 device", which makes the game clear its music bit and stop asking. That is what
 it did on a machine with no CD in 1995.
 
+## Printing
+
+**File → Print Map** reaches whatever printers Windows has, which on a modern
+machine includes *Microsoft Print to PDF* — so the universe map comes out as a
+PDF at the printer's own resolution, 600 dpi rather than the screen's 96. The
+game asks for a printer device context through `PrintDlg` with `PD_RETURNDC`;
+it never imports `CreateDC`, so that call is the only way it can ever hold one.
+Everything after that is ordinary drawing, and the GDI shims neither know nor
+care that the device is a printer.
+
+The page model needed translating. Win16 has no `StartDoc`: a document is begun,
+paged and ended entirely through `Escape`, and the brackets fall the other way
+round — the app draws and *then* ejects with `NEWFRAME`, where Win32 wraps each
+page in `StartPage`/`EndPage`. Opening the next page at the eject is the obvious
+mapping and is wrong, because the app ejects its last page too and every
+document would end with a blank one; pages are opened lazily instead, by the
+first drawing call naming the printing device context. Stars! also wraps every
+tile of a multi-page map in its own `STARTDOC` and ends only the last, so a
+repeat on the same device context is taken as a page break — otherwise a 2×2 map
+would be four spooler jobs and four "where shall I save it?" prompts instead of
+one four-page PDF.
+
 ## Copy protection
 
 Stars! stamps each submitted turn file with your serial code and an eleven-byte
@@ -281,8 +303,7 @@ has the disassembly, the byte layout and the parts that are still not faithful.
   the ANSI code page cannot spell works. Paths the *game* supplies still go
   through the code page, so a saved game under such a directory will not open.
   Fixing that means choosing an encoding for the guest's bytes.
-- WinHelp and printing are stubbed. Modern Windows has no help viewer to
-  forward to.
+- WinHelp is stubbed. Modern Windows has no help viewer to forward to.
 
 ## Debugging
 

@@ -30,11 +30,31 @@
 /* A GDI object handle of any kind. */
 static HGDIOBJ obj32(uint16_t h) { return (HGDIOBJ)h32(H_GDIOBJ, h); }
 
+/* ---- printing ------------------------------------------------------------ */
+
+/* Win16 has no StartDoc: a document is begun, paged and ended entirely through
+   Escape, and the page model is the other way round.  Win16 draws and then
+   calls NEWFRAME to eject the page; Win32 brackets each page with StartPage and
+   EndPage.  Opening the next page at the eject would be the obvious mapping and
+   is wrong: the app ejects its last page too, so the document would always end
+   with a blank one.  So a page is opened lazily instead, by the first drawing
+   call that names the printing DC - which is what gdc() below is for. */
+static HDC esc_doc;                     /* the DC with a document open */
+static int esc_page;                    /* and whether a page is open on it */
+
+/* Every GDI entry that takes a DC takes it through here. */
+static HDC gdc(Args *a)
+{
+    HDC dc = HDC_32(arg_word(a));
+    if (dc && dc == esc_doc && !esc_page) esc_page = StartPage(dc) > 0;
+    return dc;
+}
+
 /* ---- device context and state -------------------------------------------- */
 
 static uint32_t g_SetBkColor(Cpu *c, Args *a)
 {
-    HDC dc = HDC_32(arg_word(a));
+    HDC dc = gdc(a);
     COLORREF col = arg_long(a);
     (void)c;
     return SetBkColor(dc, col);
@@ -43,19 +63,19 @@ static uint32_t g_SetBkColor(Cpu *c, Args *a)
 static uint32_t g_GetBkColor(Cpu *c, Args *a)
 {
     (void)c;
-    return GetBkColor(HDC_32(arg_word(a)));
+    return GetBkColor(gdc(a));
 }
 
 static uint32_t g_SetBkMode(Cpu *c, Args *a)
 {
-    HDC dc = HDC_32(arg_word(a));
+    HDC dc = gdc(a);
     (void)c;
     return (uint32_t)SetBkMode(dc, arg_sword(a));
 }
 
 static uint32_t g_SetROP2(Cpu *c, Args *a)
 {
-    HDC dc = HDC_32(arg_word(a));
+    HDC dc = gdc(a);
     (void)c;
     return (uint32_t)SetROP2(dc, arg_sword(a));
 }
@@ -63,12 +83,12 @@ static uint32_t g_SetROP2(Cpu *c, Args *a)
 static uint32_t g_GetROP2(Cpu *c, Args *a)
 {
     (void)c;
-    return (uint32_t)GetROP2(HDC_32(arg_word(a)));
+    return (uint32_t)GetROP2(gdc(a));
 }
 
 static uint32_t g_SetTextColor(Cpu *c, Args *a)
 {
-    HDC dc = HDC_32(arg_word(a));
+    HDC dc = gdc(a);
     COLORREF col = arg_long(a);
     (void)c;
     return SetTextColor(dc, col);
@@ -76,7 +96,7 @@ static uint32_t g_SetTextColor(Cpu *c, Args *a)
 
 static uint32_t g_SetWindowOrg(Cpu *c, Args *a)
 {
-    HDC dc = HDC_32(arg_word(a));
+    HDC dc = gdc(a);
     int x = arg_sword(a), y = arg_sword(a);
     POINT p;
     (void)c;
@@ -86,7 +106,7 @@ static uint32_t g_SetWindowOrg(Cpu *c, Args *a)
 
 static uint32_t g_SetBrushOrg(Cpu *c, Args *a)
 {
-    HDC dc = HDC_32(arg_word(a));
+    HDC dc = gdc(a);
     int x = arg_sword(a), y = arg_sword(a);
     POINT p;
     (void)c;
@@ -96,7 +116,7 @@ static uint32_t g_SetBrushOrg(Cpu *c, Args *a)
 
 static uint32_t g_MoveTo(Cpu *c, Args *a)
 {
-    HDC dc = HDC_32(arg_word(a));
+    HDC dc = gdc(a);
     int x = arg_sword(a), y = arg_sword(a);
     POINT p;
     (void)c;
@@ -106,7 +126,7 @@ static uint32_t g_MoveTo(Cpu *c, Args *a)
 
 static uint32_t g_LineTo(Cpu *c, Args *a)
 {
-    HDC dc = HDC_32(arg_word(a));
+    HDC dc = gdc(a);
     int x = arg_sword(a), y = arg_sword(a);
     (void)c;
     return (uint32_t)LineTo(dc, x, y);
@@ -114,7 +134,7 @@ static uint32_t g_LineTo(Cpu *c, Args *a)
 
 static uint32_t g_Rectangle(Cpu *c, Args *a)
 {
-    HDC dc = HDC_32(arg_word(a));
+    HDC dc = gdc(a);
     int l = arg_sword(a), t = arg_sword(a), r = arg_sword(a), b = arg_sword(a);
     (void)c;
     harness_draw(dc, "rect", l, t, r - l, b - t);
@@ -123,7 +143,7 @@ static uint32_t g_Rectangle(Cpu *c, Args *a)
 
 static uint32_t g_Ellipse(Cpu *c, Args *a)
 {
-    HDC dc = HDC_32(arg_word(a));
+    HDC dc = gdc(a);
     int l = arg_sword(a), t = arg_sword(a), r = arg_sword(a), b = arg_sword(a);
     (void)c;
     harness_draw(dc, "ellipse", l, t, r - l, b - t);
@@ -132,7 +152,7 @@ static uint32_t g_Ellipse(Cpu *c, Args *a)
 
 static uint32_t g_PatBlt(Cpu *c, Args *a)
 {
-    HDC dc = HDC_32(arg_word(a));
+    HDC dc = gdc(a);
     int x = arg_sword(a), y = arg_sword(a), w = arg_sword(a), h = arg_sword(a);
     DWORD rop = arg_long(a);
     (void)c;
@@ -142,7 +162,7 @@ static uint32_t g_PatBlt(Cpu *c, Args *a)
 
 static uint32_t g_SetPixel(Cpu *c, Args *a)
 {
-    HDC dc = HDC_32(arg_word(a));
+    HDC dc = gdc(a);
     int x = arg_sword(a), y = arg_sword(a);
     COLORREF col = arg_long(a);
     (void)c;
@@ -153,7 +173,7 @@ static uint32_t g_SetPixel(Cpu *c, Args *a)
 static uint32_t g_TextOut(Cpu *c, Args *a)
 {
     char buf[1024];
-    HDC dc = HDC_32(arg_word(a));
+    HDC dc = gdc(a);
     int x = arg_sword(a), y = arg_sword(a);
     uint32_t s = arg_long(a);
     int len = arg_sword(a);
@@ -167,7 +187,7 @@ static uint32_t g_TextOut(Cpu *c, Args *a)
 static uint32_t g_ExtTextOut(Cpu *c, Args *a)
 {
     char buf[1024];
-    HDC dc = HDC_32(arg_word(a));
+    HDC dc = gdc(a);
     int x = arg_sword(a), y = arg_sword(a);
     uint16_t flags = arg_word(a);
     uint32_t rp = arg_long(a);
@@ -205,9 +225,9 @@ static uint32_t g_ExtTextOut(Cpu *c, Args *a)
 
 static uint32_t g_BitBlt(Cpu *c, Args *a)
 {
-    HDC dst = HDC_32(arg_word(a));
+    HDC dst = gdc(a);
     int x = arg_sword(a), y = arg_sword(a), w = arg_sword(a), h = arg_sword(a);
-    HDC src = HDC_32(arg_word(a));
+    HDC src = gdc(a);
     int sx = arg_sword(a), sy = arg_sword(a);
     DWORD rop = arg_long(a);
     (void)c;
@@ -217,7 +237,7 @@ static uint32_t g_BitBlt(Cpu *c, Args *a)
 
 static uint32_t g_ExcludeClipRect(Cpu *c, Args *a)
 {
-    HDC dc = HDC_32(arg_word(a));
+    HDC dc = gdc(a);
     int l = arg_sword(a), t = arg_sword(a), r = arg_sword(a), b = arg_sword(a);
     (void)c;
     return (uint32_t)ExcludeClipRect(dc, l, t, r, b);
@@ -225,7 +245,7 @@ static uint32_t g_ExcludeClipRect(Cpu *c, Args *a)
 
 static uint32_t g_IntersectClipRect(Cpu *c, Args *a)
 {
-    HDC dc = HDC_32(arg_word(a));
+    HDC dc = gdc(a);
     int l = arg_sword(a), t = arg_sword(a), r = arg_sword(a), b = arg_sword(a);
     (void)c;
     return (uint32_t)IntersectClipRect(dc, l, t, r, b);
@@ -233,7 +253,7 @@ static uint32_t g_IntersectClipRect(Cpu *c, Args *a)
 
 static uint32_t g_SelectClipRgn(Cpu *c, Args *a)
 {
-    HDC dc = HDC_32(arg_word(a));
+    HDC dc = gdc(a);
     HRGN rgn = (HRGN)h32(H_RGN, arg_word(a));
     (void)c;
     return (uint32_t)SelectClipRgn(dc, rgn);
@@ -241,7 +261,7 @@ static uint32_t g_SelectClipRgn(Cpu *c, Args *a)
 
 static uint32_t g_SelectObject(Cpu *c, Args *a)
 {
-    HDC dc = HDC_32(arg_word(a));
+    HDC dc = gdc(a);
     uint16_t h = arg_word(a);
     HGDIOBJ prev;
     DWORD type;
@@ -265,7 +285,7 @@ static uint32_t g_SelectObject(Cpu *c, Args *a)
 static uint32_t g_CreateCompatibleDC(Cpu *c, Args *a)
 {
     (void)c;
-    return HDC_16(CreateCompatibleDC(HDC_32(arg_word(a))));
+    return HDC_16(CreateCompatibleDC(gdc(a)));
 }
 
 static uint32_t g_DeleteDC(Cpu *c, Args *a)
@@ -274,6 +294,9 @@ static uint32_t g_DeleteDC(Cpu *c, Args *a)
     HDC dc = HDC_32(h);
     BOOL r;
     (void)c;
+    /* Forget a printing DC that goes away without its document being ended, so
+       that a later DC landing on the same address is not mistaken for it. */
+    if (dc && dc == esc_doc) { esc_doc = NULL; esc_page = 0; }
     r = DeleteDC(dc);
     h_release(h);
     return (uint32_t)r;
@@ -281,7 +304,7 @@ static uint32_t g_DeleteDC(Cpu *c, Args *a)
 
 static uint32_t g_CreateCompatibleBitmap(Cpu *c, Args *a)
 {
-    HDC dc = HDC_32(arg_word(a));
+    HDC dc = gdc(a);
     int w = arg_sword(a), h = arg_sword(a);
     (void)c;
     return h16(H_BITMAP, CreateCompatibleBitmap(dc, w, h));
@@ -385,7 +408,7 @@ static uint32_t g_GetStockObject(Cpu *c, Args *a)
 
 static uint32_t g_GetDeviceCaps(Cpu *c, Args *a)
 {
-    HDC dc = HDC_32(arg_word(a));
+    HDC dc = gdc(a);
     int cap = arg_sword(a);
     int r;
     (void)c;
@@ -449,7 +472,7 @@ static uint32_t g_GetObject(Cpu *c, Args *a)
    comes before the byte block, and tmOverhang sits at the odd offset 0x19. */
 static uint32_t g_GetTextMetrics(Cpu *c, Args *a)
 {
-    HDC dc = HDC_32(arg_word(a));
+    HDC dc = gdc(a);
     uint32_t p = arg_long(a);
     uint16_t sel = SEGPTR_SEL(p), off = SEGPTR_OFF(p);
     TEXTMETRICA tm;
@@ -482,7 +505,7 @@ static uint32_t g_GetTextMetrics(Cpu *c, Args *a)
 static uint32_t g_GetTextExtent(Cpu *c, Args *a)
 {
     char buf[1024];
-    HDC dc = HDC_32(arg_word(a));
+    HDC dc = gdc(a);
     uint32_t s = arg_long(a);
     int len = arg_sword(a);
     SIZE sz;
@@ -635,7 +658,7 @@ static BITMAPINFO *read_bitmapinfo(uint32_t p, HDC dc, uint16_t *usage,
 
 static uint32_t g_StretchDIBits(Cpu *c, Args *a)
 {
-    HDC dc      = HDC_32(arg_word(a));
+    HDC dc      = gdc(a);
     int xd = arg_sword(a), yd = arg_sword(a);
     int wd = arg_sword(a), hd = arg_sword(a);
     int xs = arg_sword(a), ys = arg_sword(a);
@@ -662,7 +685,7 @@ static uint32_t g_StretchDIBits(Cpu *c, Args *a)
 
 static uint32_t g_GetDIBits(Cpu *c, Args *a)
 {
-    HDC dc        = HDC_32(arg_word(a));
+    HDC dc        = gdc(a);
     uint16_t hbm  = arg_word(a);
     uint16_t start = arg_word(a);
     uint16_t lines = arg_word(a);
@@ -694,18 +717,135 @@ static uint32_t g_GetDIBits(Cpu *c, Args *a)
     return (uint32_t)(int16_t)r;
 }
 
+/* Stars! uses three of these and no more, measured over a Print Map: STARTDOC,
+   one NEWFRAME per page, ENDDOC.  The rest are here because a printing app is
+   entitled to ask, and answering "unsupported" to QUERYESCSUPPORT for an escape
+   we then refuse would be a needless way to lose a feature later. */
+#define ESC_NEWFRAME          1
+#define ESC_ABORTDOC          2
+#define ESC_QUERYESCSUPPORT   8
+#define ESC_SETABORTPROC      9
+#define ESC_STARTDOC         10
+#define ESC_ENDDOC           11
+#define ESC_GETPHYSPAGESIZE  12
+#define ESC_GETPRINTINGOFFSET 13
+#define ESC_GETSCALINGFACTOR 14
+
+static int esc_supported(int esc)
+{
+    switch (esc) {
+    case ESC_NEWFRAME: case ESC_ABORTDOC: case ESC_QUERYESCSUPPORT:
+    case ESC_SETABORTPROC: case ESC_STARTDOC: case ESC_ENDDOC:
+    case ESC_GETPHYSPAGESIZE: case ESC_GETPRINTINGOFFSET:
+        return 1;
+    default:
+        return 0;
+    }
+}
+
+/* A POINT written back through a far pointer, for the GET* escapes. */
+static void esc_point(uint32_t outp, int x, int y)
+{
+    uint16_t sel, off;
+    if (!outp) return;
+    sel = SEGPTR_SEL(outp); off = SEGPTR_OFF(outp);
+    sel_wr16(sel, off, (uint16_t)x);
+    sel_wr16(sel, (uint16_t)(off + 2), (uint16_t)y);
+}
+
 static uint32_t g_Escape(Cpu *c, Args *a)
 {
-    HDC dc = HDC_32(arg_word(a));
+    HDC dc = HDC_32(arg_word(a));       /* not gdc(): an eject opens no page */
     int esc = arg_sword(a);
-    (void)c; (void)dc;
-    arg_sword(a);                       /* count */
-    arg_long(a);                        /* input */
-    arg_long(a);                        /* output */
-    /* Printing is out of scope; report the escape as unsupported, which is what
-       a driver without that capability does. */
-    log_msg("GDI.Escape(%d) is stubbed\n", esc);
-    return 0;
+    int count = arg_sword(a);
+    uint32_t inp = arg_long(a);
+    uint32_t outp = arg_long(a);
+    char name[64];
+    DOCINFOA di;
+
+    (void)c;
+    if (log_verbose)
+        log_msg("GDI.Escape(%d) dc=%p count=%d\n", esc, (void *)dc, count);
+    if (!dc) return 0;
+
+    switch (esc) {
+    case ESC_QUERYESCSUPPORT:
+        return inp ? (uint32_t)esc_supported(
+                         (int16_t)sel_rd16(SEGPTR_SEL(inp), SEGPTR_OFF(inp))) : 0;
+
+    case ESC_SETABORTPROC:
+        /* The abort proc exists to let the driver poll for a cancel while it
+           spools.  Nothing here spools long enough to need one, and calling a
+           guest far proc from inside a host print job would re-enter the CPU
+           at an awkward moment.  Accepting and ignoring it is what a driver
+           that never aborts does. */
+        return 1;
+
+    case ESC_STARTDOC:
+        /* Stars! brackets every tile of a multi-page map in its own STARTDOC
+           and never ends one until the last, so a print of N pages arrives as
+           N STARTDOCs and a single ENDDOC.  Taken literally that is N documents
+           - N spooler jobs, and N "where shall I save it?" prompts from the PDF
+           driver - and Win32 refuses the second one anyway, since the DC already
+           has a document open.  A repeat on the same DC is a page break. */
+        if (dc == esc_doc) {
+            if (esc_page) EndPage(dc);
+            esc_page = 0;
+            return 1;
+        }
+        memset(name, 0, sizeof name);
+        if (inp && count > 0) {
+            int i, n = count < (int)sizeof name - 1 ? count : (int)sizeof name - 1;
+            for (i = 0; i < n; i++)
+                name[i] = (char)sel_rd8(SEGPTR_SEL(inp),
+                                        (uint16_t)(SEGPTR_OFF(inp) + i));
+        }
+        memset(&di, 0, sizeof di);
+        di.cbSize = sizeof di;
+        di.lpszDocName = name[0] ? name : "Stars!";
+        if (StartDocA(dc, &di) <= 0) {
+            log_msg("StartDoc failed (%lu)\n", GetLastError());
+            return 0;                   /* SP_ERROR */
+        }
+        esc_doc = dc;
+        esc_page = 0;                   /* the first drawing call opens it */
+        return 1;
+
+    case ESC_NEWFRAME:
+        if (dc != esc_doc) return 0;
+        if (esc_page) EndPage(dc);
+        esc_page = 0;
+        return 1;
+
+    case ESC_ENDDOC:
+        if (dc != esc_doc) return 0;
+        if (esc_page) EndPage(dc);
+        esc_page = 0;
+        esc_doc = NULL;
+        EndDoc(dc);
+        return 1;
+
+    case ESC_ABORTDOC:
+        if (dc != esc_doc) return 0;
+        esc_page = 0;
+        esc_doc = NULL;
+        AbortDoc(dc);
+        return 1;
+
+    case ESC_GETPHYSPAGESIZE:
+        esc_point(outp, GetDeviceCaps(dc, PHYSICALWIDTH),
+                  GetDeviceCaps(dc, PHYSICALHEIGHT));
+        return 1;
+
+    case ESC_GETPRINTINGOFFSET:
+        esc_point(outp, GetDeviceCaps(dc, PHYSICALOFFSETX),
+                  GetDeviceCaps(dc, PHYSICALOFFSETY));
+        return 1;
+
+    default:
+        log_msg("GDI.Escape(%d) is stubbed\n", esc);
+        return 0;
+    }
 }
 
 void api_gdi_register(void)
