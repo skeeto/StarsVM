@@ -312,6 +312,17 @@ Note that the archive hands out a per-request storage node —
 `dn760107.eu.archive.org` one moment, `dn790003.ca.archive.org` the next — so
 the durable `/download/` form is what is baked in, and it redirects.
 
+A local copy needs one extra step to land on a page. `ShellExecute` resolves a
+`file:` URL to a plain path before handing it to whatever opens a `.pdf`, and a
+path has nowhere to put a fragment, so `#page=` is dropped — where on an `http`
+URL, which the shell passes to the browser whole, it survives. The shell is
+what drops it, not the browser: `start` loses the page too and naming
+`chrome.exe` on a command line does not. So when there is a page to land on,
+the emulator asks which command is registered for `http` and runs that with the
+URL as an argument. Without a page it just calls `ShellExecute`, which opens a
+local guide in whatever you actually read PDFs with rather than insisting on
+your browser.
+
 ## Copy protection
 
 Stars! stamps each submitted turn file with your serial code and an eleven-byte

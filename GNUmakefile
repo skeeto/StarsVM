@@ -17,7 +17,7 @@ WINDRES := $(CROSS)windres
 CFLAGS  := -std=c11 -O3 -g -Wall -Wextra -Wshadow -Wstrict-prototypes \
            -Wno-unused-parameter -MMD -MP -D__USE_MINGW_ANSI_STDIO=0
 LDFLAGS := -mwindows -s
-LDLIBS  := -luser32 -lgdi32 -lcomdlg32 -lwinmm -lshell32
+LDLIBS  := -luser32 -lgdi32 -lcomdlg32 -lwinmm -lshell32 -lshlwapi
 
 SRCDIR  := src
 OBJDIR  := build/$(if $(CROSS),32,64)

@@ -23,6 +23,7 @@
 #include <string.h>
 #include <windows.h>
 #include <shellapi.h>
+#include <shlwapi.h>
 #include <limits.h>
 
 extern int  trace_paint;              /* --trace-paint */
@@ -1420,6 +1421,53 @@ static int manual_page(uint16_t cmd, uint32_t context)
     return 0;
 }
 
+/* Start the browser on a URL, going round the shell.
+
+   ShellExecute resolves a file: URL to a plain path before handing it to
+   whatever opens a .pdf, and a path has nowhere to put a fragment - so #page=
+   is lost on a local copy of the guide, where it survives on the http one,
+   which the shell passes to the browser whole.  It is the shell that drops it,
+   not the browser: `start` loses the page too and naming chrome.exe on a
+   command line does not.  So ask which command is registered for http and run
+   that with the URL as an argument, which is the road the fragment survives.
+
+   Only worth doing when there is a page to land on.  Without one, ShellExecute
+   is the better call: it opens a local guide in whatever the reader chose to
+   read PDFs with, rather than insisting on their browser. */
+static int open_in_browser(const char *url)
+{
+    char cmd[1024], line[sizeof(char[1024]) + MAX_PATH + 64];
+    DWORD n = sizeof cmd;
+    STARTUPINFOA si;
+    PROCESS_INFORMATION pi;
+    char *slot;
+
+    /* Everything below builds a command line, so a quote in the URL would let
+       it change the command's shape.  A Windows path cannot hold one. */
+    if (strchr(url, '"')) return 0;
+    if (AssocQueryStringA(ASSOCF_NONE, ASSOCSTR_COMMAND, "http", "open",
+                          cmd, &n) != S_OK)
+        return 0;
+
+    /* The registered command is a template: "...chrome.exe" %1, and Windows
+       spells the slot %1 or %L depending on who wrote the entry. */
+    slot = strstr(cmd, "%1");
+    if (!slot) slot = strstr(cmd, "%L");
+    if (slot)
+        snprintf(line, sizeof line, "%.*s%s%s",
+                 (int)(slot - cmd), cmd, url, slot + 2);
+    else
+        snprintf(line, sizeof line, "%s \"%s\"", cmd, url);
+
+    memset(&si, 0, sizeof si);
+    si.cb = sizeof si;
+    if (!CreateProcessA(NULL, line, NULL, NULL, FALSE, 0, NULL, NULL, &si, &pi))
+        return 0;
+    CloseHandle(pi.hProcess);
+    CloseHandle(pi.hThread);
+    return 1;
+}
+
 static uint32_t u_WinHelp(Cpu *c, Args *a)
 {
     char buf[MAX_PATH], url[MAX_PATH + 64], local[MAX_PATH];
@@ -1453,6 +1501,7 @@ static uint32_t u_WinHelp(Cpu *c, Args *a)
 
     if (log_verbose)
         log_msg("WinHelp(%s, cmd %u, data %08X) -> %s\n", buf, cmd, data, url);
+    if (page && open_in_browser(url)) return 1;
     if ((uintptr_t)ShellExecuteA(NULL, "open", url, NULL, NULL,
                                  SW_SHOWNORMAL) <= 32) {
         log_msg("WinHelp: cannot open %s (%lu)\n", url, GetLastError());
