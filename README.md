@@ -25,7 +25,7 @@ the game never calls.
 Refer to the [official manual][] and play the built-in tutorial (New Game,
 then Begin Tutorial).
 
-[official manual]: https://dn790003.ca.archive.org/0/items/manual_Stars/Stars.pdf
+[official manual]: https://archive.org/download/manual_Stars/Stars.pdf
 
 ## What is in the box?
 
@@ -279,6 +279,24 @@ repeat on the same device context is taken as a page break — otherwise a 2×2 
 would be four spooler jobs and four "where shall I save it?" prompts instead of
 one four-page PDF.
 
+## Help
+
+**Help → Introduction** and **Help → Player's Guide** ask for `stars!.hlp`, a
+Windows 3.1 help file that modern Windows has no viewer for. What survives is
+the book that help was written alongside: the Player's Guide, scanned at the
+[Internet Archive](https://archive.org/details/manual_Stars). Both items open
+it in your default browser, and since PDF viewers understand Adobe's `#page=`
+fragment, Introduction lands on the guide's Introduction page rather than the
+cover. That is the one context id that can be translated — the rest belong to
+the Help buttons inside dialogs, and mapping those would take the `[MAP]`
+section of a `.hlp` file the game does not ship.
+
+Put a copy of the guide named `Stars.pdf` beside the emulator and it is used in
+preference, so the guide still opens with no network, and keeps working if the
+archive's URL ever moves. Note that the archive hands out a per-request storage
+node — `dn760107.eu.archive.org` one moment, `dn790003.ca.archive.org` the next
+— so the durable `/download/` form is what is baked in, and it redirects.
+
 ## Copy protection
 
 Stars! stamps each submitted turn file with your serial code and an eleven-byte
@@ -303,7 +321,11 @@ has the disassembly, the byte layout and the parts that are still not faithful.
   the ANSI code page cannot spell works. Paths the *game* supplies still go
   through the code page, so a saved game under such a directory will not open.
   Fixing that means choosing an encoding for the guest's bytes.
-- WinHelp is stubbed. Modern Windows has no help viewer to forward to.
+- **Help opens the book, not the help file.** `stars!.hlp` is a Windows 3.1
+  help file and modern Windows ships no viewer for one, so help requests open
+  the Player's Guide in your browser instead — see *Help* below. Only the
+  Help menu's own Introduction entry knows which page it wants; the Help
+  buttons inside dialogs open the cover.
 
 ## Debugging
 

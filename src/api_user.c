@@ -22,6 +22,7 @@
 #include <stdio.h>
 #include <string.h>
 #include <windows.h>
+#include <shellapi.h>
 #include <limits.h>
 
 extern int  trace_paint;              /* --trace-paint */
@@ -1378,24 +1379,67 @@ static uint32_t u_TrackPopupMenu(Cpu *c, Args *a)
 
 /* ---- help ---------------------------------------------------------------- */
 
+/* The game's help is `stars!.hlp`, a Windows 3.1 help file, and modern Windows
+   ships no viewer for those - so there is nothing to forward a help request to.
+   What survives is the book the help was written alongside: the Player's Guide,
+   scanned at the Internet Archive.  PDF viewers understand Adobe's #page=
+   fragment, so a request can still land on the right page rather than the cover.
+
+   The archive hands out a per-request storage node - dn760107.eu.archive.org
+   one moment, dn790003.ca.archive.org the next - so a node name must not be
+   baked in here.  /download/ is the durable form and redirects to whichever
+   node holds the file; the fragment survives the redirect because the browser
+   never sends it in the first place. */
+#define MANUAL_URL  "https://archive.org/download/manual_Stars/Stars.pdf"
+#define MANUAL_FILE "Stars.pdf"         /* a local copy, if one is installed */
+
+/* Help menu, Introduction: the guide's own Introduction page.  This is the
+   only context id that can be translated - the rest belong to the Help buttons
+   scattered through the dialogs, and mapping those would take the [MAP] section
+   of a .hlp file that is not shipped with the game, so they open the cover. */
+#define HELP_CONTEXT_INTRODUCTION 0x1195
+#define MANUAL_PAGE_INTRODUCTION  11
+
 static uint32_t u_WinHelp(Cpu *c, Args *a)
 {
-    char buf[MAX_PATH];
+    char buf[MAX_PATH], url[MAX_PATH + 64], local[MAX_PATH];
     uint16_t hwnd = arg_word(a);
     uint32_t file = arg_long(a);
     uint16_t cmd = arg_word(a);
     uint32_t data = arg_long(a);
-    static int warned;
+    int page = 0, i;
 
-    (void)c; (void)hwnd; (void)data;
+    (void)c; (void)hwnd;
     g_str(file, buf, sizeof buf);
-    /* Modern Windows has no WinHlp32, so there is nothing to forward to. */
-    if (!warned) {
-        warned = 1;
-        log_msg("WinHelp(%s, cmd %u): stubbed, modern Windows has no help viewer\n",
-                buf, cmd);
+
+    /* HELP_QUIT tears down the help window at exit.  There is none. */
+    if (cmd == HELP_QUIT) return 1;
+
+    if (cmd == HELP_CONTEXT && data == HELP_CONTEXT_INTRODUCTION)
+        page = MANUAL_PAGE_INTRODUCTION;
+
+    /* A copy sitting beside the emulator wins, so the guide still opens with no
+       network and keeps working if the archive's URL ever moves. */
+    snprintf(local, sizeof local, "%s\\%s", task.exedir, MANUAL_FILE);
+    if (GetFileAttributesA(local) != INVALID_FILE_ATTRIBUTES) {
+        for (i = 0; local[i]; i++) if (local[i] == '\\') local[i] = '/';
+        snprintf(url, sizeof url, "file:///%s", local);
+    } else {
+        snprintf(url, sizeof url, "%s", MANUAL_URL);
     }
-    return 0;
+    if (page) {
+        size_t n = strlen(url);
+        snprintf(url + n, sizeof url - n, "#page=%d", page);
+    }
+
+    if (log_verbose)
+        log_msg("WinHelp(%s, cmd %u, data %08X) -> %s\n", buf, cmd, data, url);
+    if ((uintptr_t)ShellExecuteA(NULL, "open", url, NULL, NULL,
+                                 SW_SHOWNORMAL) <= 32) {
+        log_msg("WinHelp: cannot open %s (%lu)\n", url, GetLastError());
+        return 0;
+    }
+    return 1;
 }
 
 /* ---- wsprintf -------------------------------------------------------------- */
