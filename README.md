@@ -292,7 +292,7 @@ So do the **Help buttons inside the dialogs**, which ask by context id —
 numbers that mean something only to the help file. `tools/helpmap.py` recovers
 the `[MAP]` section from a copy of `stars!.hlp`, turns each id back into the
 title of the topic it opened, and matches those titles against the guide's
-headings; `src/helpmap.inc` is the result, 246 of the help file's 419 ids. The
+headings; `src/helpmap.inc` is the result, 253 of the help file's 419 ids. The
 join is not clean — the scan's text is OCR, the book and the help file were
 edited separately, and the book sets headings in spaced small caps — so it is
 checked against the book's own contents, an independent route to the same

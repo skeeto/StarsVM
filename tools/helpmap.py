@@ -52,11 +52,34 @@ INDEX_START = 270
 NAVIGATION = {1, 2, 3, 4, 6, 7, 8, 9, 10}
 
 # Topics the matcher cannot reach, with the page settled by looking.
+#
+# The cluster below is one mismatch rather than seven.  The help file is a
+# reference to the dialogs and names its topics after them; the book teaches
+# tasks and names its headings after those.  So the game's setup dialogs ask
+# for "New Game Setup (Basic)" and "Step 3: Victory Conditions" where the book
+# says "Starting a Single Player Game" and "Setting and Viewing Winning
+# Conditions" - the same material under words with nothing in common.  No
+# amount of fuzzy matching bridges victory to winning, so these are placed by
+# hand, against the headings named in each comment.
 OVERRIDES = {
     # The Help menu's Introduction.  The help file calls the topic "Welcome to
     # Stars!" and the book has no heading of that name: page 11 is its
     # full-page INTRODUCTION divider, and chapter 1 proper opens on 13.
     4501: 11,
+
+    # STARTING A SINGLE PLAYER GAME, which is the New Game dialog: picking the
+    # universe size, the density and the opponents.  The advanced wizard is
+    # reached from the same dialog and specifies the same things at length.
+    1002: 20,           # New Game Setup (Basic)
+    1011: 20,           # New Game Setup (Advanced)
+    1012: 20,           # Step 1: Specifying the Universe
+    1020: 20,           # Step 2: Specifying the Players
+
+    # SETTING AND VIEWING WINNING CONDITIONS, which also describes the score
+    # sheet by name and what it shows.
+    1021: 21,           # Step 3: Victory Conditions
+    1097: 21,           # Public Player Scores
+    1109: 21,           # Score sheet
 }
 
 STOP = {'A', 'AN', 'AND', 'THE', 'OF', 'TO', 'IN', 'ON', 'FOR', 'YOUR', 'WITH',

@@ -11,9 +11,14 @@
  * them - the CD's own MANUAL.PDF, for one, runs to 280 pages against this
  * one's 277.
  *
- * 246 of the help file's 419 context ids are here.  The rest are topics the
+ * 253 of the help file's 419 context ids are here.  The rest are topics the
  * book has no heading for, and they open the guide at its cover.
  */
+HELP( 1002,  20)   /* New Game Setup (Basic) */
+HELP( 1011,  20)   /* New Game Setup (Advanced) */
+HELP( 1012,  20)   /* Step 1: Specifying the Universe */
+HELP( 1020,  20)   /* Step 2: Specifying the Players */
+HELP( 1021,  21)   /* Step 3: Victory Conditions */
 HELP( 1022, 254)   /* Custom Race Wizard */
 HELP( 1023, 188)   /* Step 1: Basic Definition */
 HELP( 1024, 188)   /* Race Name and Password */
@@ -53,11 +58,13 @@ HELP( 1081, 159)   /* Battle Plans Dialog */
 HELP( 1083, 240)   /* Player Relations Dialog */
 HELP( 1084,  34)   /* Change Password */
 HELP( 1096, 197)   /* Advanced Remote Mining */
+HELP( 1097,  21)   /* Public Player Scores */
 HELP( 1099, 189)   /* Leftover Advantage Points – Mineral Concentration */
 HELP( 1100,  70)   /* Claim Adjuster */
 HELP( 1101,  69)   /* Alternate Reality */
 HELP( 1102, 126)   /* Ultimate Recycling */
 HELP( 1103, 199)   /* Bleeding Edge Technology */
+HELP( 1109,  21)   /* Score sheet */
 HELP( 1502,  47)   /* Changing the Basic Layout */
 HELP( 1503,  47)   /* Shrinking and Growing Panes */
 HELP( 1504,  48)   /* Moving and Collapsing Tiles */
