@@ -28,6 +28,7 @@ __pycache__/
 # ours to redistribute.
 stars.exe
 Stars.ini
+Stars.pdf
 
 # The tutorial writes a game of its own next to the module.  Game state, not
 # ours, and it appears the moment anyone runs the tutorial: the turn and

@@ -291,11 +291,13 @@ cover. That is the one context id that can be translated — the rest belong to
 the Help buttons inside dialogs, and mapping those would take the `[MAP]`
 section of a `.hlp` file the game does not ship.
 
-Put a copy of the guide named `Stars.pdf` beside the emulator and it is used in
-preference, so the guide still opens with no network, and keeps working if the
-archive's URL ever moves. Note that the archive hands out a per-request storage
-node — `dn760107.eu.archive.org` one moment, `dn790003.ca.archive.org` the next
-— so the durable `/download/` form is what is baked in, and it redirects.
+Put a copy of the guide named `Stars.pdf` next to the game module — beside
+`Stars-x86.exe` for a one-file build, beside `stars.exe` otherwise, the same
+directory `Stars.ini` lives in — and it is used in preference, so the guide
+still opens with no network and keeps working if the archive's URL ever moves.
+Note that the archive hands out a per-request storage node —
+`dn760107.eu.archive.org` one moment, `dn790003.ca.archive.org` the next — so
+the durable `/download/` form is what is baked in, and it redirects.
 
 ## Copy protection
 
