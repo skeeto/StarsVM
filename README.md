@@ -262,10 +262,17 @@ The caller hands over `stars.exe` once, as bytes, and after that every game
 file goes in and comes out as a buffer: a `StarsFS` holds a game's `.hst`,
 `.xy` and each player's `.m`, `.x` and `.h`. Memory comes from an arena the
 caller owns, not from `malloc`; outputs point into it, and resetting its start
-pointer reclaims them. A call fails with a code rather than a dialog — a
-password it cannot answer is `STARS_EPASSWORD`, a game that stops to wait for
-something that is never coming is `STARS_EHUNG` — and a log buffer carries
-whatever the game had to say.
+pointer reclaims them. A call fails with a code rather than a dialog — a game
+that stops to wait for something that is never coming is `STARS_EHUNG` — and a
+log buffer carries whatever the game had to say.
+
+Passwords do not get in the way. A Stars! password is a hash in the player's own
+block of the turn file, and the file's scrambling is a keystream that can be run
+up to it, so `stars_dump` hands the game a copy with the hash blanked
+(`src/password.c`). The dumps come out byte for byte as the emulator writes them
+given the password — tested on turn files locked in the game's own dialog, on
+AI players (whose password is `viewai`), and on inactive players, who have no
+working password at all — and the caller's file is never touched.
 
 ```bash
 make lib        # libstars.a, and stars.dll or libstars.so
