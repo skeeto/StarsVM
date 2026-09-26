@@ -19,12 +19,14 @@
  * past whatever it hands back, and borrows scratch space from the back for
  * the length of the call only.  Nothing is ever freed: to reclaim a call's
  * output, put a.beg back where it was.  Every output buffer points into the
- * arena and lives exactly as long as that memory does.  A call that runs out
- * of arena fails with STARS_ENOMEM and leaves the arena as it was.
+ * arena and lives exactly as long as that memory does.  A call that fails -
+ * STARS_ENOMEM included - leaves the arena as it was but for its log, which
+ * is left at the front for the caller to read.
  *
- * STARS_ARENA_MIN is the least a call can succeed with, most of it the game's
- * own address space.  The files come on top of that - a few hundred KB for a
- * small game, a few MB for a large one late on.
+ * STARS_ARENA_MIN is enough for a call on a small game, most of it the game's
+ * own 16 MB address space.  The files come on top of that - a few hundred KB
+ * for a small game, a few MB for a large one late on.  stars_init keeps a
+ * copy of the exe, so its arena needs a little over 3 MB.
  *
  * Buffers.  A StarsBuf with len 0 is an absent file.  Input bytes are only
  * ever read, however the pointer is qualified.
@@ -90,19 +92,19 @@ STARS_API int stars_init(StarsVM **vm, StarsArena *perm, StarsBuf exe);
    puts them in.  On success `out` holds the new game's .hst, .xy and a .mN per
    player. */
 STARS_API int stars_newgame(StarsVM *vm, StarsArena *arena, StarsBuf def,
-                  const StarsFile *races, int nraces, StarsFS *out,
-                  StarsBuf *log);
+                            const StarsFile *races, int nraces, StarsFS *out,
+                            StarsBuf *log);
 
 /* stars.exe -gN: generate `nturns` turns, 1 to 1000, from the game in `fs`,
    which is updated in place: .hst, .mN and .hN are replaced and the .xN
    consumed.  Players with no .xN simply submitted nothing. */
-STARS_API int stars_generate(StarsVM *vm, StarsArena *arena, int nturns, StarsFS *fs,
-                   StarsBuf *log);
+STARS_API int stars_generate(StarsVM *vm, StarsArena *arena, int nturns,
+                             StarsFS *fs, StarsBuf *log);
 
 /* stars.exe -dfmp: player `player`'s (1 to 16) view of the game in `fs` as
    text.  Reads that player's .mN, with .xN and .hN if present, and .xy. */
-STARS_API int stars_dump(StarsVM *vm, StarsArena *arena, const StarsFS *fs, int player,
-               StarsDump *out, StarsBuf *log);
+STARS_API int stars_dump(StarsVM *vm, StarsArena *arena, const StarsFS *fs,
+                         int player, StarsDump *out, StarsBuf *log);
 
 /* `log`, where a call takes one, may be NULL.  Otherwise it receives the
    run's diagnostics: every message box the game raised, and where anything
