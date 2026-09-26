@@ -68,15 +68,14 @@ typedef struct {
 typedef struct { StarsBuf map, pla, fle; } StarsDump;
 
 enum {
-    STARS_OK        = 0,
-    STARS_ENOMEM    = 1,  /* the arena is too small                          */
-    STARS_EINPUT    = 2,  /* an argument is out of range or a file is absent  */
-    STARS_EEXE      = 3,  /* not the stars.exe of Stars! 2.70j                */
-    STARS_EGAME     = 4,  /* the game refused or failed; its words are in log */
-    STARS_EPASSWORD = 5,  /* the game asked for a password all the same     */
-    STARS_EHUNG     = 6,  /* the game stopped to wait for something           */
-    STARS_ECRASH    = 7,  /* the emulation failed; log says where             */
-    STARS_EBUSY     = 8   /* another call is in progress                      */
+    STARS_OK     = 0,
+    STARS_ENOMEM = 1,     /* the arena is too small                          */
+    STARS_EINPUT = 2,     /* an argument is out of range or a file is absent  */
+    STARS_EEXE   = 3,     /* not the stars.exe of Stars! 2.70j                */
+    STARS_EGAME  = 4,     /* the game refused or failed; its words are in log */
+    STARS_EHUNG  = 5,     /* the game stopped to wait for something           */
+    STARS_ECRASH = 6,     /* the emulation failed; log says where             */
+    STARS_EBUSY  = 7      /* another call is in progress                      */
 };
 
 #define STARS_ARENA_MIN (20 << 20)

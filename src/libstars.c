@@ -487,7 +487,6 @@ const char *stars_strerror(int err)
     case STARS_EINPUT:    return "invalid argument";
     case STARS_EEXE:      return "not Stars! 2.70j";
     case STARS_EGAME:     return "the game reported a problem";
-    case STARS_EPASSWORD: return "password protected";
     case STARS_EHUNG:     return "the game stopped to wait";
     case STARS_ECRASH:    return "emulation failed";
     case STARS_EBUSY:     return "another call is in progress";

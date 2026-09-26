@@ -28,9 +28,9 @@
  *     nothing.  Text measures as if every character were half as wide as the
  *     font is high.
  *   - A message box is written to the log and answered with its most
- *     cautious button.  A dialog box ends the call: the only one these modes
- *     can raise is the password prompt, which is STARS_EPASSWORD, and any
- *     other is a surprise worth reporting as STARS_EGAME.
+ *     cautious button.  A dialog box ends the call as STARS_EGAME: nobody is
+ *     there to fill it in, and none of these modes should raise one.  The one
+ *     they could, the password prompt, is headed off by password.c.
  *   - Stars.ini is empty and stays empty.  What the game asks it gets the
  *     defaults for, with the same preset serial the emulator supplies.
  */
@@ -1067,7 +1067,7 @@ static uint32_t u_DialogBox(Cpu *c, Args *a)
     (void)c; (void)hinst;
     if (SEGPTR_SEL(tmpl) == 0 && SEGPTR_OFF(tmpl) == 140) {
         log_msg("The game asked for a password.\n");
-        lib_fail(STARS_EPASSWORD);
+        lib_fail(STARS_EGAME);
     }
     if (SEGPTR_SEL(tmpl) == 0) snprintf(name, sizeof name, "#%u", SEGPTR_OFF(tmpl));
     else g_str(tmpl, name, sizeof name);
