@@ -369,6 +369,8 @@ static uint32_t k_OpenFile(Cpu *c, Args *a)
         snprintf(full, sizeof full, "%.*s", (int)sizeof full - 1, path);
     }
 
+    if (log_verbose)
+        log_msg("OpenFile \"%s\" style %04X (as \"%s\")\n", path, style, full);
     if (style & OF_EXIST) {
         DWORD attr = GetFileAttributesA(full);
         fill_ofstruct(ofs, full, 0);
@@ -383,6 +385,9 @@ static uint32_t k_OpenFile(Cpu *c, Args *a)
     h = CreateFileA(full, access, FILE_SHARE_READ | FILE_SHARE_WRITE, NULL,
                     disp, FILE_ATTRIBUTE_NORMAL, NULL);
     if (h == INVALID_HANDLE_VALUE) {
+        if (log_verbose)
+            log_msg("OpenFile: \"%s\" failed, error %lu\n", full,
+                    (unsigned long)GetLastError());
         fill_ofstruct(ofs, full, 2);
         return 0xFFFF;
     }
@@ -533,6 +538,16 @@ static uint32_t dos3call(Cpu *c, Args *a)
 
     (void)a;
     dos_ok(c);
+
+    if (log_verbose) {
+        switch (ah) {
+        case 0x39: case 0x3A: case 0x3B: case 0x3C: case 0x3D: case 0x41:
+        case 0x43: case 0x4E: case 0x56: case 0x5B:
+            guest_path(SEGPTR(c->seg[S_DS], reg16(c, R_DX)), path, sizeof path);
+            log_msg("INT 21h AH=%02X AL=%02X CX=%04X \"%s\"\n",
+                    ah, al, reg16(c, R_CX), path);
+        }
+    }
 
     switch (ah) {
     case 0x19:                                   /* get default drive */

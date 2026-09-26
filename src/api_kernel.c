@@ -54,7 +54,7 @@ static uint32_t k_InitTask(Cpu *c, Args *a)
        length byte itself when there are no arguments. */
     for (i = 1; i <= 126; i++) {
         uint8_t ch = sel_rd8(task.psp_sel, (uint16_t)(PSP_CMDLINE + i));
-        if (ch == 0x0D) break;
+        if (ch == 0x0D || !ch) break;
         if (ch != ' ' && ch != '\t') { bx = (uint16_t)(PSP_CMDLINE + i); break; }
     }
 

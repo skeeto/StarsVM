@@ -50,7 +50,13 @@ static void build_psp(Task *t)
     sel_wr8(sel, PSP_CMDLINE, (uint8_t)n);
     for (i = 0; i < n; i++)
         sel_wr8(sel, (uint16_t)(PSP_CMDLINE + 1 + i), (uint8_t)t->cmdline[i]);
-    sel_wr8(sel, (uint16_t)(PSP_CMDLINE + 1 + n), 0x0D);
+    /* A NUL where DOS puts a CR.  InitTask hands this tail to WinMain as
+       lpCmdLine, which is a C string, and the game's parser stops at NUL and
+       at space and nothing else: with a CR here the last argument carried it.
+       -g and -d happened to survive that, since they rebuild their file names
+       from the parts, but -a opens its .def by the name as given, and "Can't
+       open file game.def." was the CR. */
+    sel_wr8(sel, (uint16_t)(PSP_CMDLINE + 1 + n), 0);
 }
 
 static void build_environment(Task *t)
