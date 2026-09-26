@@ -378,5 +378,7 @@ does not borrow a console it might later be killed through, so they want
 
 `--help` lists them all. `tools/` holds PowerShell helpers for driving and
 inspecting a running instance — the window tree, update regions, screenshots,
-clicking and poking controls — and Python tools for dumping the game's dialog,
-menu and icon resources.
+clicking and poking controls — and Python tools for dumping the game's dialog
+and menu resources. None of those are needed to build: the one tool the build
+runs, `tools/mkicon.c`, is C, compiled with `HOSTCC` (default `cc`) because it
+runs on the machine doing the building.

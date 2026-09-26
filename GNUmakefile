@@ -14,6 +14,12 @@
 CROSS   := i686-w64-mingw32-
 CC      := $(CROSS)gcc
 WINDRES := $(CROSS)windres
+
+# The icon step runs a small program during the build, so that program is built
+# for the machine doing the building rather than for the target.  In w64devkit
+# `cc` is the native compiler; cross-building elsewhere, it is that host's.
+HOSTCC     := cc
+HOSTCFLAGS := -std=c99 -O2 -Wall -Wextra
 CFLAGS  := -std=c11 -O3 -g -Wall -Wextra -Wshadow -Wstrict-prototypes \
            -Wno-unused-parameter -MMD -MP -D__USE_MINGW_ANSI_STDIO=0
 LDFLAGS := -mwindows -s
@@ -27,6 +33,7 @@ PACKER  := StarsVM-pack.exe
 PROF    := StarsVM-prof.exe
 HARNESS := StarsVM-harness.exe
 ONEFILE := Stars-x86.exe
+MKICON  := build/mkicon.exe
 RES     := $(OBJDIR)/StarsVM.res.o
 
 # Both toolchains build the same file names out of different objects, so nothing
@@ -80,9 +87,14 @@ $(RES): StarsVM.rc StarsVM.manifest StarsVM_icon.rc | $(OBJDIR)
 
 # The icon comes out of the game's own resources.  Never fatal: without the
 # game next door the generated .rc is just a comment.
-StarsVM_icon.rc:
-	-python tools/mkicon.py stars.exe StarsVM.ico $@ StarsIco
+StarsVM_icon.rc: $(MKICON)
+	-./$(MKICON) stars.exe StarsVM.ico $@ StarsIco
 	@test -f $@ || echo "/* no icon */" > $@
+
+# Not under $(OBJDIR): it does not change with the target architecture, so
+# switching between the two builds has no reason to rebuild it.
+$(MKICON): tools/mkicon.c
+	$(HOSTCC) $(HOSTCFLAGS) -o $@ tools/mkicon.c
 
 # Each object depends on this makefile as well as on the sources, because
 # CFLAGS lives here: without it, changing the optimisation level leaves `make`
