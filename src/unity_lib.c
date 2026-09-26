@@ -2,10 +2,10 @@
  *
  * The emulator's interpreter, loader, heaps and KERNEL, with the Win32 halves
  * swapped out: fs_mem.c where fs_win32.c was, headless.c where the window
- * system was, libstars.c where main.c was.  Nothing here includes
- * <windows.h>, and STARSVM_LIB is what tells the shared files so - the three
- * of them that still care (sel.c, hostclock.c, thunk.c) choose their
- * library halves by it.
+ * system was, libstars.c where main.c was; password.c is the library's
+ * alone.  Nothing here includes <windows.h>, and STARSVM_LIB is what tells
+ * the shared files so - the three of them that still care (sel.c,
+ * hostclock.c, thunk.c) choose their library halves by it.
  *
  * Built for a static library, it exports nothing in particular; built with
  * STARS_SHARED for a DLL or shared object, only stars.h's functions are
@@ -36,6 +36,7 @@
 #include "libstars.c"
 #include "native.c"
 #include "ne.c"
+#include "password.c"
 #include "sel.c"
 #include "task.c"
 #include "thunk.c"

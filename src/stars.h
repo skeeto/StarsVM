@@ -34,8 +34,9 @@
  * Threads.  One call at a time per process: the machine inside is global.  A
  * call made while another is running fails with STARS_EBUSY rather than wait.
  *
- * Passwords are not supported.  Generation never asks for one; a dump of a
- * password-protected player file fails with STARS_EPASSWORD.
+ * Passwords do not apply.  Generation never asks for one, and a dump opens a
+ * player's file as if given the right one, without the caller's file being
+ * changed: see stars_dump.
  */
 #ifndef STARS_H
 #define STARS_H
@@ -72,7 +73,7 @@ enum {
     STARS_EINPUT    = 2,  /* an argument is out of range or a file is absent  */
     STARS_EEXE      = 3,  /* not the stars.exe of Stars! 2.70j                */
     STARS_EGAME     = 4,  /* the game refused or failed; its words are in log */
-    STARS_EPASSWORD = 5,  /* the file is password-protected                   */
+    STARS_EPASSWORD = 5,  /* the game asked for a password all the same     */
     STARS_EHUNG     = 6,  /* the game stopped to wait for something           */
     STARS_ECRASH    = 7,  /* the emulation failed; log says where             */
     STARS_EBUSY     = 8   /* another call is in progress                      */
@@ -102,7 +103,9 @@ STARS_API int stars_generate(StarsVM *vm, StarsArena *arena, int nturns,
                              StarsFS *fs, StarsBuf *log);
 
 /* stars.exe -dfmp: player `player`'s (1 to 16) view of the game in `fs` as
-   text.  Reads that player's .mN, with .xN and .hN if present, and .xy. */
+   text.  Reads that player's .mN, with .xN and .hN if present, and .xy.  A
+   password on the .mN is no obstacle: the game is given a copy with it
+   blanked, and writes the same dumps it would given the password. */
 STARS_API int stars_dump(StarsVM *vm, StarsArena *arena, const StarsFS *fs,
                          int player, StarsDump *out, StarsBuf *log);
 

@@ -36,6 +36,13 @@ void memfs_add(const char *name, const uint8_t *data, ptrdiff_t len);
 int   memfs_entry(int i, const char **name, const uint8_t **data,
                   ptrdiff_t *len, int *isdir, int *written);
 
+/* ---- password.c ------------------------------------------------------------ */
+
+/* Blank the password of the player a turn file belongs to, in place: 1 if
+   done, 0 if the file has no block for its own player, -1 if it is not a
+   file of blocks at all.  A blank password is the game's own "none". */
+int   password_blank(uint8_t *file, ptrdiff_t len);
+
 /* ---- headless.c: the window system -------------------------------------- */
 
 void headless_reset(void);

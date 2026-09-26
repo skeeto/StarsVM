@@ -447,10 +447,15 @@ int stars_dump(StarsVM *vm, StarsArena *arena, const StarsFS *fs, int player,
     if ((rc = enter(arena, log)) != 0) return rc;
     if (setjmp(the_run.jmp)) return leave(arena, log, the_run.err);
 
-    /* The player's own files, and nobody else's. */
+    /* The player's own files, and nobody else's.  The turn file goes in as a
+       copy with its password blanked, so the game has nothing to ask. */
     memset(&one, 0, sizeof one);
     one.xy = fs->xy;
-    one.m[player - 1] = fs->m[player - 1];
+    one.m[player - 1].data = lib_alloc(fs->m[player - 1].len);
+    one.m[player - 1].len = fs->m[player - 1].len;
+    memcpy(one.m[player - 1].data, fs->m[player - 1].data,
+           (size_t)fs->m[player - 1].len);
+    password_blank(one.m[player - 1].data, one.m[player - 1].len);
     one.x[player - 1] = fs->x[player - 1];
     one.h[player - 1] = fs->h[player - 1];
     memfs_reset();

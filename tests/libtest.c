@@ -12,12 +12,19 @@
  *                   host's would.
  *   BENCH           the benchmark game, when there is one (see
  *                   tools/bench.ps1): 1 and 10 generated turns against
- *                   golden1 and golden10.
+ *                   golden1 and golden10.  Its sixteen players are all AI,
+ *                   so every turn file is locked with the AI password,
+ *                   "viewai", and each is dumped against BENCH/viewai/pN:
+ *                   what the emulator dumps given that password,
+ *
+ *                       StarsVM --fixed-clock -- -p viewai -dfmp Game.mN
+ *
+ *                   run on orig's Game.xy, Game.mN and Game.hN.
  *
  * Every operation runs twice in the one process, since a second run over the
  * same input has to come out the same.  Then the ways a call can fail: a bad
- * exe, bad arguments, damaged files, a password, every size of arena too
- * small to work, and a second call while one is running.
+ * exe, bad arguments, damaged files, every size of arena too small to work,
+ * and a second call while one is running.
  *
  * The library does no I/O, so all of the file reading is here.
  */
@@ -202,6 +209,41 @@ static void test_generate(const char *dir, const char *base, int n,
     }
 }
 
+/* A locked turn file dumps as if the password had been given, and the
+   caller's copy of it is left locked. */
+static void test_locked(const char *bench)
+{
+    char orig[512], ref[512], what[64];
+    StarsFS fs;
+    int p;
+
+    snprintf(orig, sizeof orig, "%s/orig", bench);
+    fs = load_game(orig, "Game");
+    for (p = 1; p <= 16; p++) {
+        StarsBuf want[3], before, log;
+        static const char *ext[3] = { "map", "pla", "fle" };
+        StarsArena a = fresh();
+        StarsDump d;
+        int i, ok = 1;
+
+        for (i = 0; i < 3; i++) {
+            snprintf(ref, sizeof ref, "%s/viewai/p%d/Game.%s", bench, p, ext[i]);
+            want[i] = slurp(ref);
+        }
+        if (!want[0].len) {
+            printf("skip  locked player %d: no %s/viewai/p%d\n", p, bench, p);
+            continue;
+        }
+        before = slurpf("%s/%s.m%d", orig, "Game", p);
+        snprintf(what, sizeof what, "dump of locked player %d", p);
+        if (!expect(what, stars_dump(vm, &a, &fs, p, &d, &log), STARS_OK, log))
+            continue;
+        ok = same(d.map, want[0]) && same(d.pla, want[1]) && same(d.fle, want[2]);
+        check("  as dumped with the password", ok);
+        check("  and the caller's file still locked", same(fs.m[p - 1], before));
+    }
+}
+
 /* ---- failures -------------------------------------------------------------- */
 
 static void test_input(StarsBuf exe, StarsArena *perm)
@@ -327,19 +369,12 @@ int main(int argc, char **argv)
     test_generate("tests/newgame/expect", "libtest", 2, "tests/newgame/expect/turn2");
     if (argc == 3) {
         char orig[512], golden[512];
-        StarsFS fs;
-        StarsDump d;
-        StarsBuf log;
-        StarsArena a;
         snprintf(orig, sizeof orig, "%s/orig", argv[2]);
         snprintf(golden, sizeof golden, "%s/golden1", argv[2]);
         test_generate(orig, "Game", 1, golden);
         snprintf(golden, sizeof golden, "%s/golden10", argv[2]);
         test_generate(orig, "Game", 10, golden);
-        fs = load_game(orig, "Game");
-        a = fresh();
-        expect("dump of a password-protected player",
-               stars_dump(vm, &a, &fs, 1, &d, &log), STARS_EPASSWORD, log);
+        test_locked(argv[2]);
     }
     test_input(exe, &perm);
     test_arena();
