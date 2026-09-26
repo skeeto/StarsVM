@@ -1,0 +1,3 @@
+# The files the game read and wrote, byte for byte: the tests compare them
+# exactly, so no line ending may be touched.
+* -text

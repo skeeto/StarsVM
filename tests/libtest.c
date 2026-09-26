@@ -10,6 +10,17 @@
  *                   The .def names its races and its universe by absolute
  *                   paths into directories that exist nowhere, as a real
  *                   host's would.
+ *   tests/password/ the same game after player 1 set the password "secret"
+ *                   in the game's Change Password dialog and submitted:
+ *                   the change is in libtest.x1.  Player 1's dump with it
+ *                   pending (p1), a generated turn, which locks the new
+ *                   libtest.m1 (turn1), and that locked file's dump, which
+ *                   the emulator made given -p secret (turn1/p1).  And in
+ *                   inactive/, the turn after the host made player 2
+ *                   inactive, as starsapi's StarsHumanToAiChanger does: the
+ *                   hash of "secret" kept inverted, so that no password
+ *                   opens libtest.m2.  Its reference dump (p2) is the
+ *                   emulator's, of a copy with the hash zeroed by hand.
  *   BENCH           the benchmark game, when there is one (see
  *                   tools/bench.ps1): 1 and 10 generated turns against
  *                   golden1 and golden10.  Its sixteen players are all AI,
@@ -168,18 +179,25 @@ static void test_newgame(void)
     }
 }
 
-static void test_dump(int player)
+/* Player `player` of the game in `gamedir`, against the emulator's dumps in
+   `wantdir`.  The caller's turn file must come back as it went in, locked
+   or not. */
+static void test_dump(const char *gamedir, int player, const char *wantdir)
 {
-    StarsFS fs = load_game("tests/newgame/expect", "libtest");
-    char dir[64], what[64], path[128];
+    StarsFS fs = load_game(gamedir, "libtest");
+    StarsBuf before = fs.m[player - 1];
+    char what[128], path[512];
+    const char *dir = wantdir;
     StarsDump d;
     StarsBuf log;
     int round;
 
-    snprintf(dir, sizeof dir, "tests/newgame/expect/p%d", player);
+    before.data = malloc((size_t)before.len);
+    memcpy(before.data, fs.m[player - 1].data, (size_t)before.len);
     for (round = 1; round <= 2; round++) {
         StarsArena a = fresh();
-        snprintf(what, sizeof what, "dump player %d%s", player, round == 1 ? "" : " again");
+        snprintf(what, sizeof what, "dump player %d of %s%s", player, gamedir,
+                 round == 1 ? "" : " again");
         if (!expect(what, stars_dump(vm, &a, &fs, player, &d, &log), STARS_OK, log))
             return;
         snprintf(path, sizeof path, "%s/libtest.map", dir);
@@ -188,6 +206,7 @@ static void test_dump(int player)
         check("  pla identical", same(d.pla, slurp(path)));
         snprintf(path, sizeof path, "%s/libtest.fle", dir);
         check("  fle identical", same(d.fle, slurp(path)));
+        check("  the caller's turn file unchanged", same(fs.m[player - 1], before));
     }
 }
 
@@ -364,9 +383,13 @@ int main(int argc, char **argv)
     mark = work.beg;
 
     test_newgame();
-    test_dump(1);
-    test_dump(2);
+    test_dump("tests/newgame/expect", 1, "tests/newgame/expect/p1");
+    test_dump("tests/newgame/expect", 2, "tests/newgame/expect/p2");
     test_generate("tests/newgame/expect", "libtest", 2, "tests/newgame/expect/turn2");
+    test_dump("tests/password", 1, "tests/password/p1");
+    test_generate("tests/password", "libtest", 1, "tests/password/turn1");
+    test_dump("tests/password/turn1", 1, "tests/password/turn1/p1");
+    test_dump("tests/password/inactive", 2, "tests/password/inactive/p2");
     if (argc == 3) {
         char orig[512], golden[512];
         snprintf(orig, sizeof orig, "%s/orig", argv[2]);

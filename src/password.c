@@ -106,16 +106,14 @@ int password_blank(uint8_t *d, ptrdiff_t len)
                     uint8_t cb = i + j < size ? body[i + j] : 0;
                     if (i + j < 16) plain[i + j] = (uint8_t)(cb ^ kb);
                 }
-                /* The owner's own block: bytes 12 to 15 are the hash, which
-                   is blank at zero - or, for a player the host has set
-                   inactive, stored inverted, and so blank at all ones. */
+                /* The owner's own block: bytes 12 to 15 are the hash, and a
+                   blank one is zero.  The same goes for a player the host
+                   has made inactive, whose hash is kept inverted so that no
+                   password will match it until they come back: zero opens
+                   that file too, as the emulator confirms. */
                 if (type == 6 && i == 12 && size >= 16 && plain[0] == owner) {
-                    int inactive = (plain[7] & 0xE2) == 0xE2;
-                    uint8_t blank = inactive ? 0xFF : 0x00;
-                    for (j = 0; j < 4; j++) {
-                        uint8_t kb = (uint8_t)(key >> (8 * j));
-                        body[12 + j] = (uint8_t)(blank ^ kb);
-                    }
+                    for (j = 0; j < 4; j++)
+                        body[12 + j] = (uint8_t)(key >> (8 * j));
                     return 1;
                 }
             }
