@@ -35,16 +35,19 @@ typedef struct {
     uint16_t  env_sel;
     uint16_t  stacktop;
     int       ncmdshow;
+    int       exitcode;       /* what the guest gave DOS's terminate call */
     char      cmdline[128];
     /* The guest sees these, so they stay in its own byte encoding: they go into
        its environment and come back out of GetModuleFileName.  They are also
        what its file dialogs and its own file calls are built from. */
     char      exepath[520];   /* full path of the module file               */
     char      exedir[520];    /* the directory holding it                   */
-    /* The same two as Windows really spells them.  A path we open OURSELVES -
-       Stars.ini, and the module file when AccessResource reopens it - has to go
-       through these, or a directory name outside the ANSI code page turns into
-       question marks and nothing opens. */
+    /* The same two as Windows really spells them.  A path the emulator opens
+       ITSELF - Stars.ini - has to go through these, or a directory name
+       outside the ANSI code page turns into question marks and nothing opens.
+       task_start leaves them empty and the emulator fills them in after it:
+       working them out is Win32's business, and the library, which opens no
+       files, has none to fill in. */
     wchar_t   exepathw[520];
     wchar_t   exedirw[520];
 } Task;
@@ -52,7 +55,10 @@ typedef struct {
 extern Task task;
 
 /* Build the PSP, environment and instance data, then set the registers to the
-   Win16 entry-point contract and point the CPU at the entry point. */
-int task_start(NeModule *m, Cpu *c, const char *cmdline, int ncmdshow);
+   Win16 entry-point contract and point the CPU at the entry point.  `exepath`
+   is the module's full path as the guest will see it, in its own code page:
+   what GetModuleFileName returns and what OpenFile looks beside. */
+int task_start(NeModule *m, Cpu *c, const char *cmdline, int ncmdshow,
+               const char *exepath);
 
 #endif

@@ -1,7 +1,7 @@
-/* api_misc.c - WIN87EM, TOOLHELP, MMSYSTEM and COMMDLG.
+/* api_misc.c - COMMDLG.
  *
- * These are small, and two of them are only here because the game's C runtime
- * insists on asking.
+ * WIN87EM, TOOLHELP and MMSYSTEM moved to api_common.c, being as portable as
+ * the interpreter; what is left here is the file and print dialogs.
  */
 
 #include "thunk.h"
@@ -10,108 +10,10 @@
 #include "sel.h"
 #include "gmem.h"
 #include "log.h"
-#include "hostclock.h"
 
 #include <stdio.h>
 #include <string.h>
 #include <windows.h>
-
-/* ---- WIN87EM ------------------------------------------------------------- */
-
-/* WIN87EM.1 __fpMath, the Microsoft C floating-point dispatcher.  It is a
-   register-convention entry: BX selects a subfunction, DX:AX carries a pointer,
-   SI holds the environment selector, and the CARRY FLAG is the status - the
-   caller does `jae` straight after.
-
-   Stars! uses exactly four of them, measured over startup, turn generation and
-   a clean exit: 0 to install, 3, 0x0B to ask whether a coprocessor is present,
-   and 2 to deinstall on the way out.  The first three arrive at startup and the
-   last only on a clean exit, which is why killing the process never shows it.
-
-   0 and 2 are a pair - every install has a matching deinstall - and both are
-   about putting a software emulator and its NMI vector in place.  There is no
-   software emulator here: the x87 is emulated instruction by instruction in
-   fpu.c, so there is nothing to install or take away, and succeeding without
-   doing anything is the whole of the correct behaviour.
-
-   The rest of the dispatcher, from Wine's reverse engineering, in case one ever
-   turns up: 1 init, 4 set control word, 5 get control word, 6 round the top of
-   stack to an integer, 7 pop it as an integer into DX:AX, 8 restore the status
-   words, 9 clear the control word, 10 stack depth, 12 stash AX.  Several of
-   those must return a value, and the default below answers 0 to everything -
-   which for "get control word" would be a control word with every exception
-   unmasked.  It is logged rather than guessed at silently, but a subfunction
-   that reaches it wants implementing, not believing. */
-static uint32_t w_fpMath(Cpu *c, Args *a)
-{
-    uint16_t bx = reg16(c, R_BX);
-
-    (void)a;
-    switch (bx) {
-    case 0x00:                     /* install the emulator */
-    case 0x02:                     /* and take it away again */
-    case 0x03:                     /* second init step */
-        c->eflags &= ~F_CF;        /* success */
-        set_reg16(c, R_AX, 0);
-        return 0;
-
-    case 0x0B:                     /* is there a coprocessor? */
-        c->eflags &= ~F_CF;
-        /* The flag is read as DX:AX, so DX has to be cleared too.  It was not,
-           and the guest happens to arrive here with DX holding a selector, so
-           the answer went back as 013F0001 rather than 1.  Anything testing it
-           for nonzero got the right idea anyway, which is why this survived. */
-        set_reg16(c, R_DX, 0);
-        set_reg16(c, R_AX, 1);     /* yes - we emulate a real one */
-        return 0;
-
-    default:
-        log_msg("WIN87EM.fpMath: unknown subfunction BX=%04X "
-                "(dx:ax=%04X:%04X) - reporting success\n",
-                bx, reg16(c, R_DX), reg16(c, R_AX));
-        c->eflags &= ~F_CF;
-        set_reg16(c, R_AX, 0);
-        return 0;
-    }
-}
-
-/* ---- TOOLHELP ------------------------------------------------------------ */
-
-/* TOOLHELP.80 TimerCount fills a TIMERINFO: dwSize, dwmsSinceStart,
-   dwmsThisVM.  There is only one virtual machine here, so both are the same
-   tick count. */
-static uint32_t t_TimerCount(Cpu *c, Args *a)
-{
-    uint32_t p = arg_long(a);
-    uint16_t sel = SEGPTR_SEL(p), off = SEGPTR_OFF(p);
-    DWORD now = host_tick();
-
-    (void)c;
-    if (!p) return 0;
-    sel_wr32(sel, (uint16_t)(off + 4), now);
-    sel_wr32(sel, (uint16_t)(off + 8), now);
-    return 1;
-}
-
-/* ---- CD audio -------------------------------------------------------------- */
-
-/* MMSYSTEM.701 mciSendCommand.  The game's music is Red Book audio: MCI_OPEN on
-   "cdaudio", then MCI_PLAY of a track between 2 and 21 off the retail disc.  It
-   stores a track number and nothing else, so there is no music data anywhere to
-   substitute.  Reporting "no such device" is therefore not a stub but the right
-   answer - the game clears its music bit and stops asking, which is what it did
-   on a machine with no CD in 1995. */
-static uint32_t m_mciSendCommand(Cpu *c, Args *a)
-{
-    uint16_t dev = arg_word(a);
-    uint16_t msg = arg_word(a);
-    (void)c;
-    arg_long(a);
-    arg_long(a);
-    if (log_verbose)
-        log_msg("mciSendCommand(dev=%u, msg=%04X) stubbed\n", dev, msg);
-    return MCIERR_INVALID_DEVICE_NAME;
-}
 
 /* WaveMix lives in audio.c, which reimplements all eleven entries on waveOut. */
 
@@ -302,9 +204,6 @@ static uint32_t cd_PrintDlg(Cpu *c, Args *a)
 
 void api_misc_register(void)
 {
-    api_bind("WIN87EM",   1, w_fpMath);
-    api_bind("TOOLHELP", 80, t_TimerCount);
-    api_bind("MMSYSTEM", 701, m_mciSendCommand);
 
     api_bind("COMMDLG",  1, cd_GetOpenFileName);
     api_bind("COMMDLG",  2, cd_GetSaveFileName);

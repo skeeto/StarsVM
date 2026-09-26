@@ -1,8 +1,10 @@
 #include "sel.h"
 #include "log.h"
 
-#include <windows.h>
 #include <string.h>
+#ifndef STARSVM_LIB
+#include <windows.h>
+#endif
 
 uint8_t *sel_arena;
 SelDesc  sel_tab[SEL_SLOTS];
@@ -10,7 +12,29 @@ uint8_t  sel_live[SEL_SLOTS];   /* index 0 stays zero, which is the null check *
 int      sel_fault;
 
 static unsigned sel_next = 1;   /* index 0 stays permanently invalid */
+static unsigned sel_limit = SEL_SLOTS;   /* indices below this may be used */
+static int      faults_shown;
 
+#ifdef STARSVM_LIB
+/* The library's arena is its caller's memory, all of it there from the start:
+   nothing to reserve and nothing to commit, and a slot is simply zeroed when
+   it is handed out.  One slot more than `slots` is asked of the caller, for
+   the same reason index 0 is never handed out - see sel.h - but at the top: a
+   word read at offset FFFF of the last slot touches the byte after it. */
+int sel_init_mem(uint8_t *mem, unsigned slots)
+{
+    if (slots > SEL_SLOTS) slots = SEL_SLOTS;
+    sel_arena = mem;
+    sel_limit = slots;
+    memset(sel_arena, 0, SEL_SLOT);
+    memset(sel_tab, 0, sizeof sel_tab);
+    memset(sel_live, 0, sizeof sel_live);
+    sel_next = 1;
+    sel_fault = 0;
+    faults_shown = 0;
+    return 1;
+}
+#else
 int sel_init(void)
 {
     sel_arena = VirtualAlloc(NULL, SEL_ARENA, MEM_RESERVE, PAGE_NOACCESS);
@@ -38,6 +62,7 @@ void sel_shutdown(void)
         sel_arena = NULL;
     }
 }
+#endif
 
 uint16_t sel_alloc(uint32_t size, int kind)
 {
@@ -48,22 +73,24 @@ uint16_t sel_alloc(uint32_t size, int kind)
     if (count == 0) count = 1;
 
     /* First fit over the index space. */
-    for (start = sel_next; start + count <= SEL_SLOTS; start++) {
+    for (start = sel_next; start + count <= sel_limit; start++) {
         for (i = 0; i < count; i++)
             if (sel_tab[start + i].kind != SK_FREE) break;
         if (i == count) break;
     }
-    if (start + count > SEL_SLOTS) {
+    if (start + count > sel_limit) {
         log_msg("sel: out of selectors (wanted %u for %u bytes)\n", count, size);
         return 0;
     }
 
+#ifndef STARSVM_LIB
     if (!VirtualAlloc(sel_arena + ((size_t)start << 16),
                       (size_t)count * SEL_SLOT, MEM_COMMIT, PAGE_READWRITE)) {
         log_msg("sel: commit failed for %u slots at %u (error %lu)\n",
                 count, start, GetLastError());
         return 0;
     }
+#endif
     memset(sel_arena + ((size_t)start << 16), 0, (size_t)count * SEL_SLOT);
 
     /* Each selector in a huge block carries the limit of the remainder, which is
@@ -86,7 +113,9 @@ void sel_free(uint16_t sel)
     unsigned i = SEL_INDEX(sel), n, k;
     if (i == 0 || i >= SEL_SLOTS || sel_tab[i].kind == SK_FREE) return;
     n = sel_tab[i].count ? sel_tab[i].count : 1;
+#ifndef STARSVM_LIB
     VirtualFree(sel_arena + ((size_t)i << 16), (size_t)n * SEL_SLOT, MEM_DECOMMIT);
+#endif
     for (k = 0; k < n && i + k < SEL_SLOTS; k++) {
         memset(&sel_tab[i + k], 0, sizeof sel_tab[0]);
         sel_live[i + k] = 0;
@@ -102,10 +131,9 @@ uint8_t *sel_bad(uint16_t sel, uint16_t off)
 
 void sel_report_fault(uint16_t sel, uint16_t off, const char *what)
 {
-    static int shown;
     sel_fault = 1;
-    if (shown < 32) {
-        shown++;
+    if (faults_shown < 32) {
+        faults_shown++;
         log_msg("*** bad selector %04X:%04X (%s)\n", sel, off, what);
     }
 }

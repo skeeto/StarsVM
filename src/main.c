@@ -21,10 +21,12 @@
 void imp_dump_table(void);
 int  call16_init(void);
 void api_kernel_register(void);
+void api_common_register(void);
 void api_dos_register(void);
 void api_user_register(void);
 void api_gdi_register(void);
 void api_res_register(void);
+void api_res_gui_register(void);
 void api_misc_register(void);
 void api_profile_register(void);
 void api_dlg_register(void);
@@ -443,10 +445,12 @@ int main(int argc, char **argv)
 
     /* ---- execute ---- */
     api_kernel_register();
+    api_common_register();
     api_dos_register();
     api_user_register();
     api_gdi_register();
     api_res_register();
+    api_res_gui_register();
     api_misc_register();
     api_audio_register();
     api_profile_register();
@@ -505,10 +509,31 @@ int main(int argc, char **argv)
        the code. */
     native_install(&module);
 
-    if (!task_start(&module, &cpu, gcmd, 1)) {
-        ne_close(&module);
-        log_close();
-        return 1;
+    {
+        /* Wide first, because that is the path that has to actually open.  The
+           narrow copy is for the guest, which has no other way to see a
+           filename; a character the code page cannot spell survives in
+           exepathw and is lost in exepath, and only the latter is ever merely
+           shown. */
+        wchar_t full[sizeof task.exepathw / sizeof *task.exepathw];
+        char narrow[sizeof task.exepath];
+        wchar_t *w;
+
+        if (!GetFullPathNameW(module.path, sizeof full / sizeof *full, full, NULL))
+            _snwprintf(full, sizeof full / sizeof *full - 1, L"%ls", module.path);
+        full[sizeof full / sizeof *full - 1] = 0;
+        WideCharToMultiByte(CP_ACP, 0, full, -1, narrow, sizeof narrow, NULL, NULL);
+        narrow[sizeof narrow - 1] = 0;
+
+        if (!task_start(&module, &cpu, gcmd, 1, narrow)) {
+            ne_close(&module);
+            log_close();
+            return 1;
+        }
+        wcscpy(task.exepathw, full);
+        wcscpy(task.exedirw, full);
+        w = wcsrchr(task.exedirw, L'\\');
+        if (w) *w = 0;
     }
     /* The effects are reachable only from the battle VCR, so being able to
        drive the sound path without one is what makes it testable at all. */

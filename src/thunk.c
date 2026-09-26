@@ -5,6 +5,7 @@
 #include "sel.h"
 #include "log.h"
 #include "fpu.h"
+#include "prof.h"
 
 #include <stdio.h>
 #include <string.h>
@@ -39,6 +40,8 @@ uint16_t call16_ret_selector(void) { return ret_sel; }
 
 int call16_init(void)
 {
+    depth = 0;
+    last_missing[0] = 0;
     ret_sel = sel_alloc(0x10000u, SK_CODE);
     if (!ret_sel) {
         log_msg("thunk: cannot allocate the return selector\n");

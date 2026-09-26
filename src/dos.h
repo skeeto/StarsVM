@@ -17,4 +17,8 @@ uint16_t dos_open_mem(const uint8_t *mem, uint32_t len);
    the last of it goes. */
 void dos_shutdown(void);
 
+/* Forget every handle and the DTA, for a second run in the same process.
+   Nothing is closed: whatever held them has already been thrown away. */
+void dos_reset(void);
+
 #endif

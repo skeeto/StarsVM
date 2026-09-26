@@ -13,19 +13,31 @@
  *
  * Pinned time still advances.  It has to: the game polls the tick count while
  * it works, and a clock that never moved would be a clock it waited on.
+ *
+ * The library build (src/unity_lib.c) has no other clock: it is always pinned,
+ * so its output is a function of its input and nothing else.
  */
 #ifndef HOSTCLOCK_H
 #define HOSTCLOCK_H
 
 #include <stdint.h>
-#include <windows.h>
 
 extern int clock_fixed;            /* --fixed-clock */
+
+/* The local date and time, in the fields DOS reports them in. */
+typedef struct {
+    uint16_t year, month, day, dow;          /* dow: 0 is Sunday */
+    uint16_t hour, minute, second, ms;
+} HostTime;
 
 /* GetTickCount/GetCurrentTime, and TOOLHELP's TimerCount. */
 uint32_t host_tick(void);
 
 /* int 21h AH=2Ah and AH=2Ch, the DOS date and time. */
-void     host_localtime(SYSTEMTIME *st);
+void     host_localtime(HostTime *t);
+
+/* Put a pinned clock back where it starts, so a second run in the same
+   process reads the same times as the first. */
+void     hostclock_reset(void);
 
 #endif

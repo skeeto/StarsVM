@@ -517,21 +517,6 @@ static uint32_t g_GetTextExtent(Cpu *c, Args *a)
     return (uint32_t)MAKELONG(sz.cx, sz.cy);
 }
 
-/* GDI.128 MulDiv is NOT the Win32 MulDiv: it clamps to 16 bits and returns
-   -32768 on overflow or a zero divisor. */
-static uint32_t g_MulDiv(Cpu *c, Args *a)
-{
-    int m1 = arg_sword(a), m2 = arg_sword(a), d = arg_sword(a);
-    int32_t r;
-
-    (void)c;
-    if (d == 0) return (uint32_t)(int16_t)-32768;
-    r = (int32_t)m1 * m2;
-    r = (r + (d / 2) * ((r < 0) ? -1 : 1)) / d;
-    if (r > 32767 || r < -32768) return (uint32_t)(int16_t)-32768;
-    return (uint32_t)(int16_t)r;
-}
-
 static uint32_t g_UnrealizeObject(Cpu *c, Args *a)
 {
     (void)c;
@@ -884,7 +869,6 @@ void api_gdi_register(void)
     api_bind("GDI",  87, g_GetStockObject);
     api_bind("GDI",  91, g_GetTextExtent);
     api_bind("GDI",  93, g_GetTextMetrics);
-    api_bind("GDI", 128, g_MulDiv);
     api_bind("GDI", 148, g_SetBrushOrg);
     api_bind("GDI", 150, g_UnrealizeObject);
     api_bind("GDI", 351, g_ExtTextOut);

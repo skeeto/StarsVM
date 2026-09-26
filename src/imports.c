@@ -9,6 +9,7 @@
 #include "thunk.h"
 #include "sel.h"
 #include "log.h"
+#include "port.h"
 
 #include <string.h>
 
@@ -56,7 +57,7 @@ static ImpEntry *lookup(const char *module, uint16_t ordinal)
     int i;
     for (i = 0; i < NIMPORTS; i++)
         if (imports[i].ordinal == ordinal &&
-            _stricmp(imports[i].module, module) == 0)
+            ascii_casecmp(imports[i].module, module) == 0)
             return &imports[i];
     return NULL;
 }

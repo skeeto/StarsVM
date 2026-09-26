@@ -49,8 +49,16 @@ extern SelDesc  sel_tab[SEL_SLOTS];
    sel_free, which are the only two places kind changes. */
 extern uint8_t  sel_live[SEL_SLOTS];
 
+/* The emulator reserves the whole arena from Win32 and commits slots as they
+   are handed out. */
 int      sel_init(void);
 void     sel_shutdown(void);
+
+/* The library is handed its arena: `mem` is (slots + 1) * SEL_SLOT bytes of
+   the caller's, where the extra slot is a guard for reads that run off the
+   top, and at most `slots` indices are handed out.  Also the reset between
+   runs: every selector is forgotten. */
+int      sel_init_mem(uint8_t *mem, unsigned slots);
 
 /* Allocate `count` consecutive indices covering `size` bytes; commits memory.
    Returns the first selector, or 0 on failure. */

@@ -6,7 +6,6 @@
 
 #include <stdio.h>
 #include <string.h>
-#include <windows.h>
 
 Task task;
 
@@ -77,7 +76,8 @@ static void build_environment(Task *t)
     put_str(t->env_sel, off, t->exepath);
 }
 
-int task_start(NeModule *m, Cpu *c, const char *cmdline, int ncmdshow)
+int task_start(NeModule *m, Cpu *c, const char *cmdline, int ncmdshow,
+               const char *exepath)
 {
     Task *t = &task;
     NeSeg *cs = ne_seg(m, (unsigned)(m->csip >> 16));
@@ -97,21 +97,10 @@ int task_start(NeModule *m, Cpu *c, const char *cmdline, int ncmdshow)
     t->ncmdshow = ncmdshow;
     snprintf(t->cmdline, sizeof t->cmdline, "%s", cmdline ? cmdline : "");
 
-    /* Wide first, because that is the path that has to actually open.  The
-       narrow copies below are for the guest, which has no other way to see a
-       filename; a character the code page cannot spell survives in exepathw and
-       is lost in exepath, and only the latter is ever merely shown. */
-    if (!GetFullPathNameW(m->path, sizeof t->exepathw / sizeof *t->exepathw,
-                          t->exepathw, NULL))
-        _snwprintf(t->exepathw, sizeof t->exepathw / sizeof *t->exepathw - 1,
-                   L"%ls", m->path);
-    t->exepathw[sizeof t->exepathw / sizeof *t->exepathw - 1] = 0;
-    wcscpy(t->exedirw, t->exepathw);
-    { wchar_t *w = wcsrchr(t->exedirw, L'\\'); if (w) *w = 0; }
-
-    WideCharToMultiByte(CP_ACP, 0, t->exepathw, -1,
-                        t->exepath, sizeof t->exepath, NULL, NULL);
-    t->exepath[sizeof t->exepath - 1] = 0;
+    /* The guest's own spelling of where it lives.  The wide spellings, which
+       the emulator needs for the files it opens itself, are the host's to fill
+       in afterwards - see task.h. */
+    snprintf(t->exepath, sizeof t->exepath, "%s", exepath);
     memcpy(t->exedir, t->exepath, sizeof t->exedir);
     t->exedir[sizeof t->exedir - 1] = 0;
     slash = strrchr(t->exedir, '\\');

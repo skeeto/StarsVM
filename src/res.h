@@ -9,6 +9,7 @@
 #define RES_H
 
 #include <stdint.h>
+#include "ne.h"
 
 /* Win16 resource type ids, as they appear in the NE resource table. */
 #define RT16_CURSOR       0x8001
@@ -38,5 +39,13 @@ const uint8_t *res_locate_id(uint16_t type_id, uint16_t id, uint32_t *len);
    within that table.  That id is what the res_locate_* calls above want.
    Returns 0 if the module has no such type. */
 uint16_t res_type_key(const char *type_name);
+
+/* A guest resource type or name argument as the NE resource table spells it:
+   0x8000|n for a number, the offset of a Pascal string for a name, 0 if the
+   module has no such name. */
+uint32_t res_key(NeModule *m, uint32_t segptr, int is_type);
+
+/* Forget every resource handle, for a second run in the same process. */
+void     api_res_reset(void);
 
 #endif

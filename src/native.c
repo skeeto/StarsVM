@@ -4,6 +4,7 @@
 
 #include "native.h"
 #include "sel.h"
+#include "fpu.h"
 #include "log.h"
 #include "prof.h"
 #include "thunk.h"
@@ -368,6 +369,11 @@ static int is_prefix(uint8_t b)
 int native_install(NeModule *m)
 {
     unsigned i, k, done = 0;
+
+    /* A second run in the same process patches a freshly loaded module. */
+    memset(nat_map, 0, sizeof nat_map);
+    for (i = 0; i < NSITES; i++) sites[i].installed = 0;
+    cpu_native = NULL;
 
     if (disabled || !NSITES) return 0;
 

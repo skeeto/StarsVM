@@ -22,6 +22,10 @@
 #define MEM_MODIFY      0x0080
 #define MEM_DISCARDABLE 0x0100
 
+/* Forget both heaps, for a second run in the same process.  Their memory is
+   the selectors', which go with sel_init_mem. */
+void     heap_reset(void);
+
 /* ---- global heap ---- */
 uint16_t gmem_alloc(uint16_t flags, uint32_t bytes);
 uint16_t gmem_realloc(uint16_t handle, uint32_t bytes, uint16_t flags);

@@ -626,6 +626,8 @@ void cpu_stop_latch(Cpu *c, int reason)
 
 int cpu_stop_latched(void) { return latched; }
 
+void cpu_stop_clear(void) { latched = 0; }
+
 int cpu_step(Cpu *c)
 {
     uint8_t op;

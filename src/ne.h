@@ -2,6 +2,7 @@
 #ifndef NE_H
 #define NE_H
 
+#include <stddef.h>
 #include <stdint.h>
 #include <wchar.h>
 
@@ -76,6 +77,16 @@ static inline NeSeg *ne_seg(NeModule *m, unsigned n)   /* n is 1-based */
    thunk layer; the loader calls it while applying relocations. */
 typedef uint32_t (*NeImportFn)(const char *module, uint16_t ordinal, void *user);
 
+/* Parse the headers of the image already in m->img/m->imglen, filling in the
+   rest of the module.  The tables it builds come from ne_alloc, which each
+   build supplies: calloc for the emulator (ne_file.c), the caller's arena for
+   the library.  Returns 0, having logged why, if the image is not an NE
+   module whose tables all lie inside it. */
+int   ne_parse(NeModule *m);
+void *ne_alloc(size_t n);          /* zeroed; NULL when there is no room */
+
+/* The rest of this block is the emulator's, in ne_file.c: reading the image
+   from a file, and ne_close to free what ne_open and ne_alloc gave. */
 int  ne_open(NeModule *m, const wchar_t *path);
 
 /* Open an NE module that has been appended to another file - the emulator's own

@@ -8,7 +8,8 @@
 
 #include <stdio.h>
 #include <string.h>
-#include <windows.h>
+
+#define DRIVE_UNKNOWN 0
 
 /* Copy a NUL-terminated guest string out to host memory. */
 static char *guest_str(uint32_t segptr, char *buf, size_t n)
@@ -289,6 +290,11 @@ static uint32_t k_LocalSize(Cpu *c, Args *a)
    the real thunk costs nothing and keeps AX correct for code that depends on it. */
 static uint16_t thunk_seg;
 static uint16_t thunk_next;
+
+void api_kernel_reset(void)
+{
+    thunk_seg = thunk_next = 0;
+}
 
 static uint32_t k_MakeProcInstance(Cpu *c, Args *a)
 {

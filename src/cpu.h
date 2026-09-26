@@ -96,6 +96,9 @@ int  cpu_run(Cpu *c, uint64_t max);
    enclosing cpu_run, so exactly one report comes out at the top. */
 void cpu_stop_latch(Cpu *c, int reason);
 int  cpu_stop_latched(void);
+/* Unlatch, for a second run in the same process: the machine that stopped
+   has been thrown away and a new one built. */
+void cpu_stop_clear(void);
 
 /* Stack helpers shared with the thunk layer. */
 void     cpu_push16(Cpu *c, uint16_t v);

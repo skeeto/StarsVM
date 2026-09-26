@@ -3,8 +3,15 @@
 #include "hostclock.h"
 
 #include <string.h>
+#ifndef STARSVM_LIB
+#include <windows.h>
+#endif
 
+#ifdef STARSVM_LIB
+int clock_fixed = 1;
+#else
 int clock_fixed = 0;
+#endif
 
 /* A Win16 timer ticked every 55 ms, so that is what one look at a pinned clock
    costs.  The base is arbitrary but large, so that guest code subtracting two
@@ -14,31 +21,52 @@ int clock_fixed = 0;
 
 static uint32_t fixed_ms = FIXED_BASE;
 
+void hostclock_reset(void)
+{
+    fixed_ms = FIXED_BASE;
+}
+
 uint32_t host_tick(void)
 {
+#ifndef STARSVM_LIB
     if (!clock_fixed) return GetTickCount();
+#endif
     fixed_ms += FIXED_STEP;
     return fixed_ms;
 }
 
-void host_localtime(SYSTEMTIME *st)
+void host_localtime(HostTime *t)
 {
     uint32_t ms, s;
 
-    if (!clock_fixed) { GetLocalTime(st); return; }
+#ifndef STARSVM_LIB
+    if (!clock_fixed) {
+        SYSTEMTIME st;
+        GetLocalTime(&st);
+        t->year   = st.wYear;
+        t->month  = st.wMonth;
+        t->day    = st.wDay;
+        t->dow    = st.wDayOfWeek;
+        t->hour   = st.wHour;
+        t->minute = st.wMinute;
+        t->second = st.wSecond;
+        t->ms     = st.wMilliseconds;
+        return;
+    }
+#endif
 
     /* Walked from the same millisecond count as host_tick, so the two cannot
        disagree about how much time has passed.  The date is fixed outright;
        nothing here runs long enough for the day to matter. */
     ms = (fixed_ms += FIXED_STEP);
     s  = ms / 1000u;
-    memset(st, 0, sizeof *st);
-    st->wYear         = 2026;
-    st->wMonth        = 1;
-    st->wDay          = 1;
-    st->wDayOfWeek    = 4;
-    st->wHour         = (WORD)(s / 3600u % 24u);
-    st->wMinute       = (WORD)(s / 60u % 60u);
-    st->wSecond       = (WORD)(s % 60u);
-    st->wMilliseconds = (WORD)(ms % 1000u);
+    memset(t, 0, sizeof *t);
+    t->year   = 2026;
+    t->month  = 1;
+    t->day    = 1;
+    t->dow    = 4;
+    t->hour   = (uint16_t)(s / 3600u % 24u);
+    t->minute = (uint16_t)(s / 60u % 60u);
+    t->second = (uint16_t)(s % 60u);
+    t->ms     = (uint16_t)(ms % 1000u);
 }

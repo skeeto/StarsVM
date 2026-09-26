@@ -39,12 +39,6 @@ static uint32_t u_InitApp(Cpu *c, Args *a)
     return 1;
 }
 
-static uint32_t u_GetTickCount(Cpu *c, Args *a)
-{
-    (void)c; (void)a;
-    return host_tick();
-}
-
 static uint32_t u_MessageBeep(Cpu *c, Args *a)
 {
     (void)c;
@@ -864,88 +858,6 @@ static uint32_t u_WindowFromPoint(Cpu *c, Args *a)
     return HWND_16(WindowFromPoint(pt));
 }
 
-static uint32_t u_SetRect(Cpu *c, Args *a)
-{
-    uint32_t p = arg_long(a);
-    int16_t l = arg_sword(a), t = arg_sword(a);
-    int16_t r = arg_sword(a), b = arg_sword(a);
-    RECT rc;
-    (void)c;
-    rc.left = l; rc.top = t; rc.right = r; rc.bottom = b;
-    put_rect16(p, &rc);
-    return 1;
-}
-
-static uint32_t u_CopyRect(Cpu *c, Args *a)
-{
-    uint32_t dst = arg_long(a), src = arg_long(a);
-    RECT r;
-    (void)c;
-    get_rect16(src, &r);
-    put_rect16(dst, &r);
-    return 1;
-}
-
-static uint32_t u_EqualRect(Cpu *c, Args *a)
-{
-    uint32_t p1 = arg_long(a), p2 = arg_long(a);
-    RECT a1, a2;
-    (void)c;
-    get_rect16(p1, &a1);
-    get_rect16(p2, &a2);
-    return (uint32_t)EqualRect(&a1, &a2);
-}
-
-static uint32_t u_PtInRect(Cpu *c, Args *a)
-{
-    uint32_t p = arg_long(a);
-    uint32_t packed = arg_long(a);
-    RECT r;
-    POINT pt;
-    (void)c;
-    get_rect16(p, &r);
-    pt.x = (int16_t)(packed & 0xFFFF);
-    pt.y = (int16_t)(packed >> 16);
-    return (uint32_t)PtInRect(&r, pt);
-}
-
-static uint32_t u_OffsetRect(Cpu *c, Args *a)
-{
-    uint32_t p = arg_long(a);
-    int16_t dx = arg_sword(a), dy = arg_sword(a);
-    RECT r;
-    (void)c;
-    get_rect16(p, &r);
-    OffsetRect(&r, dx, dy);
-    put_rect16(p, &r);
-    return 1;
-}
-
-static uint32_t u_InflateRect(Cpu *c, Args *a)
-{
-    uint32_t p = arg_long(a);
-    int16_t dx = arg_sword(a), dy = arg_sword(a);
-    RECT r;
-    (void)c;
-    get_rect16(p, &r);
-    InflateRect(&r, dx, dy);
-    put_rect16(p, &r);
-    return 1;
-}
-
-static uint32_t u_IntersectRect(Cpu *c, Args *a)
-{
-    uint32_t dst = arg_long(a), s1 = arg_long(a), s2 = arg_long(a);
-    RECT r, a1, a2;
-    BOOL ok;
-    (void)c;
-    get_rect16(s1, &a1);
-    get_rect16(s2, &a2);
-    ok = IntersectRect(&r, &a1, &a2);
-    put_rect16(dst, &r);
-    return (uint32_t)ok;
-}
-
 /* A brush argument that is a small integer means COLOR_x + 1, in Win16 as in
    Win32.  Handles start above that range so the two can never be confused. */
 static HBRUSH brush16(uint16_t brush)
@@ -1510,102 +1422,6 @@ static uint32_t u_WinHelp(Cpu *c, Args *a)
     return 1;
 }
 
-/* ---- wsprintf -------------------------------------------------------------- */
-
-/* USER.420 wsprintf is the only cdecl import: the caller pushes right to left
-   and cleans up afterwards, so its arguments read upward from the lowest
-   address.  Sizes follow the 16-bit convention - %d, %x, %u and %c take a word
-   unless an `l` modifier widens them, and %s is a far pointer.  385 call sites,
-   so nearly every string the game puts on screen comes through here. */
-static uint32_t u_wsprintf(Cpu *c, Args *a)
-{
-    uint32_t outp = arg_long_up(a);
-    uint32_t fmtp = arg_long_up(a);
-    char fmt[512], out[2048], spec[64];
-    size_t fi = 0, oi = 0;
-
-    (void)c;
-    g_str(fmtp, fmt, sizeof fmt);
-
-    while (fmt[fi] && oi + 1 < sizeof out) {
-        size_t si = 0;
-        int is_long = 0;
-
-        if (fmt[fi] != '%') { out[oi++] = fmt[fi++]; continue; }
-        if (fmt[fi + 1] == '%') { out[oi++] = '%'; fi += 2; continue; }
-
-        /* Copy the conversion through to the host, noting the width modifier
-           and stopping at the conversion character. */
-        spec[si++] = fmt[fi++];
-        while (fmt[fi] && si + 4 < sizeof spec &&
-               strchr("-+ #0123456789.*", fmt[fi]))
-            spec[si++] = fmt[fi++];
-        while (fmt[fi] == 'l' || fmt[fi] == 'h' || fmt[fi] == 'F' ||
-               fmt[fi] == 'N' || fmt[fi] == 'w') {
-            if (fmt[fi] == 'l') is_long = 1;
-            fi++;                              /* not passed to the host */
-        }
-        if (!fmt[fi]) break;
-
-        switch (fmt[fi]) {
-        case 'd': case 'i': {
-            long v = is_long ? (long)(int32_t)arg_long_up(a)
-                             : (long)arg_sword_up(a);
-            spec[si++] = 'l';
-            spec[si++] = fmt[fi++];
-            spec[si] = 0;
-            oi += (size_t)snprintf(out + oi, sizeof out - oi, spec, v);
-            break;
-        }
-        case 'u': case 'x': case 'X': case 'o': {
-            unsigned long v = is_long ? (unsigned long)arg_long_up(a)
-                                      : (unsigned long)arg_word_up(a);
-            spec[si++] = 'l';
-            spec[si++] = fmt[fi++];
-            spec[si] = 0;
-            oi += (size_t)snprintf(out + oi, sizeof out - oi, spec, v);
-            break;
-        }
-        case 'c': {
-            uint16_t v = arg_word_up(a);
-            spec[si++] = 'c';
-            spec[si] = 0;
-            fi++;
-            oi += (size_t)snprintf(out + oi, sizeof out - oi, spec, (int)(v & 0xFF));
-            break;
-        }
-        case 's': case 'S': {
-            char sbuf[512];
-            uint32_t sp = arg_long_up(a);
-            g_str(sp, sbuf, sizeof sbuf);
-            spec[si++] = 's';
-            spec[si] = 0;
-            fi++;
-            oi += (size_t)snprintf(out + oi, sizeof out - oi, spec, sbuf);
-            break;
-        }
-        default:
-            /* Something we do not recognise: emit it literally rather than
-               silently consuming an argument we cannot size. */
-            out[oi++] = fmt[fi++];
-            break;
-        }
-        if (oi >= sizeof out) { oi = sizeof out - 1; break; }
-    }
-    out[oi] = 0;
-
-    /* The caller's buffer has no declared size; Win16 wsprintf has the same
-       hazard, and callers size for 1024. */
-    {
-        uint16_t sel = SEGPTR_SEL(outp), off = SEGPTR_OFF(outp);
-        size_t k;
-        for (k = 0; k < oi; k++)
-            sel_wr8(sel, (uint16_t)(off + k), (uint8_t)out[k]);
-        sel_wr8(sel, (uint16_t)(off + k), 0);
-    }
-    return (uint32_t)oi;
-}
-
 /* ---- palettes -------------------------------------------------------------- */
 
 /* On a 32-bit desktop these are largely inert, but they must still succeed and
@@ -1823,12 +1639,6 @@ void api_user_register(void)
     api_bind("USER",  63, u_GetScrollPos);
     api_bind("USER",  64, u_SetScrollRange);
     api_bind("USER",  69, u_SetCursor);
-    api_bind("USER",  72, u_SetRect);
-    api_bind("USER",  74, u_CopyRect);
-    api_bind("USER",  76, u_PtInRect);
-    api_bind("USER",  77, u_OffsetRect);
-    api_bind("USER",  78, u_InflateRect);
-    api_bind("USER",  79, u_IntersectRect);
     api_bind("USER",  81, u_FillRect);
     api_bind("USER",  83, u_FrameRect);
     api_bind("USER",  84, u_DrawIcon);
@@ -1846,7 +1656,6 @@ void api_user_register(void)
     api_bind("USER", 160, u_DrawMenuBar);
     api_bind("USER", 171, u_WinHelp);
     api_bind("USER", 232, u_SetWindowPos);
-    api_bind("USER", 244, u_EqualRect);
     api_bind("USER", 249, u_GetAsyncKeyState);
     api_bind("USER", 258, u_MapWindowPoints);
     api_bind("USER", 262, u_GetWindow);
@@ -1886,12 +1695,9 @@ void api_user_register(void)
     api_bind("USER", 174, u_LoadIcon);
     api_bind("USER",   5, u_InitApp);
     api_bind("USER",   6, u_PostQuitMessage);
-    api_bind("USER",  13, u_GetTickCount);
-    api_bind("USER",  15, u_GetTickCount);      /* GetCurrentTime is the same */
     api_bind("USER", 104, u_MessageBeep);
     api_bind("USER", 179, u_GetSystemMetrics);
     api_bind("USER", 180, u_GetSysColor);
-    api_bind("USER", 420, u_wsprintf);
     api_bind("USER", 457, u_DestroyIcon);
     api_bind("USER", 458, u_DestroyCursor);
 }

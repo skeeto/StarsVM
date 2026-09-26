@@ -1,8 +1,12 @@
-/* api_dos.c - KERNEL.102 DOS3Call, i.e. INT 21h over Win32.
+/* api_dos.c - KERNEL.102 DOS3Call, i.e. INT 21h, and the KERNEL file API.
  *
  * Stars! reaches DOS directly for directory enumeration and file work: 22 call
  * sites, and the game's save files (<game>.hst, .m1, .x1, .xy, backup\) are
  * found by walking directories with FindFirst/FindNext.
+ *
+ * This file is the guest's side of it - registers, DTAs, OFSTRUCTs and the DOS
+ * handle table - and fs.h is the other side, which is real files for the
+ * emulator and a directory in memory for the library.
  *
  * Contract: AH selects the function, the carry flag reports failure, and AX
  * carries the DOS error code when CF is set.  Carry is cleared on entry so a
@@ -14,29 +18,19 @@
 #include "sel.h"
 #include "log.h"
 #include "dos.h"
+#include "fs.h"
 #include "hostclock.h"
 
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <windows.h>
 
-/* DOS error codes we hand back. */
-#define DOSERR_FUNC        1
-#define DOSERR_FILENOTFOUND 2
-#define DOSERR_PATHNOTFOUND 3
-#define DOSERR_TOOMANYFILES 4
-#define DOSERR_ACCESS      5
-#define DOSERR_BADHANDLE   6
-#define DOSERR_NOMOREFILES 18
-
-/* DOS file attributes. */
-#define DOSATTR_RDONLY  0x01
-#define DOSATTR_HIDDEN  0x02
-#define DOSATTR_SYSTEM  0x04
-#define DOSATTR_LABEL   0x08
-#define DOSATTR_DIR     0x10
-#define DOSATTR_ARCHIVE 0x20
+/* OpenFile's style bits, which have the same values in Win16 and Win32. */
+#define OF_READ       0x0000
+#define OF_WRITE      0x0001
+#define OF_READWRITE  0x0002
+#define OF_CREATE     0x1000
+#define OF_EXIST      0x4000
 
 /* The Disk Transfer Area, 43 bytes.  The first 21 are DOS-private state that
    FindNext consumes; only 0x15..0x2A is the application-visible result.  The
@@ -58,264 +52,124 @@ static uint32_t dta_ptr = 0;          /* SEGPTR; defaults to PSP:0080 */
 
 #define MAX_FILES 64
 
-/* A handle is either a real file or a window onto the module image.  The
-   second kind exists for AccessResource, which hands the game a handle to
-   resource data that it then reads with _lread: the module is already in
-   memory, so reopening the file it came from was always a detour, and once
-   that file can hold the module compressed there is no byte range in it to
-   reopen at all.
+/* A DOS handle is either a file, which fs.h holds, or a window onto the module
+   image.  The second kind exists for AccessResource, which hands the game a
+   handle to resource data that it then reads with _lread: the module is
+   already in memory, so reopening the file it came from was always a detour,
+   and once that file can hold the module compressed there is no byte range in
+   it to reopen at all.
 
    Sequential and read-only is the whole contract.  The game imports _lread
    and _lclose and no seek of any kind, so an image window needs no more than
    a position, and the operations that cannot apply to one say so rather than
-   pretending.
-
-   A real file is buffered.  Win16's _lread was a DOS call and nothing more -
-   HFILE is the DOS handle number - and the game reads its files the way that
-   API invites: a record's length word, its type word, then the record, one
-   call each, 36,000 reads and 11,000 writes per generated turn, all but a
-   hundred of them directly after another on the same handle and none of them
-   seeking.  Each was a ReadFile or WriteFile, a microsecond or two apiece,
-   which by the time the interpreter had been made fast was an eighth of a
-   turn.  So a handle carries one buffer that is either read-ahead - the
-   next 16 KB of the file, served out in pieces - or write-behind - what the
-   game has written and the file has not yet seen.  It is one or the other:
-   a read flushes the writes, a write hands back to the file whatever was
-   read ahead and not consumed, so the file's own position is always what
-   the guest would believe it to be except by the amount the buffer accounts
-   for, and a seek corrects for that amount.
-
-   Two handles can be the same file - the game closes a file before opening
-   it again, but nothing says it must - so a handle remembers which file it
-   is, and a read through one flushes the writes pending on any other handle
-   to the same file first.  Flushing at close and at exit is the rest of it.
-   What is lost is only the error from a write that fails, which now
-   surfaces at the flush rather than at the call. */
-#define FILE_BUF 16384u
-
-typedef struct {
-    HANDLE         h;      /* a real file; NULL for an image window     */
-    const uint8_t *mem;    /* an image window; NULL for a real file     */
+   pretending. */
+enum { FD_FREE, FD_FILE, FD_MEM };
+static struct {
+    int            kind;
+    int            fh;          /* FD_FILE: the fs.h handle */
+    const uint8_t *mem;         /* FD_MEM: the span          */
     uint32_t       len, pos;
-    uint8_t       *buf;    /* FILE_BUF bytes, on first use              */
-    uint32_t       rpos, rlen;   /* read-ahead: buf[rpos..rlen) unread  */
-    uint32_t       wlen;         /* write-behind: buf[0..wlen) unwritten */
-    DWORD          vol, ixhi, ixlo;   /* which file this is             */
-} File;
-static File files[MAX_FILES];
+} fds[MAX_FILES];
 
-static int file_slot(void)
+static int fd_slot(void)
 {
     int i;
     for (i = 5; i < MAX_FILES; i++)   /* 0..4 are the standard handles */
-        if (!files[i].h && !files[i].mem) return i;
+        if (fds[i].kind == FD_FREE) return i;
     return -1;
 }
 
-/* Hand the file what the guest has written.  0, or -1 with the buffer
-   discarded: there is nothing a second attempt would do differently. */
-static int file_flush(File *f)
+/* A DOS handle for an fs.h handle, closing the latter if there is no room. */
+static int fd_file(int fh)
 {
-    DWORD put = 0;
-    int ok = 1;
-    if (!f->wlen) return 0;
-    ok = WriteFile(f->h, f->buf, f->wlen, &put, NULL) && put == f->wlen;
-    f->wlen = 0;
-    return ok ? 0 : -1;
-}
-
-static int file_same(const File *a, const File *b)
-{
-    return a->h && b->h && a->vol == b->vol && a->ixhi == b->ixhi && a->ixlo == b->ixlo;
-}
-
-/* Before reading through `f`, whatever another handle to the same file has
-   not yet written must be there to read. */
-static int file_flush_aliases(File *f)
-{
-    int i, r = 0;
-    for (i = 5; i < MAX_FILES; i++)
-        if (&files[i] != f && files[i].wlen && file_same(&files[i], f))
-            if (file_flush(&files[i]) < 0) r = -1;
-    return r;
-}
-
-/* Before opening or creating anything: which file it will turn out to be is
-   not known until it is open, and by then a creation has already truncated
-   it, so a buffered write to it from an older handle would land afterwards
-   and put back what the creation removed.  Opens are rare and a handle is
-   dirty only mid-write, so this costs nothing measurable. */
-static void file_flush_all(void)
-{
-    int i;
-    for (i = 5; i < MAX_FILES; i++)
-        if (files[i].wlen) file_flush(&files[i]);
-}
-
-/* Give back to the file what was read ahead of the guest, so that its
-   position is where the guest thinks it is. */
-static void file_unread(File *f)
-{
-    if (f->rlen > f->rpos) {
-        LONG back = -(LONG)(f->rlen - f->rpos);
-        SetFilePointer(f->h, back, NULL, FILE_CURRENT);
-    }
-    f->rpos = f->rlen = 0;
-}
-
-static int file_alloc(HANDLE h)
-{
-    BY_HANDLE_FILE_INFORMATION info;
-    int fd = file_slot();
-    if (fd < 0) { CloseHandle(h); return -1; }
-    files[fd].h = h;
-    files[fd].rpos = files[fd].rlen = files[fd].wlen = 0;
-    if (GetFileInformationByHandle(h, &info)) {
-        files[fd].vol  = info.dwVolumeSerialNumber;
-        files[fd].ixhi = info.nFileIndexHigh;
-        files[fd].ixlo = info.nFileIndexLow;
-    } else {
-        files[fd].vol = files[fd].ixhi = files[fd].ixlo = 0;
-    }
+    int fd = fd_slot();
+    if (fd < 0) { fs_close(fh); return -DOSERR_TOOMANYFILES; }
+    fds[fd].kind = FD_FILE;
+    fds[fd].fh = fh;
     return fd;
 }
 
-static File *file_get(int fd)
+static int fd_ok(int fd)
 {
-    if (fd < 0 || fd >= MAX_FILES) return NULL;
-    return (files[fd].h || files[fd].mem) ? &files[fd] : NULL;
+    return fd >= 0 && fd < MAX_FILES && fds[fd].kind != FD_FREE;
 }
 
-/* Close.  -1 if the last of the writes could not be made. */
-static int file_release(int fd)
+/* 0, or -error when the last of the writes could not be made. */
+static int fd_close(int fd)
 {
-    int r = 0;
-    if (files[fd].h) {
-        r = file_flush(&files[fd]);
-        CloseHandle(files[fd].h);
-    }
-    free(files[fd].buf);
-    files[fd].buf = NULL;
-    files[fd].h = NULL;
-    files[fd].mem = NULL;
-    files[fd].len = files[fd].pos = 0;
-    files[fd].rpos = files[fd].rlen = files[fd].wlen = 0;
+    int r = fds[fd].kind == FD_FILE ? fs_close(fds[fd].fh) : 0;
+    memset(&fds[fd], 0, sizeof fds[fd]);
     return r;
 }
 
-static int file_buffer(File *f)
+/* Running off the end of an image window is a short read, as for a file. */
+static long fd_read(int fd, void *dst, uint32_t want)
 {
-    if (!f->buf) f->buf = malloc(FILE_BUF);
-    return f->buf != NULL;
-}
-
-/* Read from either kind of handle.  -1 on failure, which for an image window
-   cannot happen: running off the end is a short read, exactly as it would be
-   for a file. */
-static long file_read(File *f, void *dst, uint32_t want)
-{
-    uint8_t *out = dst;
-    uint32_t done = 0;
-    DWORD got = 0;
-
-    if (f->mem) {
-        uint32_t n = f->len - f->pos;
+    if (fds[fd].kind == FD_MEM) {
+        uint32_t n = fds[fd].len - fds[fd].pos;
         if (n > want) n = want;
-        memcpy(dst, f->mem + f->pos, n);
-        f->pos += n;
+        memcpy(dst, fds[fd].mem + fds[fd].pos, n);
+        fds[fd].pos += n;
         return (long)n;
     }
-    if (f->wlen && file_flush(f) < 0) return -1;
-    if (file_flush_aliases(f) < 0) return -1;
-    if (!file_buffer(f)) {
-        if (want && !ReadFile(f->h, dst, want, &got, NULL)) return -1;
-        return (long)got;
-    }
-    while (done < want) {
-        uint32_t n = f->rlen - f->rpos;
-        if (n) {
-            if (n > want - done) n = want - done;
-            memcpy(out + done, f->buf + f->rpos, n);
-            f->rpos += n;
-            done += n;
-            continue;
-        }
-        if (want - done >= FILE_BUF) {
-            /* Bigger than the buffer: straight into the destination. */
-            if (!ReadFile(f->h, out + done, want - done, &got, NULL)) return -1;
-            done += got;
-            break;
-        }
-        if (!ReadFile(f->h, f->buf, FILE_BUF, &got, NULL)) return -1;
-        if (!got) break;                       /* the end of the file */
-        f->rpos = 0;
-        f->rlen = got;
-    }
-    return (long)done;
+    return fs_read(fds[fd].fh, dst, want);
 }
 
-/* Write to a real file.  -1 on failure. */
-static long file_write(File *f, const void *src, uint32_t n)
-{
-    DWORD put = 0;
-
-    if (!f->h) return -1;
-    if (f->rlen) file_unread(f);
-    if (!n) return 0;
-    if (!file_buffer(f)) {
-        if (!WriteFile(f->h, src, n, &put, NULL)) return -1;
-        return (long)put;
-    }
-    if (f->wlen + n > FILE_BUF && file_flush(f) < 0) return -1;
-    if (n >= FILE_BUF) {
-        if (!WriteFile(f->h, src, n, &put, NULL)) return -1;
-        return (long)put;
-    }
-    memcpy(f->buf + f->wlen, src, n);
-    f->wlen += n;
-    return (long)n;
-}
-
-/* Seek a real file.  The buffer's worth of read-ahead is the difference
-   between the file's position and the guest's; writes go out first.
-   Returns the new position, or INVALID_SET_FILE_POINTER. */
-static DWORD file_seek(File *f, LONG off, DWORD method)
-{
-    if (f->wlen && file_flush(f) < 0) return INVALID_SET_FILE_POINTER;
-    if (f->rlen) {
-        if (method == FILE_CURRENT) off -= (LONG)(f->rlen - f->rpos);
-        f->rpos = f->rlen = 0;
-    }
-    return SetFilePointer(f->h, off, NULL, method);
-}
-
-/* Every handle, flushed and closed: the process is ending.  DOS closed a
-   program's handles when it exited, and the buffered writes of a file the
-   game left open would otherwise never reach it. */
+/* Every handle, flushed and closed: the program is over. */
 void dos_shutdown(void)
 {
     int i;
     for (i = 5; i < MAX_FILES; i++)
-        if (files[i].h || files[i].mem) file_release(i);
+        if (fds[i].kind != FD_FREE) fd_close(i);
+    fs_close_all();
 }
 
-static char *guest_path(uint32_t segptr, char *buf, size_t n);
+void dos_reset(void)
+{
+    memset(fds, 0, sizeof fds);
+    dta_ptr = 0;
+}
 
 /* A DOS handle onto a span of the module image, for AccessResource. */
 uint16_t dos_open_mem(const uint8_t *mem, uint32_t len)
 {
-    int fd = file_slot();
+    int fd = fd_slot();
     if (fd < 0) return 0xFFFF;
-    files[fd].mem = mem;
-    files[fd].len = len;
-    files[fd].pos = 0;
+    fds[fd].kind = FD_MEM;
+    fds[fd].mem = mem;
+    fds[fd].len = len;
+    fds[fd].pos = 0;
     return (uint16_t)fd;
 }
 
-/* ---- the Win16 file API, on the same handle table ------------------------- */
+/* ---- helpers ------------------------------------------------------------- */
 
-/* OF_READ/OF_WRITE/OF_READWRITE/OF_CREATE/OF_EXIST come from windows.h and
-   have the same values in Win16, so there is nothing to translate. */
+static char *guest_path(uint32_t segptr, char *buf, size_t n)
+{
+    uint16_t sel = SEGPTR_SEL(segptr), off = SEGPTR_OFF(segptr);
+    size_t i = 0;
+
+    while (i + 1 < n) {
+        uint8_t ch = sel_rd8(sel, (uint16_t)(off + i));
+        if (!ch) break;
+        buf[i++] = (char)ch;
+    }
+    buf[i] = 0;
+    return buf;
+}
+
+static void dos_fail(Cpu *c, int err)
+{
+    set_reg16(c, R_AX, (uint16_t)err);
+    c->eflags |= F_CF;
+}
+
+static void dos_ok(Cpu *c)
+{
+    c->eflags &= ~F_CF;
+}
+
+/* ---- the Win16 file API, on the same handle table ------------------------- */
 
 /* OFSTRUCT, which OpenFile fills in: cBytes, fFixedDisk, nErrCode,
    Reserved[4], szPathName[128]. */
@@ -336,13 +190,12 @@ static void fill_ofstruct(uint32_t p, const char *path, uint16_t err)
 
 static uint32_t k_OpenFile(Cpu *c, Args *a)
 {
-    char path[MAX_PATH], full[MAX_PATH];
+    char path[FS_PATH], full[FS_PATH];
     uint32_t namep = arg_long(a);
     uint32_t ofs   = arg_long(a);
     uint16_t style = arg_word(a);
-    HANDLE h;
-    DWORD access, disp;
-    int fd;
+    unsigned attr;
+    int fh, fd;
 
     (void)c;
     guest_path(namep, path, sizeof path);
@@ -363,7 +216,7 @@ static uint32_t k_OpenFile(Cpu *c, Args *a)
         snprintf(full, sizeof full, "%.*s\\%.*s",
                  (int)dl, task.exedir,
                  (int)(sizeof full - dl - 2), path);
-        if (GetFileAttributesA(full) == INVALID_FILE_ATTRIBUTES)
+        if (fs_getattr(full, &attr) < 0)
             snprintf(full, sizeof full, "%.*s", (int)sizeof full - 1, path);
     } else {
         snprintf(full, sizeof full, "%.*s", (int)sizeof full - 1, path);
@@ -372,26 +225,21 @@ static uint32_t k_OpenFile(Cpu *c, Args *a)
     if (log_verbose)
         log_msg("OpenFile \"%s\" style %04X (as \"%s\")\n", path, style, full);
     if (style & OF_EXIST) {
-        DWORD attr = GetFileAttributesA(full);
         fill_ofstruct(ofs, full, 0);
-        return (attr == INVALID_FILE_ATTRIBUTES) ? 0xFFFF : 0;
+        return fs_getattr(full, &attr) < 0 ? 0xFFFF : 0;
     }
 
-    file_flush_all();
-    access = (style & OF_READWRITE) ? (GENERIC_READ | GENERIC_WRITE)
-           : (style & OF_WRITE)     ? GENERIC_WRITE
-                                    : GENERIC_READ;
-    disp = (style & OF_CREATE) ? CREATE_ALWAYS : OPEN_EXISTING;
-    h = CreateFileA(full, access, FILE_SHARE_READ | FILE_SHARE_WRITE, NULL,
-                    disp, FILE_ATTRIBUTE_NORMAL, NULL);
-    if (h == INVALID_HANDLE_VALUE) {
+    fh = fs_open(full,
+                 (style & OF_READWRITE) ? FS_RDWR :
+                 (style & OF_WRITE)     ? FS_WRITE : FS_READ,
+                 (style & OF_CREATE)    ? FS_CREATE : FS_EXISTING);
+    if (fh < 0) {
         if (log_verbose)
-            log_msg("OpenFile: \"%s\" failed, error %lu\n", full,
-                    (unsigned long)GetLastError());
+            log_msg("OpenFile: \"%s\" failed, DOS error %d\n", full, -fh);
         fill_ofstruct(ofs, full, 2);
         return 0xFFFF;
     }
-    fd = file_alloc(h);
+    fd = fd_file(fh);
     if (fd < 0) { fill_ofstruct(ofs, full, 4); return 0xFFFF; }
     fill_ofstruct(ofs, full, 0);
     return (uint32_t)fd;
@@ -401,8 +249,8 @@ static uint32_t k_lclose(Cpu *c, Args *a)
 {
     int fd = arg_word(a);
     (void)c;
-    if (!file_get(fd)) return 0xFFFF;
-    return file_release(fd) < 0 ? 0xFFFF : 0;
+    if (!fd_ok(fd)) return 0xFFFF;
+    return fd_close(fd) < 0 ? 0xFFFF : 0;
 }
 
 static uint32_t k_lread(Cpu *c, Args *a)
@@ -410,12 +258,11 @@ static uint32_t k_lread(Cpu *c, Args *a)
     int fd = arg_word(a);
     uint32_t buf = arg_long(a);
     uint16_t want = arg_word(a);
-    File *f = file_get(fd);
     long got;
 
     (void)c;
-    if (!f) return 0xFFFF;
-    got = file_read(f, sel_ptr(SEGPTR_SEL(buf), SEGPTR_OFF(buf)), want);
+    if (!fd_ok(fd)) return 0xFFFF;
+    got = fd_read(fd, sel_ptr(SEGPTR_SEL(buf), SEGPTR_OFF(buf)), want);
     return (got < 0) ? 0xFFFF : (uint32_t)got;
 }
 
@@ -424,50 +271,16 @@ static uint32_t k_lwrite(Cpu *c, Args *a)
     int fd = arg_word(a);
     uint32_t buf = arg_long(a);
     uint16_t want = arg_word(a);
-    File *f = file_get(fd);
     long put;
 
     (void)c;
-    if (!f || !f->h) return 0xFFFF;          /* an image window is read-only */
-    put = file_write(f, sel_ptr(SEGPTR_SEL(buf), SEGPTR_OFF(buf)), want);
+    if (!fd_ok(fd) || fds[fd].kind != FD_FILE)  /* an image window is read-only */
+        return 0xFFFF;
+    put = fs_write(fds[fd].fh, sel_ptr(SEGPTR_SEL(buf), SEGPTR_OFF(buf)), want);
     return (put < 0) ? 0xFFFF : (uint32_t)put;
 }
 
 /* ---- directory searches -------------------------------------------------- */
-
-#define MAX_FINDS 16
-static struct {
-    HANDLE h;
-    int    used;
-    char   dir[MAX_PATH];
-} finds[MAX_FINDS];
-
-/* ---- helpers ------------------------------------------------------------- */
-
-static void dos_fail(Cpu *c, uint16_t err)
-{
-    set_reg16(c, R_AX, err);
-    c->eflags |= F_CF;
-}
-
-static void dos_ok(Cpu *c)
-{
-    c->eflags &= ~F_CF;
-}
-
-static char *guest_path(uint32_t segptr, char *buf, size_t n)
-{
-    uint16_t sel = SEGPTR_SEL(segptr), off = SEGPTR_OFF(segptr);
-    size_t i = 0;
-
-    while (i + 1 < n) {
-        uint8_t ch = sel_rd8(sel, (uint16_t)(off + i));
-        if (!ch) break;
-        buf[i++] = (char)ch;
-    }
-    buf[i] = 0;
-    return buf;
-}
 
 static uint32_t current_dta(Cpu *c)
 {
@@ -475,31 +288,17 @@ static uint32_t current_dta(Cpu *c)
     return dta_ptr ? dta_ptr : SEGPTR(task.psp_sel, PSP_CMDLINE);
 }
 
-static void put_dta_result(uint32_t dta, const WIN32_FIND_DATAA *fd)
+static void put_dta_result(uint32_t dta, const FsEntry *e)
 {
     uint16_t sel = SEGPTR_SEL(dta), off = SEGPTR_OFF(dta);
-    FILETIME lft;
-    WORD date = 0, time = 0;
-    uint8_t attr = 0;
     unsigned i;
-    const char *name = fd->cAlternateFileName[0] ? fd->cAlternateFileName
-                                                 : fd->cFileName;
 
-    if (fd->dwFileAttributes & FILE_ATTRIBUTE_READONLY)  attr |= DOSATTR_RDONLY;
-    if (fd->dwFileAttributes & FILE_ATTRIBUTE_HIDDEN)    attr |= DOSATTR_HIDDEN;
-    if (fd->dwFileAttributes & FILE_ATTRIBUTE_SYSTEM)    attr |= DOSATTR_SYSTEM;
-    if (fd->dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) attr |= DOSATTR_DIR;
-    if (fd->dwFileAttributes & FILE_ATTRIBUTE_ARCHIVE)   attr |= DOSATTR_ARCHIVE;
-
-    if (FileTimeToLocalFileTime(&fd->ftLastWriteTime, &lft))
-        FileTimeToDosDateTime(&lft, &date, &time);
-
-    sel_wr8 (sel, (uint16_t)(off + DTA_FILEATTR), attr);
-    sel_wr16(sel, (uint16_t)(off + DTA_TIME), time);
-    sel_wr16(sel, (uint16_t)(off + DTA_DATE), date);
-    sel_wr32(sel, (uint16_t)(off + DTA_SIZE), fd->nFileSizeLow);
-    for (i = 0; i < 12 && name[i]; i++)
-        sel_wr8(sel, (uint16_t)(off + DTA_NAME + i), (uint8_t)name[i]);
+    sel_wr8 (sel, (uint16_t)(off + DTA_FILEATTR), e->attr);
+    sel_wr16(sel, (uint16_t)(off + DTA_TIME), e->time);
+    sel_wr16(sel, (uint16_t)(off + DTA_DATE), e->date);
+    sel_wr32(sel, (uint16_t)(off + DTA_SIZE), e->size);
+    for (i = 0; i < 12 && e->name[i]; i++)
+        sel_wr8(sel, (uint16_t)(off + DTA_NAME + i), (uint8_t)e->name[i]);
     sel_wr8(sel, (uint16_t)(off + DTA_NAME + i), 0);
 }
 
@@ -534,7 +333,8 @@ static uint32_t dos3call(Cpu *c, Args *a)
 {
     unsigned ah = (unsigned)((reg16(c, R_AX) >> 8) & 0xFF);
     unsigned al = (unsigned)(reg16(c, R_AX) & 0xFF);
-    char path[MAX_PATH], path2[MAX_PATH];
+    char path[FS_PATH], path2[FS_PATH];
+    int r;
 
     (void)a;
     dos_ok(c);
@@ -562,18 +362,18 @@ static uint32_t dos3call(Cpu *c, Args *a)
         return 0;                                /* nothing to hook here */
 
     case 0x2A: {                                 /* get date */
-        SYSTEMTIME st;
-        host_localtime(&st);
-        set_reg16(c, R_CX, st.wYear);
-        set_reg16(c, R_DX, (uint16_t)((st.wMonth << 8) | st.wDay));
-        set_reg16(c, R_AX, (uint16_t)((reg16(c, R_AX) & 0xFF00) | st.wDayOfWeek));
+        HostTime t;
+        host_localtime(&t);
+        set_reg16(c, R_CX, t.year);
+        set_reg16(c, R_DX, (uint16_t)((t.month << 8) | t.day));
+        set_reg16(c, R_AX, (uint16_t)((reg16(c, R_AX) & 0xFF00) | t.dow));
         return 0;
     }
     case 0x2C: {                                 /* get time */
-        SYSTEMTIME st;
-        host_localtime(&st);
-        set_reg16(c, R_CX, (uint16_t)((st.wHour << 8) | st.wMinute));
-        set_reg16(c, R_DX, (uint16_t)((st.wSecond << 8) | (st.wMilliseconds / 10)));
+        HostTime t;
+        host_localtime(&t);
+        set_reg16(c, R_CX, (uint16_t)((t.hour << 8) | t.minute));
+        set_reg16(c, R_DX, (uint16_t)((t.second << 8) | (t.ms / 10)));
         return 0;
     }
     case 0x2F:                                   /* get the DTA into ES:BX */
@@ -593,15 +393,12 @@ static uint32_t dos3call(Cpu *c, Args *a)
         return 0;
 
     case 0x36: {                                 /* get free disk space */
-        DWORD spc = 0, bps = 0, freec = 0, totalc = 0;
-        unsigned dl = (unsigned)(reg16(c, R_DX) & 0xFF);
-        char root[4];
+        uint32_t spc, bps, freec, totalc;
         /* DL, not AL: 0 means the default drive, then 1 = A.  Reading AL
-           here asked Win32 about a drive named by whatever was left in it,
-           so this handler had never once succeeded. */
-        root[0] = (char)('A' + (dl ? dl - 1 : 2));
-        root[1] = ':'; root[2] = '\\'; root[3] = 0;
-        if (!GetDiskFreeSpaceA(root, &spc, &bps, &freec, &totalc)) {
+           here asked about a drive named by whatever was left in it, so this
+           handler had never once succeeded. */
+        if (fs_disk_space((unsigned)(reg16(c, R_DX) & 0xFF),
+                          &spc, &bps, &freec, &totalc) < 0) {
             set_reg16(c, R_AX, 0xFFFF);
             return 0;
         }
@@ -615,144 +412,104 @@ static uint32_t dos3call(Cpu *c, Args *a)
 
     case 0x39:                                   /* mkdir */
         guest_path(SEGPTR(c->seg[S_DS], reg16(c, R_DX)), path, sizeof path);
-        if (!CreateDirectoryA(path, NULL)) dos_fail(c, DOSERR_PATHNOTFOUND);
+        if ((r = fs_mkdir(path)) < 0) dos_fail(c, -r);
         return 0;
 
     case 0x3A:                                   /* rmdir */
         guest_path(SEGPTR(c->seg[S_DS], reg16(c, R_DX)), path, sizeof path);
-        if (!RemoveDirectoryA(path)) dos_fail(c, DOSERR_PATHNOTFOUND);
+        if ((r = fs_rmdir(path)) < 0) dos_fail(c, -r);
         return 0;
 
     case 0x3B:                                   /* chdir */
         guest_path(SEGPTR(c->seg[S_DS], reg16(c, R_DX)), path, sizeof path);
-        if (!SetCurrentDirectoryA(path)) dos_fail(c, DOSERR_PATHNOTFOUND);
+        if ((r = fs_chdir(path)) < 0) dos_fail(c, -r);
         return 0;
 
-    case 0x3C: case 0x5B: {                      /* create / create new */
-        HANDLE h;
-        int fd;
-        guest_path(SEGPTR(c->seg[S_DS], reg16(c, R_DX)), path, sizeof path);
-        file_flush_all();
-        h = CreateFileA(path, GENERIC_READ | GENERIC_WRITE,
-                        FILE_SHARE_READ, NULL,
-                        (ah == 0x5B) ? CREATE_NEW : CREATE_ALWAYS,
-                        FILE_ATTRIBUTE_NORMAL, NULL);
-        if (h == INVALID_HANDLE_VALUE) { dos_fail(c, DOSERR_ACCESS); return 0; }
-        fd = file_alloc(h);
-        if (fd < 0) { dos_fail(c, DOSERR_TOOMANYFILES); return 0; }
-        set_reg16(c, R_AX, (uint16_t)fd);
-        return 0;
-    }
-
+    case 0x3C: case 0x5B:                        /* create / create new */
     case 0x3D: {                                 /* open */
-        HANDLE h;
-        int fd;
-        DWORD access = (al & 3) == 0 ? GENERIC_READ
-                     : (al & 3) == 1 ? GENERIC_WRITE
-                                     : (GENERIC_READ | GENERIC_WRITE);
         guest_path(SEGPTR(c->seg[S_DS], reg16(c, R_DX)), path, sizeof path);
-        file_flush_all();
-        h = CreateFileA(path, access, FILE_SHARE_READ | FILE_SHARE_WRITE, NULL,
-                        OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
-        if (h == INVALID_HANDLE_VALUE) {
-            dos_fail(c, DOSERR_FILENOTFOUND);
-            return 0;
-        }
-        fd = file_alloc(h);
-        if (fd < 0) { dos_fail(c, DOSERR_TOOMANYFILES); return 0; }
-        set_reg16(c, R_AX, (uint16_t)fd);
+        if (ah == 0x3D)
+            r = fs_open(path, (al & 3) == 0 ? FS_READ :
+                              (al & 3) == 1 ? FS_WRITE : FS_RDWR, FS_EXISTING);
+        else
+            r = fs_open(path, FS_RDWR, ah == 0x5B ? FS_CREATE_NEW : FS_CREATE);
+        if (r >= 0) r = fd_file(r);
+        if (r < 0) { dos_fail(c, -r); return 0; }
+        set_reg16(c, R_AX, (uint16_t)r);
         return 0;
     }
 
     case 0x3E: {                                 /* close */
         int fd = reg16(c, R_BX);
-        if (!file_get(fd)) { dos_fail(c, DOSERR_BADHANDLE); return 0; }
-        if (file_release(fd) < 0) dos_fail(c, DOSERR_ACCESS);
+        if (!fd_ok(fd)) { dos_fail(c, DOSERR_BADHANDLE); return 0; }
+        if ((r = fd_close(fd)) < 0) dos_fail(c, -r);
         return 0;
     }
 
     case 0x3F: {                                 /* read */
         int fd = reg16(c, R_BX);
-        File *f = file_get(fd);
         uint16_t sel = c->seg[S_DS], off = reg16(c, R_DX);
         uint32_t want = reg16(c, R_CX);
-        long got;
         uint32_t limit;
+        long got;
 
-        if (!f) { dos_fail(c, DOSERR_BADHANDLE); return 0; }
+        if (!fd_ok(fd)) { dos_fail(c, DOSERR_BADHANDLE); return 0; }
         /* Clamp to what the destination selector can actually hold; Win16 code
            is known to pass counts larger than the buffer. */
         limit = sel_tab[SEL_INDEX(sel)].limit;
         if (off + want > limit + 1) want = limit + 1 - off;
-        got = file_read(f, sel_ptr(sel, off), want);
-        if (got < 0) {
-            dos_fail(c, DOSERR_ACCESS);
-            return 0;
-        }
+        got = fd_read(fd, sel_ptr(sel, off), want);
+        if (got < 0) { dos_fail(c, (int)-got); return 0; }
         set_reg16(c, R_AX, (uint16_t)got);
         return 0;
     }
 
     case 0x40: {                                 /* write */
         int fd = reg16(c, R_BX);
-        File *f = file_get(fd);
         uint16_t sel = c->seg[S_DS], off = reg16(c, R_DX);
         uint32_t want = reg16(c, R_CX);
         long put;
 
-        if (!f || !f->h) { dos_fail(c, DOSERR_BADHANDLE); return 0; }
-        put = file_write(f, sel_ptr(sel, off), want);
-        if (put < 0) {
-            dos_fail(c, DOSERR_ACCESS);
+        if (!fd_ok(fd) || fds[fd].kind != FD_FILE) {
+            dos_fail(c, DOSERR_BADHANDLE);
             return 0;
         }
+        put = fs_write(fds[fd].fh, sel_ptr(sel, off), want);
+        if (put < 0) { dos_fail(c, (int)-put); return 0; }
         set_reg16(c, R_AX, (uint16_t)put);
         return 0;
     }
 
     case 0x41:                                   /* unlink */
         guest_path(SEGPTR(c->seg[S_DS], reg16(c, R_DX)), path, sizeof path);
-        if (!DeleteFileA(path)) dos_fail(c, DOSERR_FILENOTFOUND);
+        if ((r = fs_unlink(path)) < 0) dos_fail(c, -r);
         return 0;
 
     case 0x42: {                                 /* lseek */
         int fd = reg16(c, R_BX);
-        File *f = file_get(fd);
-        LONG lo = (LONG)(((uint32_t)reg16(c, R_CX) << 16) | reg16(c, R_DX));
-        DWORD method = (al == 1) ? FILE_CURRENT : (al == 2) ? FILE_END : FILE_BEGIN;
-        DWORD pos;
+        int32_t off = (int32_t)(((uint32_t)reg16(c, R_CX) << 16) | reg16(c, R_DX));
+        uint32_t pos;
 
-        if (!f || !f->h) { dos_fail(c, DOSERR_BADHANDLE); return 0; }
-        pos = file_seek(f, lo, method);
-        if (pos == INVALID_SET_FILE_POINTER) { dos_fail(c, DOSERR_ACCESS); return 0; }
+        if (!fd_ok(fd) || fds[fd].kind != FD_FILE) {
+            dos_fail(c, DOSERR_BADHANDLE);
+            return 0;
+        }
+        r = fs_seek(fds[fd].fh, off,
+                    al == 1 ? FS_CUR : al == 2 ? FS_END : FS_SET, &pos);
+        if (r < 0) { dos_fail(c, -r); return 0; }
         set_reg16(c, R_AX, (uint16_t)pos);
         set_reg16(c, R_DX, (uint16_t)(pos >> 16));
         return 0;
     }
 
     case 0x43: {                                 /* get or set attributes */
-        DWORD attr;
+        unsigned attr;
         guest_path(SEGPTR(c->seg[S_DS], reg16(c, R_DX)), path, sizeof path);
         if (al == 0) {
-            attr = GetFileAttributesA(path);
-            if (attr == INVALID_FILE_ATTRIBUTES) {
-                dos_fail(c, DOSERR_FILENOTFOUND);
-                return 0;
-            }
-            set_reg16(c, R_CX, (uint16_t)
-                ((attr & FILE_ATTRIBUTE_READONLY  ? DOSATTR_RDONLY  : 0) |
-                 (attr & FILE_ATTRIBUTE_HIDDEN    ? DOSATTR_HIDDEN  : 0) |
-                 (attr & FILE_ATTRIBUTE_SYSTEM    ? DOSATTR_SYSTEM  : 0) |
-                 (attr & FILE_ATTRIBUTE_DIRECTORY ? DOSATTR_DIR     : 0) |
-                 (attr & FILE_ATTRIBUTE_ARCHIVE   ? DOSATTR_ARCHIVE : 0)));
-        } else {
-            uint16_t cx = reg16(c, R_CX);
-            attr = (cx & DOSATTR_RDONLY)  ? FILE_ATTRIBUTE_READONLY : 0;
-            if (cx & DOSATTR_HIDDEN)  attr |= FILE_ATTRIBUTE_HIDDEN;
-            if (cx & DOSATTR_SYSTEM)  attr |= FILE_ATTRIBUTE_SYSTEM;
-            if (cx & DOSATTR_ARCHIVE) attr |= FILE_ATTRIBUTE_ARCHIVE;
-            if (!attr) attr = FILE_ATTRIBUTE_NORMAL;
-            if (!SetFileAttributesA(path, attr)) dos_fail(c, DOSERR_FILENOTFOUND);
+            if ((r = fs_getattr(path, &attr)) < 0) { dos_fail(c, -r); return 0; }
+            set_reg16(c, R_CX, (uint16_t)attr);
+        } else if ((r = fs_setattr(path, reg16(c, R_CX))) < 0) {
+            dos_fail(c, -r);
         }
         return 0;
     }
@@ -763,21 +520,13 @@ static uint32_t dos3call(Cpu *c, Args *a)
         return 0;
 
     case 0x47: {                                 /* get the current directory */
-        char cwd[MAX_PATH];
+        char cwd[FS_PATH];
         uint16_t sel = c->seg[S_DS], off = reg16(c, R_SI);
         unsigned i;
-        const char *p;
 
-        if (!GetCurrentDirectoryA(sizeof cwd, cwd)) {
-            dos_fail(c, DOSERR_PATHNOTFOUND);
-            return 0;
-        }
-        /* DOS reports the path without the drive or the leading backslash. */
-        p = cwd;
-        if (p[0] && p[1] == ':') p += 2;
-        if (*p == '\\') p++;
-        for (i = 0; p[i] && i < 63; i++)
-            sel_wr8(sel, (uint16_t)(off + i), (uint8_t)p[i]);
+        if ((r = fs_getcwd(cwd, sizeof cwd)) < 0) { dos_fail(c, -r); return 0; }
+        for (i = 0; cwd[i] && i < 63; i++)
+            sel_wr8(sel, (uint16_t)(off + i), (uint8_t)cwd[i]);
         sel_wr8(sel, (uint16_t)(off + i), 0);
         set_reg16(c, R_AX, 0x0100);
         return 0;
@@ -786,33 +535,20 @@ static uint32_t dos3call(Cpu *c, Args *a)
     case 0x4E: {                                 /* find first */
         uint32_t dta = current_dta(c);
         uint16_t cx = reg16(c, R_CX);
-        WIN32_FIND_DATAA fd;
-        HANDLE h;
-        int slot;
+        FsEntry e;
 
         guest_path(SEGPTR(c->seg[S_DS], reg16(c, R_DX)), path, sizeof path);
 
         /* An attribute of exactly the volume-label bit is how DOS is asked
            for a volume label, and it is how the game reads the one its
-           machine fingerprint hashes.  FindFirstFile never reports a label,
-           so that search has to be answered elsewhere.  Only the bare bit is
-           redirected: with other bits set the caller wants files as well, and
-           those searches keep the ordinary path. */
+           machine fingerprint hashes.  A directory search never reports a
+           label, so that one has to be answered elsewhere.  Only the bare bit
+           is redirected: with other bits set the caller wants files as well,
+           and those searches keep the ordinary path. */
         if (cx == DOSATTR_LABEL) {
-            char vol[4], label[MAX_PATH];
-            const char *rootp = NULL;
-
-            if (path[0] && path[1] == ':') {
-                vol[0] = path[0];
-                vol[1] = ':';
-                vol[2] = '\\';
-                vol[3] = 0;
-                rootp = vol;
-            }
-            if (!GetVolumeInformationA(rootp, label, sizeof label,
-                                       NULL, NULL, NULL, NULL, 0)
-                || !label[0]) {
-                dos_fail(c, DOSERR_FILENOTFOUND);
+            char label[64];
+            if ((r = fs_volume_label(path, label, sizeof label)) < 0) {
+                dos_fail(c, -r);
                 return 0;
             }
             put_dta_label(dta, label);
@@ -820,40 +556,27 @@ static uint32_t dos3call(Cpu *c, Args *a)
             return 0;
         }
 
-        for (slot = 0; slot < MAX_FINDS; slot++) if (!finds[slot].used) break;
-        if (slot == MAX_FINDS) { dos_fail(c, DOSERR_TOOMANYFILES); return 0; }
-
-        h = FindFirstFileA(path, &fd);
-        if (h == INVALID_HANDLE_VALUE) { dos_fail(c, DOSERR_FILENOTFOUND); return 0; }
-        finds[slot].h = h;
-        finds[slot].used = 1;
+        if ((r = fs_find_first(path, &e)) < 0) { dos_fail(c, -r); return 0; }
         sel_wr32(SEGPTR_SEL(dta), (uint16_t)(SEGPTR_OFF(dta) + DTA_COOKIE),
-                 (uint32_t)(slot + 1));
+                 (uint32_t)(r + 1));
         sel_wr8(SEGPTR_SEL(dta), (uint16_t)(SEGPTR_OFF(dta) + DTA_ATTR),
-                (uint8_t)reg16(c, R_CX));
-        put_dta_result(dta, &fd);
+                (uint8_t)cx);
+        put_dta_result(dta, &e);
         set_reg16(c, R_AX, 0);
         return 0;
     }
 
     case 0x4F: {                                 /* find next */
         uint32_t dta = current_dta(c);
-        WIN32_FIND_DATAA fd;
         uint32_t cookie = sel_rd32(SEGPTR_SEL(dta),
                                    (uint16_t)(SEGPTR_OFF(dta) + DTA_COOKIE));
-        int slot = (int)cookie - 1;
+        FsEntry e;
 
-        if (slot < 0 || slot >= MAX_FINDS || !finds[slot].used) {
+        if (!cookie || (r = fs_find_next((int)cookie - 1, &e)) < 0) {
             dos_fail(c, DOSERR_NOMOREFILES);
             return 0;
         }
-        if (!FindNextFileA(finds[slot].h, &fd)) {
-            FindClose(finds[slot].h);
-            finds[slot].used = 0;
-            dos_fail(c, DOSERR_NOMOREFILES);
-            return 0;
-        }
-        put_dta_result(dta, &fd);
+        put_dta_result(dta, &e);
         set_reg16(c, R_AX, 0);
         return 0;
     }
@@ -861,11 +584,12 @@ static uint32_t dos3call(Cpu *c, Args *a)
     case 0x56:                                   /* rename */
         guest_path(SEGPTR(c->seg[S_DS], reg16(c, R_DX)), path, sizeof path);
         guest_path(SEGPTR(c->seg[S_ES], reg16(c, R_DI)), path2, sizeof path2);
-        if (!MoveFileA(path, path2)) dos_fail(c, DOSERR_ACCESS);
+        if ((r = fs_rename(path, path2)) < 0) dos_fail(c, -r);
         return 0;
 
     case 0x4C:                                   /* terminate */
         log_msg("DOS3Call: the guest exited with code %u\n", al);
+        task.exitcode = (int)al;
         c->state = CPU_HALT;
         return 0;
 

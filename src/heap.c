@@ -14,6 +14,14 @@ static struct {
     uint8_t  moveable;
 } gmem[SEL_SLOTS];
 
+static uint16_t heap_sel, heap_base, heap_end;
+
+void heap_reset(void)
+{
+    memset(gmem, 0, sizeof gmem);
+    heap_sel = heap_base = heap_end = 0;
+}
+
 uint16_t gmem_sel(uint16_t handle)
 {
     return handle ? (uint16_t)(handle | 7) : 0;
@@ -105,8 +113,6 @@ int gmem_unlock(uint16_t handle)
    A handle is the offset of the payload, i.e. header offset + 4. */
 
 #define LB_HDR 4
-
-static uint16_t heap_sel, heap_base, heap_end;
 
 uint16_t lmem_base(void) { return heap_base; }
 
