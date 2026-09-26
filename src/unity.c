@@ -29,11 +29,13 @@
  * every source in the directory, so forgetting one shows up as a link error
  * naming the missing symbol, not as a stale object silently left behind.
  *
- * Two sources are missing on purpose, and neither is an omission to be tidied
+ * Some sources are missing on purpose, and none is an omission to be tidied
  * up: fuzz.c belongs to unity_fuzz.c and pack.c to unity_pack.c, each built as
  * its own program.  See the head of those files for why.  Note that unpack.c is
  * here while pack.c is not - the emulator decodes a compressed module and has
- * no business being able to produce one.
+ * no business being able to produce one.  And fs_mem.c, headless.c and
+ * libstars.c are the library's halves of what fs_win32.c, the api_* files and
+ * main.c are here: unity_lib.c builds the library from them.
  */
 
 #include "api_common.c"

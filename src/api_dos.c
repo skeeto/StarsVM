@@ -588,7 +588,9 @@ static uint32_t dos3call(Cpu *c, Args *a)
         return 0;
 
     case 0x4C:                                   /* terminate */
+#ifndef STARSVM_LIB
         log_msg("DOS3Call: the guest exited with code %u\n", al);
+#endif
         task.exitcode = (int)al;
         c->state = CPU_HALT;
         return 0;

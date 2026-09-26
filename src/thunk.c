@@ -34,7 +34,14 @@ int call16_depth(void) { return depth; }
 /* How often to note that a callback has not come back yet.  Large enough that
    a slow but honest one stays quiet for a good while, small enough that a stuck
    one gets named within seconds of interpreted time. */
+#ifdef STARSVM_LIB
+/* The library has nobody to read a note, and a limit instead: see thunk.h.
+   It is checked this often. */
+#define CALL16_NOTE 100000000ull
+uint64_t call16_budget;
+#else
 #define CALL16_NOTE 1000000000ull
+#endif
 
 uint16_t call16_ret_selector(void) { return ret_sel; }
 
@@ -222,6 +229,13 @@ uint32_t call16_wndproc(uint32_t proc, uint16_t ax,
             r = cpu_run(c, CALL16_NOTE);
             if (r != CPU_STEPS) break;
             ran += CALL16_NOTE;
+#ifdef STARSVM_LIB
+            if (call16_budget && c->icount >= call16_budget) {
+                cpu_stop_latch(c, CPU_STEPS);
+                break;
+            }
+            continue;
+#endif
             log_msg("*** guest callback %04X:%04X has not returned after %llu"
                     " instructions, still going\n",
                     SEGPTR_SEL(proc), SEGPTR_OFF(proc),

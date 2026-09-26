@@ -13,6 +13,7 @@
 
 CROSS   := i686-w64-mingw32-
 CC      := $(CROSS)gcc
+AR      := $(CROSS)ar
 WINDRES := $(CROSS)windres
 
 # The icon step runs a small program during the build, so that program is built
@@ -36,6 +37,19 @@ ONEFILE := Stars-x86.exe
 MKICON  := build/mkicon.exe
 RES     := $(OBJDIR)/StarsVM.res.o
 
+# The library (src/stars.h) builds for whatever $(CC) targets, Windows or not,
+# so what its files are called follows the compiler rather than this machine.
+ifneq (,$(findstring mingw,$(shell $(CC) -dumpmachine)))
+LIBSO   := stars.dll
+EXE     := .exe
+else
+LIBSO   := libstars.so
+EXE     :=
+PIC     := -fPIC
+endif
+LIBA    := libstars.a
+LIBTEST := $(OBJDIR)/libtest$(EXE)
+
 # Both toolchains build the same file names out of different objects, so nothing
 # in the dependency graph tells one executable from the other: switching would
 # leave `make` with nothing to do and the wrong architecture sitting there.
@@ -55,7 +69,7 @@ ARCH     := $(if $(CROSS),32,64)
 ARCHFILE := build/arch
 $(shell mkdir -p build)
 ifneq ($(ARCH),$(shell cat $(ARCHFILE) 2>/dev/null))
-$(shell rm -f $(TARGET) $(FUZZER) $(PACKER) $(PROF) $(HARNESS) $(ONEFILE) && echo $(ARCH) >$(ARCHFILE))
+$(shell rm -f $(TARGET) $(FUZZER) $(PACKER) $(PROF) $(HARNESS) $(ONEFILE) $(LIBA) $(LIBSO) && echo $(ARCH) >$(ARCHFILE))
 endif
 
 # A unity build: src/unity.c includes every other source, so the compiler sees
@@ -73,9 +87,12 @@ FOBJ := $(OBJDIR)/unity_fuzz.o
 POBJ := $(OBJDIR)/unity_pack.o
 ROBJ := $(OBJDIR)/unity_prof.o
 HOBJ := $(OBJDIR)/unity_harness.o
-DEP  := $(OBJ:.o=.d) $(FOBJ:.o=.d) $(POBJ:.o=.d) $(ROBJ:.o=.d) $(HOBJ:.o=.d)
+LOBJ := $(OBJDIR)/unity_lib.o
+SOBJ := $(OBJDIR)/unity_lib_shared.o
+DEP  := $(OBJ:.o=.d) $(FOBJ:.o=.d) $(POBJ:.o=.d) $(ROBJ:.o=.d) $(HOBJ:.o=.d) \
+        $(LOBJ:.o=.d) $(SOBJ:.o=.d)
 
-.PHONY: all clean imports fuzz onefile prof harness bench
+.PHONY: all clean imports fuzz onefile prof harness bench lib libtest
 
 all: $(TARGET)
 
@@ -164,8 +181,38 @@ onefile: $(TARGET) $(PACKER)
 	@test -f stars.exe || { echo "onefile: no stars.exe here to pack"; exit 1; }
 	./$(PACKER) stars.exe $(ONEFILE) $(TARGET)
 
+# The library: the game's batch modes with no Win32 and no I/O, for embedding
+# and FFI.  See src/stars.h and src/unity_lib.c.  The same code twice, once to
+# link statically and once as a DLL or shared object exporting stars.h and
+# nothing else.  Any GCC or Clang that targets x86 will do: `make lib CROSS=`
+# is the x64 one, and on Linux `make lib CROSS=` gives libstars.so, or with
+# CC="cc -m32" a 32-bit one.
+lib: $(LIBA) $(LIBSO)
+
+$(LOBJ): $(SRCDIR)/unity_lib.c $(SRC) GNUmakefile | $(OBJDIR)
+	$(CC) $(CFLAGS) -c -o $@ $<
+
+$(SOBJ): $(SRCDIR)/unity_lib.c $(SRC) GNUmakefile | $(OBJDIR)
+	$(CC) $(CFLAGS) $(PIC) -fvisibility=hidden -DSTARS_SHARED -c -o $@ $<
+
+$(LIBA): $(LOBJ)
+	rm -f $@
+	$(AR) rcs $@ $(LOBJ)
+
+$(LIBSO): $(SOBJ)
+	$(CC) -shared -s -o $@ $(SOBJ)
+
+# The library against the emulator's own output, byte for byte.  Needs the
+# game beside the makefile, and uses the benchmark game too when it is there.
+# See tests/libtest.c.
+libtest: $(LIBTEST)
+	./$(LIBTEST) stars.exe $(if $(wildcard bench/golden10),bench)
+
+$(LIBTEST): tests/libtest.c $(SRCDIR)/stars.h $(LIBA)
+	$(CC) $(CFLAGS) -o $@ tests/libtest.c $(LIBA) -lpthread
+
 clean:
 	rm -rf build $(TARGET) $(FUZZER) $(PACKER) $(PROF) $(ONEFILE) \
-	       StarsVM.ico StarsVM_icon.rc
+	       $(LIBA) $(LIBSO) StarsVM.ico StarsVM_icon.rc
 
 -include $(DEP)

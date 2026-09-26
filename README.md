@@ -238,8 +238,55 @@ was a DOS call and nothing more, and the game reads its files the way that
 invites: a record's length word, its type word, then the record, one call
 each, 36,000 reads and 11,000 writes per generated turn, none of them
 seeking. Each was a `ReadFile` or `WriteFile`. A 16 KB buffer per handle,
-read-ahead or write-behind, turns that into a few hundred; `src/api_dos.c`
+read-ahead or write-behind, turns that into a few hundred; `src/fs_win32.c`
 says how it stays exact when two handles are the same file.
+
+## Hosting as a library
+
+The batch modes — a new game from a `.def` (`-a`), turn generation (`-g`) and
+the text dumps (`-d`) — also build as a C library with no Win32 underneath and
+no I/O of any kind, for a server that hosts games without a window or a disk in
+sight. `src/stars.h` is the whole interface:
+
+```c
+int stars_init(StarsVM **vm, StarsArena *perm, StarsBuf exe);
+int stars_newgame(StarsVM *vm, StarsArena *arena, StarsBuf def,
+                  const StarsFile *races, int nraces, StarsFS *out, StarsBuf *log);
+int stars_generate(StarsVM *vm, StarsArena *arena, int nturns, StarsFS *fs,
+                   StarsBuf *log);
+int stars_dump(StarsVM *vm, StarsArena *arena, const StarsFS *fs, int player,
+               StarsDump *out, StarsBuf *log);
+```
+
+The caller hands over `stars.exe` once, as bytes, and after that every game
+file goes in and comes out as a buffer: a `StarsFS` holds a game's `.hst`,
+`.xy` and each player's `.m`, `.x` and `.h`. Memory comes from an arena the
+caller owns, not from `malloc`; outputs point into it, and resetting its start
+pointer reclaims them. A call fails with a code rather than a dialog — a
+password it cannot answer is `STARS_EPASSWORD`, a game that stops to wait for
+something that is never coming is `STARS_EHUNG` — and a log buffer carries
+whatever the game had to say.
+
+```bash
+make lib        # libstars.a, and stars.dll or libstars.so
+make libtest    # the library against the emulator's output
+```
+
+It builds with any GCC or Clang that targets x86 or x86-64, on Windows or
+anywhere else: the game's floating point runs on the host's own x87, which is
+the one reason it is not portable further. Under it is the same interpreter,
+loader and KERNEL as the emulator's, with the Win32 halves swapped for an
+in-memory directory (`src/fs_mem.c`) and a window system that exists only as
+far as the game can tell (`src/headless.c`): windows and messages are real,
+painting never happens, and a message box is logged and answered. One call
+runs at a time per process.
+
+`make libtest` checks it the same way the bench checks the emulator: a new
+game, both players' dumps and two turns of it (`tests/newgame/`), and — when
+`bench/` is there — one and ten turns of the benchmark game, all byte for byte
+against what the emulator wrote under `--fixed-clock`, and all twice in one
+process. It passes identically on 32- and 64-bit Windows and Linux, with GCC
+and Clang.
 
 ## Sound
 

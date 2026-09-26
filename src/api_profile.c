@@ -18,6 +18,8 @@
 #include "sel.h"
 #include "gmem.h"
 #include "log.h"
+#include "profile.h"
+#include "port.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -25,18 +27,6 @@
 #include <wchar.h>
 #include <windows.h>
 
-/* When disabled, supply a fixed GlobalSettings for Stars.ini */
-#define GLOBAL_SETTINGS_PRESET "cXK3c0vpLLSpdAgeAMJdjUcWXpnp"  // EGGSWAIN
-
-/* Window Layout: 0 large, 1 medium, 2 small.  Asked with nothing in the file to
-   answer from, the game says medium, which is a 1995 reading of a roomy screen
-   - 800x600.  Every screen is large by that standard now, so a first run gets
-   the large layout instead.
-
-   A default, not an override: the game writes the layout back to Stars.ini on
-   the way out, so the moment a player picks one from the Window Layout menu
-   their choice is in the file and this never applies again. */
-#define LAYOUT_LARGE 0
 int prompt_serial = 0;
 
 static void pstr(uint32_t segptr, const char *s, unsigned max)
@@ -161,13 +151,13 @@ static int ini_get(const wchar_t *path, const char *section, const char *key,
                 const char *end = strchr(p, ']');
                 size_t n = end ? (size_t)(end - p - 1) : 0;
                 in_section = (n == strlen(section) &&
-                              _strnicmp(p + 1, section, n) == 0);
+                              ascii_ncasecmp(p + 1, section, n) == 0);
             } else if (in_section && *p && *p != ';') {
                 const char *eq = strchr(p, '=');
                 if (eq) {
                     size_t n = (size_t)(eq - p);
                     while (n && (p[n-1] == ' ' || p[n-1] == '\t')) n--;
-                    if (n == strlen(key) && _strnicmp(p, key, n) == 0) {
+                    if (n == strlen(key) && ascii_ncasecmp(p, key, n) == 0) {
                         snprintf(value, vlen, "%s", skip_ws(eq + 1));
                         trim(value);
                         found = 1;
@@ -226,7 +216,7 @@ static int ini_set(const wchar_t *path, const char *section, const char *key,
                     wrote = 1;
                 }
                 in_section = (n == strlen(section) &&
-                              _strnicmp(p + 1, section, n) == 0);
+                              ascii_ncasecmp(p + 1, section, n) == 0);
                 if (in_section) seen_section = 1;
                 if (in_section && !key) { continue; }   /* drop the section */
                 fprintf(out, "%s\r\n", saved);
@@ -238,7 +228,7 @@ static int ini_set(const wchar_t *path, const char *section, const char *key,
                 if (eq) {
                     size_t n = (size_t)(eq - p);
                     while (n && (p[n-1] == ' ' || p[n-1] == '\t')) n--;
-                    if (n == strlen(key) && _strnicmp(p, key, n) == 0) {
+                    if (n == strlen(key) && ascii_ncasecmp(p, key, n) == 0) {
                         if (value) { fprintf(out, "%s=%s\r\n", key, value); wrote = 1; }
                         continue;                       /* replaced or removed */
                     }
@@ -327,7 +317,7 @@ static uint32_t p_GetPrivateProfileInt(Cpu *c, Args *a)
 
     if (ini_get(path, sec, key, value, sizeof value))
         v = strtol(value, NULL, 0);
-    else if (!_stricmp(sec, "Windows") && !_stricmp(key, "Layout"))
+    else if (!ascii_casecmp(sec, "Windows") && !ascii_casecmp(key, "Layout"))
         v = LAYOUT_LARGE;
     else
         v = def;

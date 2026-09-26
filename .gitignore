@@ -6,6 +6,9 @@ StarsVM-pack.exe
 StarsVM-prof.exe
 StarsVM-harness.exe
 Stars-x86.exe
+libstars.a
+libstars.so
+stars.dll
 
 tags
 .gdb_history

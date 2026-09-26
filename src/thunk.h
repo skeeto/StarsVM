@@ -122,6 +122,10 @@ const char *thunk_last_missing(void);
 
 /* --------------------------------------------------------- host -> guest ---- */
 
+/* Allocate the selector call16's return addresses live in, and forget any
+   frames a previous run left behind.  0 on failure. */
+int      call16_init(void);
+
 /* Push `nbytes` of argument words and call the 16-bit procedure at `proc`.
    Returns DX:AX.
 
@@ -151,5 +155,13 @@ uint32_t call16_wndproc(uint32_t proc, uint16_t ax,
 
 /* True while any call16 frame is active. */
 int      call16_depth(void);
+
+#ifdef STARSVM_LIB
+/* The library's ceiling on a run, in instructions counted by cpu.icount, or 0
+   for none.  A callback that passes it is stopped as CPU_STEPS and the stop
+   latched, so the whole run unwinds: nothing that honest needs that long, and
+   the library has nobody to watch a game that has stopped making progress. */
+extern uint64_t call16_budget;
+#endif
 
 #endif
