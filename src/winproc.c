@@ -622,6 +622,22 @@ static void msg_to_16(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp,
         x->lp16 = (uint32_t)MAKELONG(LOWORD(lp), LOWORD(wp));
         break;
 
+    case EM_SETSEL:
+        /* Both ends back into the one lParam, start in the low word and end
+           in the high, as msg16.c found them; USER32's dialog manager sends
+           this one itself, EM_SETSEL(0, -1), to an edit control tabbed into.
+           Win16's wParam is a multiline control's scroll flag, 0 to scroll
+           the caret into view and 1 not to, and a single-line control
+           ignores it (KB Q102641, for the 3.1 SDK).  Win32's EM_SETSEL never
+           scrolls a multiline control and always scrolls a single-line one,
+           as Win16's did whatever the flag, so a multiline control is told
+           1, which is what is about to happen, and a single-line one 0,
+           which is what Win16 code passes.  Wine passes 0 to both, as its
+           own EM_SETSEL scrolls either kind. */
+        x->wp16 = (GetWindowLongA(hwnd, GWL_STYLE) & ES_MULTILINE) ? 1 : 0;
+        x->lp16 = (uint32_t)MAKELONG(LOWORD(wp), LOWORD(lp));
+        break;
+
     case WM_ACTIVATEAPP:
         /* Win16 passes a task handle here; a thread id means nothing to the
            guest, so hand it zero rather than a plausible-looking lie. */
