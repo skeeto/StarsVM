@@ -108,6 +108,17 @@ static int wp_is_index(UINT msg)
     }
 }
 
+/* What has to follow an edit's EM_SETSEL with this Win16 wParam.  The flag is
+   a multiline control's: 0 scrolls the caret into view and 1 does not (KB
+   Q102641).  Win32's EM_SETSEL never scrolls a multiline control, so 0 needs
+   an EM_SCROLLCARET after it.  A single-line control ignored the flag, and
+   Win32's scrolls one whatever it is told. */
+static UINT setsel_after(HWND hwnd, uint16_t flag)
+{
+    if (flag || !(GetWindowLongA(hwnd, GWL_STYLE) & ES_MULTILINE)) return 0;
+    return EM_SCROLLCARET;
+}
+
 /* The rewrites that need nothing but the message's own three values: the
    renumbering, an index's sign, a handle's 32-bit value, the pairs whose
    parameters Win32 packs differently.  Each undoes one of winproc.c's
@@ -138,13 +149,7 @@ void msg16_unpack(HWND hwnd, uint16_t msg16, uint16_t wp, uint32_t lp,
             m->wp = (WPARAM)LOWORD(lp);
             m->lp = (LPARAM)(int16_t)HIWORD(lp);
         }
-        /* The scroll flag is a multiline control's: 0 scrolls the caret into
-           view and 1 does not (KB Q102641).  Win32's EM_SETSEL never
-           scrolls a multiline control, so 0 needs an EM_SCROLLCARET after
-           it.  A single-line control ignored the flag, and Win32's scrolls
-           one whatever it is told. */
-        if (!wp && (GetWindowLongA(hwnd, GWL_STYLE) & ES_MULTILINE))
-            m->after = EM_SCROLLCARET;
+        m->after = setsel_after(hwnd, wp);
         break;
 
     /* ---- an index that can be -1 ------------------------------------------- */
@@ -275,8 +280,12 @@ void msg16_unpack(HWND hwnd, uint16_t msg16, uint16_t wp, uint32_t lp,
     }
 }
 
+/* `readable` is whether lParam is the guest's own to read through, when the
+   message takes it for a far pointer.  Without, the message is only sorted out
+   - where lParam goes, and whether it is a pointer - and guest memory is not
+   touched: a pointer that is not really one faults the guest (sel_bad). */
 static void marshal_in(HWND hwnd, uint16_t msg16, uint16_t wp, uint32_t lp,
-                       struct marshal *m)
+                       int readable, struct marshal *m)
 {
     struct msg32 v;
 
@@ -288,7 +297,7 @@ static void marshal_in(HWND hwnd, uint16_t msg16, uint16_t wp, uint32_t lp,
     m->after = v.after;
 
     if (lp_is_in_string(hwnd, m->msg)) {
-        g_str(lp, m->buf, sizeof m->buf);
+        if (readable) g_str(lp, m->buf, sizeof m->buf);
         m->lp = (LPARAM)m->buf;
         m->local = 1;
         return;
@@ -332,7 +341,7 @@ static void marshal_in(HWND hwnd, uint16_t msg16, uint16_t wp, uint32_t lp,
         /* The buffer's first word carries its own size, in and out. */
         m->out    = OUT_LINE;
         m->outp   = lp;
-        m->outmax = sel_rd16(SEGPTR_SEL(lp), SEGPTR_OFF(lp));
+        m->outmax = readable ? sel_rd16(SEGPTR_SEL(lp), SEGPTR_OFF(lp)) : 0;
         if (m->outmax > sizeof m->buf - 2) m->outmax = sizeof m->buf - 2;
         *(uint16_t *)m->buf = (uint16_t)m->outmax;
         m->lp = (LPARAM)m->buf;
@@ -359,8 +368,8 @@ static void marshal_in(HWND hwnd, uint16_t msg16, uint16_t wp, uint32_t lp,
 
     case EM_SETRECT:
     case EM_SETRECTNP: {
-        int16_t r16[4];
-        g_read(lp, r16, sizeof r16);
+        int16_t r16[4] = {0};
+        if (readable) g_read(lp, r16, sizeof r16);
         m->rect.left = r16[0]; m->rect.top = r16[1];
         m->rect.right = r16[2]; m->rect.bottom = r16[3];
         m->lp = (LPARAM)&m->rect;
@@ -383,7 +392,7 @@ static void marshal_in(HWND hwnd, uint16_t msg16, uint16_t wp, uint32_t lp,
         unsigned n = wp, i;
         if (n > sizeof m->tabs / sizeof m->tabs[0])
             n = sizeof m->tabs / sizeof m->tabs[0];
-        for (i = 0; i < n; i++)
+        for (i = 0; readable && i < n; i++)
             m->tabs[i] = (int16_t)sel_rd16(SEGPTR_SEL(lp),
                                            (uint16_t)(SEGPTR_OFF(lp) + i * 2));
         m->wp = n;
@@ -496,39 +505,130 @@ static uint32_t marshal_out(struct marshal *m, LRESULT r)
     return (uint32_t)r;
 }
 
-/* A send, or with `proc` a call of that procedure, which is the same thing
-   done by hand. */
-static uint32_t deliver(WNDPROC proc, HWND hwnd, uint16_t msg16, uint16_t wp,
-                        uint32_t lp)
+/* Whether marshal_in took lParam for a far pointer, to read through or to
+   write back to. */
+static int lp_is_far(const struct marshal *m)
 {
-    struct marshal m;
-    LRESULT r;
+    return m->local || (m->out != OUT_NONE && m->out != OUT_DATALEN);
+}
 
-    marshal_in(hwnd, msg16, wp, lp, &m);
-    if (m.refuse) {
+/* The three ways out: a send, a call of the procedure the guest names to
+   CallWindowProc - which is the same thing done by hand - and DefWindowProc. */
+enum { VIA_SEND, VIA_PROC, VIA_DEFAULT };
+
+static LRESULT via(int how, WNDPROC proc, HWND hwnd, UINT msg, WPARAM wp,
+                   LPARAM lp)
+{
+    switch (how) {
+    case VIA_PROC:    return CallWindowProcA(proc, hwnd, msg, wp, lp);
+    case VIA_DEFAULT: return winproc_default(hwnd, msg, wp, lp);
+    default:          return SendMessageA(hwnd, msg, wp, lp);
+    }
+}
+
+static uint32_t deliver(int how, WNDPROC proc, HWND hwnd, uint16_t msg16,
+                        uint16_t wp, struct marshal *m)
+{
+    LRESULT r;
+    int carried = 0;
+
+    if (m->refuse) {
         log_msg("*** guest sent message %04X (Win32 %04X) by hand; its lParam is "
-                "a 16-bit struct with no translation on this path\n", msg16, m.msg);
+                "a 16-bit struct with no translation on this path\n", msg16, m->msg);
         return 0;
     }
-    if (proc) {
-        r = CallWindowProcA(proc, hwnd, m.msg, m.wp, m.lp);
-        if (m.after) CallWindowProcA(proc, hwnd, m.after, 0, 0);
-    } else {
-        r = SendMessageA(hwnd, m.msg, m.wp, m.lp);
-        if (m.after) SendMessageA(hwnd, m.after, 0, 0);
+    /* An edit's scroll after EM_SETSEL is the edit's own doing, which is
+       neither DefWindowProc's nor, before it passes the message on, a
+       subclass's.  Sent to an edit the guest has subclassed, the flag goes
+       with it for the subclass to be handed, and the scroll follows only if
+       the subclass passes on a 0 (see msg16_call). */
+    if (m->msg == EM_SETSEL && how == VIA_DEFAULT) {
+        m->after = 0;
+    } else if (m->msg == EM_SETSEL && how == VIA_SEND && winproc_get(hwnd)) {
+        winproc_sending_setsel(hwnd, m->wp, m->lp, wp);
+        carried = 1;
+        m->after = 0;
     }
-    return marshal_out(&m, r);
+    r = via(how, proc, hwnd, m->msg, m->wp, m->lp);
+    if (carried) winproc_sending_setsel(NULL, 0, 0, 0);
+    if (m->after) via(how, proc, hwnd, m->after, 0, 0);
+    return marshal_out(m, r);
 }
 
 uint32_t msg16_send(HWND hwnd, uint16_t msg16, uint16_t wp, uint32_t lp)
 {
-    return deliver(NULL, hwnd, msg16, wp, lp);
+    struct marshal m;
+
+    marshal_in(hwnd, msg16, wp, lp, 1, &m);
+    return deliver(VIA_SEND, NULL, hwnd, msg16, wp, &m);
+}
+
+/* ---- a message the guest passes on ------------------------------------------ */
+
+/* A guest window procedure passes what it does not handle on: to DefWindowProc,
+   or with CallWindowProc to the procedure it subclassed, which for a stock
+   control is the control's own.  The message it is itself being dispatched,
+   passed on as it was handed over, gets USER32's own parameters back (see
+   winproc_inflight): its own pointers, and values at their full width.
+
+   Anything else goes out as a send does, marshaled, but to the procedure: a
+   message the guest makes up, and the one in flight when the guest has changed
+   it before passing it on.  That is how an edit subclass that uppercases
+   WM_CHAR's character, or narrows an EM_SETSEL or clears its scroll flag, gets
+   what it asked for, where the originals would undo it.  Two changes cannot be
+   honoured, and get the originals as before.  One is to a message whose
+   lParam is a struct copied onto the guest's stack, which nothing on this side
+   widens back.  The other is a new wParam with lParam as handed over, when
+   that lParam is a pointer: WM_GETTEXT with a smaller count, say.  The guest
+   was handed a host pointer there - WM_SETTEXT and WM_GETTEXT arrive that way,
+   and so does a buffer the guest sent a subclass of its own, once marshaled -
+   and read as a far pointer it names whatever selector its high half happens
+   to. */
+static uint32_t pass_original(int how, WNDPROC proc, const struct inflight *f,
+                              uint16_t wp, uint32_t lp)
+{
+    const struct inflight o = *f;      /* the call below can reenter */
+    LRESULT r = via(how, proc, o.hwnd, o.msg32, o.wp32, o.lp32);
+    int type = winproc_ret_handle_type(o.msg32);
+
+    if (how == VIA_DEFAULT)
+        winproc_refresh_struct(o.hwnd, o.msg32, o.wp32, o.lp32, lp);
+    else if (o.msg32 == EM_SETSEL && msg16_to_32(o.hwnd, o.msg16) == EM_SETSEL
+             && setsel_after(o.hwnd, wp))
+        via(how, proc, o.hwnd, EM_SCROLLCARET, 0, 0);
+
+    /* DefWindowProc answers WM_CTLCOLOR* with a real HBRUSH.  Handed back raw,
+       the guest returns its low 16 bits to winproc_bridge, which maps that
+       through the handle table and gets NULL - or, once the table has grown
+       past that index, somebody else's brush.  Map it here. */
+    if (type != H_NONE) return h16(type, (void *)(uintptr_t)r);
+    return (uint32_t)r;
+}
+
+static uint32_t pass_on(int how, WNDPROC proc, HWND hwnd, uint16_t msg16,
+                        uint16_t wp, uint32_t lp)
+{
+    const struct inflight *f = winproc_inflight(hwnd, msg16);
+    int handed_lp = f && lp == f->lp16;
+    struct marshal m;
+
+    if (f && (f->onstack || (handed_lp && wp == f->wp16)))
+        return pass_original(how, proc, f, wp, lp);
+    marshal_in(hwnd, msg16, wp, lp, !handed_lp, &m);
+    if (handed_lp && lp_is_far(&m))
+        return pass_original(how, proc, f, wp, lp);
+    return deliver(how, proc, hwnd, msg16, wp, &m);
 }
 
 uint32_t msg16_call(WNDPROC proc, HWND hwnd, uint16_t msg16, uint16_t wp,
                     uint32_t lp)
 {
-    return deliver(proc, hwnd, msg16, wp, lp);
+    return pass_on(VIA_PROC, proc, hwnd, msg16, wp, lp);
+}
+
+uint32_t msg16_default(HWND hwnd, uint16_t msg16, uint16_t wp, uint32_t lp)
+{
+    return pass_on(VIA_DEFAULT, NULL, hwnd, msg16, wp, lp);
 }
 
 /* The messages Win32 will not post whatever their lParam, where marshal_in
@@ -558,7 +658,7 @@ uint32_t msg16_post(HWND hwnd, uint16_t msg16, uint16_t wp, uint32_t lp)
 {
     struct marshal m;
 
-    marshal_in(hwnd, msg16, wp, lp, &m);
+    marshal_in(hwnd, msg16, wp, lp, 1, &m);
     if (m.refuse) return msg16_send(hwnd, msg16, wp, lp);  /* which says why */
 
     /* A post outlives this call, so anything that had to be copied into a local

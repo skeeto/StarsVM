@@ -25,9 +25,12 @@ uint32_t msg16_send(HWND hwnd, uint16_t msg16, uint16_t wp, uint32_t lp);
 uint32_t msg16_post(HWND hwnd, uint16_t msg16, uint16_t wp, uint32_t lp);
 
 /* The same for a message the guest hands a real window procedure with
-   CallWindowProc, calling `proc` rather than sending. */
+   CallWindowProc, calling `proc` rather than sending, or hands DefWindowProc.
+   The message being dispatched to the guest, passed on as it was handed over,
+   gets USER32's own parameters back instead. */
 uint32_t msg16_call(WNDPROC proc, HWND hwnd, uint16_t msg16, uint16_t wp,
                     uint32_t lp);
+uint32_t msg16_default(HWND hwnd, uint16_t msg16, uint16_t wp, uint32_t lp);
 
 /* A message in Win32's form as far as its parameters are values, which is as
    far as a posted one needs: nothing that carries a pointer is posted.  The

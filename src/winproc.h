@@ -41,10 +41,29 @@ uint32_t    class_proc(const char *name);
 /* The class's lpszMenuName, as a name in the guest's resources. */
 const char *class_menu(const char *name);
 
-/* Recover the original 32-bit parameters of the message currently being
-   dispatched to guest code, so a forward to DefWindowProc can use them. */
-int      winproc_original(HWND hwnd, UINT msg16, UINT *msg32,
-                          WPARAM *wp, LPARAM *lp);
+/* A message being dispatched to a guest procedure: what USER32 sent, and what
+   the guest was handed for it, so that a forward of it (msg16_call,
+   msg16_default) can tell whether the guest changed it. */
+struct inflight {
+    HWND     hwnd;
+    UINT     msg16;
+    uint16_t wp16;          /* what the guest procedure was handed      */
+    uint32_t lp16;
+    int      onstack;       /* lParam, a struct copied onto its stack   */
+    UINT     msg32;         /* what USER32 sent                         */
+    WPARAM   wp32;
+    LPARAM   lp32;
+};
+
+/* The innermost message in flight to this window with this Win16 number, or
+   NULL. */
+const struct inflight *winproc_inflight(HWND hwnd, UINT msg16);
+
+/* The scroll flag of an EM_SETSEL the guest is sending to an edit it has
+   subclassed, for its procedure to be handed; hwnd NULL when the send is
+   over. */
+void     winproc_sending_setsel(HWND hwnd, WPARAM start, LPARAM end,
+                                uint16_t flag);
 
 /* Renumber a message between Win32 and Win16.  Only a stock control's own
    messages differ.  Going to Win32 only the class of the window it is going

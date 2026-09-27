@@ -317,37 +317,28 @@ int msg_win16(UINT msg)
 
 /* ---- the message currently being dispatched -------------------------------- */
 
-/* When guest code forwards a message to DefWindowProc, the parameters it hands
-   back are the 16-bit ones we gave it - and for anything carrying a pointer
-   (WM_NCCREATE and WM_CREATE above all) those are segmented addresses that real
-   USER32 cannot dereference.  Converting back is not possible in general, but it
-   is never necessary either: the original 32-bit parameters are right here.  So
-   keep a small stack of in-flight messages and reuse the originals.
+/* When guest code forwards a message to DefWindowProc, or to the procedure it
+   subclassed, the parameters it hands back are the 16-bit ones we gave it - and
+   for anything carrying a pointer (WM_NCCREATE and WM_CREATE above all) those
+   are segmented addresses that real USER32 cannot dereference, or a host
+   pointer cut to 32 bits.  Converting back is not possible in general, but it
+   is not necessary either when the guest passes on what it was given: the
+   original 32-bit parameters are right here.  So keep a small stack of
+   in-flight messages, with what the guest was handed for each, and msg16.c
+   reuses the originals when that is what comes back.
    It is a stack rather than a single slot because a window procedure can be
    reentered while another message is still being dispatched. */
 #define MAX_INFLIGHT 32
-static struct {
-    HWND   hwnd;
-    UINT   msg16;
-    UINT   msg32;
-    WPARAM wp32;
-    LPARAM lp32;
-} inflight[MAX_INFLIGHT];
+static struct inflight inflight[MAX_INFLIGHT];
 static int inflight_depth;
 
-static int inflight_push(HWND hwnd, UINT msg16, UINT msg32,
-                         WPARAM wp32, LPARAM lp32)
+static int inflight_push(const struct inflight *f)
 {
     /* Returning whether it pushed matters: an unconditional pop after a refused
-       push walks the top down into a live outer frame, and winproc_original
+       push walks the top down into a live outer frame, and winproc_inflight
        would then hand DefWindowProc some other message's parameters. */
     if (inflight_depth >= MAX_INFLIGHT) return 0;
-    inflight[inflight_depth].hwnd  = hwnd;
-    inflight[inflight_depth].msg16 = msg16;
-    inflight[inflight_depth].msg32 = msg32;
-    inflight[inflight_depth].wp32  = wp32;
-    inflight[inflight_depth].lp32  = lp32;
-    inflight_depth++;
+    inflight[inflight_depth++] = *f;
     return 1;
 }
 
@@ -356,19 +347,39 @@ static void inflight_pop(void)
     if (inflight_depth > 0) inflight_depth--;
 }
 
-/* Find the innermost in-flight message matching this window and 16-bit message
-   number, and recover its original 32-bit parameters. */
-int winproc_original(HWND hwnd, UINT msg16, UINT *msg32, WPARAM *wp, LPARAM *lp)
+const struct inflight *winproc_inflight(HWND hwnd, UINT msg16)
 {
     int i;
     for (i = inflight_depth - 1; i >= 0; i--)
-        if (inflight[i].hwnd == hwnd && inflight[i].msg16 == msg16) {
-            *msg32 = inflight[i].msg32;
-            *wp = inflight[i].wp32;
-            *lp = inflight[i].lp32;
-            return 1;
-        }
-    return 0;
+        if (inflight[i].hwnd == hwnd && inflight[i].msg16 == msg16)
+            return &inflight[i];
+    return NULL;
+}
+
+/* ---- an EM_SETSEL on its way out -------------------------------------------- */
+
+/* Win16's EM_SETSEL carries a flag that Win32's has no room for: 0 to scroll a
+   multiline control's caret into view, 1 not to.  When the guest sends one to
+   an edit it has subclassed, its own procedure has to be handed the flag it
+   sent, so that whether the scroll happens is up to that procedure - pass the
+   message on as it came and it scrolls, change the flag or keep the message
+   and it does not - as it was in Win16, where the scroll was part of the
+   edit's own EM_SETSEL.  The only way there is through SendMessage, so msg16.c
+   leaves the flag here for the length of the send, and msg_to_16 takes it for
+   the first EM_SETSEL through with the same window and ends. */
+static struct {
+    HWND     hwnd;
+    WPARAM   start;
+    LPARAM   end;
+    uint16_t flag;
+} setsel_out;
+
+void winproc_sending_setsel(HWND hwnd, WPARAM start, LPARAM end, uint16_t flag)
+{
+    setsel_out.hwnd  = hwnd;
+    setsel_out.start = start;
+    setsel_out.end   = end;
+    setsel_out.flag  = flag;
 }
 
 /* ---- the bridge ----------------------------------------------------------- */
@@ -674,10 +685,18 @@ static void msg_to_16_values(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp,
            passes.  Wine passes 0 to both, as its own EM_SETSEL scrolls
            either kind.  A control of another class gets it too, from the
            dialog manager, when it answers DLGC_HASSETSEL; its style's
-           ES_MULTILINE bit means something else, and it is told 0. */
+           ES_MULTILINE bit means something else, and it is told 0.  When
+           the guest sent this one, it gets the flag it sent: see
+           winproc_sending_setsel. */
+        x->lp16 = (uint32_t)MAKELONG(LOWORD(wp), LOWORD(lp));
+        if (setsel_out.hwnd == hwnd && setsel_out.start == wp &&
+            setsel_out.end == lp) {
+            x->wp16 = setsel_out.flag;
+            setsel_out.hwnd = NULL;
+            break;
+        }
         x->wp16 = msg16_to_32(hwnd, x->msg16) == EM_SETSEL
                && (GetWindowLongA(hwnd, GWL_STYLE) & ES_MULTILINE);
-        x->lp16 = (uint32_t)MAKELONG(LOWORD(wp), LOWORD(lp));
         break;
 
     case WM_ACTIVATEAPP:
@@ -824,6 +843,7 @@ uint32_t winproc_call16(HWND hwnd, uint32_t proc16, uint16_t hinst,
     uint16_t args[5];
     uint8_t  extra[64], before[64];
     struct xlat x;
+    struct inflight f;
     uint32_t r;
     int pushed;
 
@@ -837,12 +857,23 @@ uint32_t winproc_call16(HWND hwnd, uint32_t proc16, uint16_t hinst,
     args[1] = (uint16_t)(x.lp16 >> 16);
     args[0] = (uint16_t)x.lp16;
 
-    /* Record the ORIGINAL 32-bit parameters, not the translated ones: this is
-       what a forward to DefWindowProc is restored from, and recording the
-       translated pair would hand USER32 a 16-bit handle. */
     memcpy(before, extra, sizeof before);
 
-    pushed = inflight_push(hwnd, x.msg16, msg, wp, lp);
+    /* Record the ORIGINAL 32-bit parameters beside the translated ones: they
+       are what a forward is restored from, and the translated pair would hand
+       USER32 a 16-bit handle.  The translated pair is for telling whether the
+       guest forwards what it was handed.  A struct's far pointer is made by
+       call16_wndproc, on a stack we do not see from here, so onstack stands
+       in for it. */
+    f.hwnd    = hwnd;
+    f.msg16   = x.msg16;
+    f.wp16    = x.wp16;
+    f.lp16    = x.lp16;
+    f.onstack = x.extralen != 0;
+    f.msg32   = msg;
+    f.wp32    = wp;
+    f.lp32    = lp;
+    pushed = inflight_push(&f);
     r = call16_wndproc(proc16, hinst, args, sizeof args,
                        x.extralen ? extra : NULL, x.extralen);
     if (pushed) inflight_pop();

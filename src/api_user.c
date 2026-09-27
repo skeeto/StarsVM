@@ -341,30 +341,14 @@ static uint32_t u_DefWindowProc(Cpu *c, Args *a)
     uint16_t msg    = arg_word(a);
     uint16_t wp     = arg_word(a);
     uint32_t lp     = arg_long(a);
-    HWND hwnd = HWND_32(hwnd16);
-    UINT msg32;
-    WPARAM wp32;
-    LPARAM lp32;
 
     (void)c;
-    /* If this is the message we are currently dispatching, hand USER32 back the
-       parameters it gave us.  Anything carrying a pointer - WM_NCCREATE and
-       WM_CREATE especially - would otherwise arrive as a segmented address that
-       USER32 cannot dereference. */
-    if (winproc_original(hwnd, msg, &msg32, &wp32, &lp32)) {
-        LRESULT r = winproc_default(hwnd, msg32, wp32, lp32);
-        int type = winproc_ret_handle_type(msg32);
-        winproc_refresh_struct(hwnd, msg32, wp32, lp32, lp);
-        /* DefWindowProc answers WM_CTLCOLOR* with a real HBRUSH.  Handed back
-           raw, the guest returns its low 16 bits to winproc_bridge, which maps
-           that through the handle table and gets NULL - or, once the table has
-           grown past that index, somebody else's brush.  Map it here. */
-        if (type != H_NONE) return h16(type, (void *)(uintptr_t)r);
-        return (uint32_t)r;
-    }
-
-    return (uint32_t)winproc_default(hwnd, (UINT)msg16_to_32(hwnd, msg), wp,
-                                     (LPARAM)lp);
+    /* The message we are dispatching, passed on as it came, gets back the
+       parameters USER32 gave us.  Anything carrying a pointer - WM_NCCREATE
+       and WM_CREATE especially - would otherwise arrive as a segmented address
+       that USER32 cannot dereference.  Anything else is marshaled as a send
+       is, which keeps whatever the guest changed. */
+    return msg16_default(HWND_32(hwnd16), msg, wp, lp);
 }
 
 static uint32_t u_GetClientRect(Cpu *c, Args *a)
@@ -1175,20 +1159,12 @@ static uint32_t u_CallWindowProc(Cpu *c, Args *a)
 
     (void)c;
     if (host) {
-        /* A wrapped host procedure: use the original 32-bit parameters when this
-           is the message we are dispatching.  Any other message the guest made
-           up itself, and it goes the way of one it sends: renumbered for the
-           window's class alone, a far pointer would reach USER32 as a flat
-           address, and EM_SETSEL's two ends would select the whole field. */
-        UINT msg32;
-        WPARAM wp32;
-        LPARAM lp32;
-        if (winproc_original(hwnd, msg, &msg32, &wp32, &lp32)) {
-            LRESULT r = CallWindowProcA(host, hwnd, msg32, wp32, lp32);
-            int type = winproc_ret_handle_type(msg32);
-            if (type != H_NONE) return h16(type, (void *)(uintptr_t)r);
-            return (uint32_t)r;
-        }
+        /* A wrapped host procedure: the original 32-bit parameters when this is
+           the message we are dispatching, passed on as it came.  Anything else
+           the guest made up or changed itself, and it goes the way of one it
+           sends: renumbered for the window's class alone, a far pointer would
+           reach USER32 as a flat address, and EM_SETSEL's two ends would select
+           the whole field. */
         return msg16_call(host, hwnd, msg, wp, lp);
     }
     {   /* A guest procedure: 16 to 16 needs no translation. */
