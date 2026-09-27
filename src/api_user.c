@@ -427,8 +427,14 @@ static void get_msg16(uint32_t p, MSG *m)
    The queue is drained regardless of what the caller asked for: a wheel message
    outside the guest's filter would otherwise sit there for good.  The two
    wheels are drained separately rather than as a range, because the range
-   between them is the X buttons, which are the guest's business. */
-static int wheel_drain_one(UINT wheel)
+   between them is the X buttons, which have no reason to jump the queue.
+
+   The wheel is the one message the guest must not see that it has a use for.
+   The rest are the ones Win16 never had (msg_win16), and they are kept from its
+   loop the same way, dispatched here as they come up. */
+
+/* Take the next `msg` for `hwnd` out of the queue and dispatch it here. */
+static int drain_one(HWND hwnd, UINT msg)
 {
     MSG m;
 
@@ -438,18 +444,18 @@ static int wheel_drain_one(UINT wheel)
        PM_REMOVE loop swallows the game's own Exit.  It then destroys its
        windows, posts the quit nobody will ever see, and sits in GetMessage
        forever with nothing on screen. */
-    if (!PeekMessageA(&m, NULL, wheel, wheel, PM_NOREMOVE)) return 0;
-    if (m.message != wheel) return 0;                /* the quit; leave it be */
-    if (!PeekMessageA(&m, NULL, wheel, wheel, PM_REMOVE)) return 0;
+    if (!PeekMessageA(&m, hwnd, msg, msg, PM_NOREMOVE)) return 0;
+    if (m.message != msg) return 0;                  /* the quit; leave it be */
+    if (!PeekMessageA(&m, hwnd, msg, msg, PM_REMOVE)) return 0;
     DispatchMessageA(&m);
     return 1;
 }
 
 static void wheel_dispatch(void)
 {
-    while (wheel_drain_one(WM_MOUSEWHEEL))
+    while (drain_one(NULL, WM_MOUSEWHEEL))
         ;
-    while (wheel_drain_one(WM_MOUSEHWHEEL))
+    while (drain_one(NULL, WM_MOUSEHWHEEL))
         ;
 }
 
@@ -463,14 +469,14 @@ static uint32_t u_GetMessage(Cpu *c, Args *a)
 
     (void)c;
     /* Draining before the call is not enough on its own: this blocks, and a
-       wheel turned while it is blocked comes back as the message it returns. */
+       wheel turned while it is blocked comes back as the message it returns.
+       The wheels are not Win16 messages, so this one test catches both. */
     for (;;) {
         harness_pump();
         wheel_dispatch();
         r = GetMessageA(&m, HWND_32(hwnd), first, last);
         if (r == -1) return 0;
-        if (!r || (m.message != WM_MOUSEWHEEL && m.message != WM_MOUSEHWHEEL))
-            break;
+        if (!r || msg_win16(m.message)) break;
         DispatchMessageA(&m);
     }
     put_msg16(p, &m);
@@ -488,7 +494,16 @@ static uint32_t u_PeekMessage(Cpu *c, Args *a)
     (void)c;
     harness_pump();
     wheel_dispatch();
-    if (!PeekMessageA(&m, HWND_32(hwnd), first, last, flags)) return 0;
+    /* What the guest must not see is dispatched here and the peek looks again,
+       so it is told only of what is behind.  One it was merely looking at has
+       to come out of the queue first; should that fail, the guest sees it
+       after all, as it always used to, rather than this peeking forever. */
+    for (;;) {
+        if (!PeekMessageA(&m, HWND_32(hwnd), first, last, flags)) return 0;
+        if (msg_win16(m.message)) break;
+        if (flags & PM_REMOVE) DispatchMessageA(&m);
+        else if (!drain_one(HWND_32(hwnd), m.message)) break;
+    }
     put_msg16(p, &m);
     return 1;
 }

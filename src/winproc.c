@@ -197,6 +197,53 @@ uint32_t msg16_to_32(uint32_t msg)
     return msg;
 }
 
+/* Whether the guest can know what a message means, which below WM_USER is
+   whether Windows 3.1 had it.  Win32 has been adding system messages ever
+   since, and sends them to every window: WM_GETICON to draw its caption, the
+   WM_UAH* messages carrying host pointers to draw a themed menu bar, the
+   compositor's notifications and registered messages through the queue.  To
+   the guest each is a number it has never heard of, handed to DefWindowProc
+   at the cost of a window procedure call or a turn of its message loop.  And
+   some come from other threads whenever those get round to it - the shell
+   asks a new top-level window for its icon too - so whether they arrive
+   before the game exits is down to timing, which made a --fixed-clock run's
+   instruction count vary, 32 at a time.
+
+   The ranges are Windows 3.1's own numbers, undocumented ones included, so
+   nothing the guest could have been sent under Win16 is lost.  From WM_USER
+   up to the registered range a number is private to its window class or
+   application, which is the guest's business; a registered message is the
+   host's, since the guest registers none. */
+int msg_win16(UINT msg)
+{
+    static const struct { uint16_t lo, hi; } known[] = {
+        { 0x0000, 0x0024 },     /* WM_NULL .. WM_GETMINMAXINFO           */
+        { 0x0026, 0x0031 },     /* WM_PAINTICON .. WM_GETFONT            */
+        { 0x0035, 0x0039 },     /* WM_ISACTIVEICON .. WM_COMPAREITEM     */
+        { 0x0041, 0x0048 },     /* WM_COMPACTING .. WM_POWER             */
+        { 0x0081, 0x0089 },     /* WM_NCCREATE .. WM_SYNCTASK            */
+        { 0x00A0, 0x00A9 },     /* the non-client mouse                  */
+        { 0x0100, 0x0108 },     /* the keyboard                          */
+        { 0x0110, 0x0118 },     /* WM_INITDIALOG .. WM_SYSTIMER          */
+        { 0x011F, 0x0121 },     /* WM_MENUSELECT .. WM_ENTERIDLE         */
+        { 0x0132, 0x0138 },     /* Win32's WM_CTLCOLOR, split seven ways */
+        { 0x0200, 0x0209 },     /* the mouse                             */
+        { 0x0210, 0x0212 },     /* WM_PARENTNOTIFY, the menu loop        */
+        { 0x0220, 0x0234 },     /* MDI, drag and drop, size and move     */
+        { 0x0300, 0x0311 },     /* the clipboard and the palette         */
+        { 0x0380, 0x039F },     /* pen windows, coalescing               */
+        { 0x03E0, 0x03E8 },     /* DDE                                   */
+    };
+    size_t i;
+
+    if (msg >= WM_USER) return msg < 0xC000;
+    /* The control messages Win32 renumbered below WM_USER. */
+    if (msg32_to_16(msg) != msg) return 1;
+    for (i = 0; i < sizeof known / sizeof known[0]; i++)
+        if (msg >= known[i].lo && msg <= known[i].hi) return 1;
+    return 0;
+}
+
 /* ---- the message currently being dispatched -------------------------------- */
 
 /* When guest code forwards a message to DefWindowProc, the parameters it hands
@@ -819,6 +866,18 @@ LRESULT CALLBACK winproc_bridge(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
        answered on this side, where the delta is still 32 bits wide. */
     if (msg == WM_MOUSEWHEEL || msg == WM_MOUSEHWHEEL)
         return winproc_wheel(hwnd, msg, wp, lp);
+
+    /* Nor any other message Win16 never had.  All the guest could do with one
+       is pass it down to its default, so the default gets it directly: the
+       control's own procedure when the guest has subclassed a stock control,
+       and otherwise DefWindowProc, which is where every class of the game's
+       sends what it does not handle. */
+    if (!msg_win16(msg)) {
+        WNDPROC cls = (WNDPROC)(uintptr_t)GetClassLongPtrA(hwnd, GCLP_WNDPROC);
+        if (cls && cls != winproc_bridge)
+            return CallWindowProcA(cls, hwnd, msg, wp, lp);
+        return DefWindowProcA(hwnd, msg, wp, lp);
+    }
 
     /* No harness pump here.  Every window message is dispatched from the guest's
    own loop, which reaches GetMessage and pumps there, so pumping again inside

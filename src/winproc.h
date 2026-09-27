@@ -49,6 +49,10 @@ int      winproc_original(HWND hwnd, UINT msg16, UINT *msg32,
 uint32_t msg32_to_16(uint32_t msg);
 uint32_t msg16_to_32(uint32_t msg);
 
+/* Whether a Win32 message is one Win16 had, so that the guest can know what it
+   means.  Those that are not are answered on this side and never reach it. */
+int      msg_win16(UINT msg);
+
 /* Translate a message into Win16 form and run `proc16` with it.  Shared by the
    window-procedure bridge and the dialog-procedure bridge; *ret_handle comes
    back as the H_* type when the guest's result is a handle. */
