@@ -396,8 +396,7 @@ static void put_msg16(uint32_t p, const MSG *m)
 {
     uint16_t sel = SEGPTR_SEL(p), off = SEGPTR_OFF(p);
     sel_wr16(sel, off,               HWND_16(m->hwnd));
-    sel_wr16(sel, (uint16_t)(off+2),
-             (uint16_t)msg32_to_16(m->hwnd, m->message));
+    sel_wr16(sel, (uint16_t)(off+2), (uint16_t)msg32_to_16(m->message));
     sel_wr16(sel, (uint16_t)(off+4), (uint16_t)m->wParam);
     sel_wr32(sel, (uint16_t)(off+6), (uint32_t)m->lParam);
     sel_wr32(sel, (uint16_t)(off+10),m->time);
@@ -478,7 +477,7 @@ static uint32_t u_GetMessage(Cpu *c, Args *a)
         wheel_dispatch();
         r = GetMessageA(&m, HWND_32(hwnd), first, last);
         if (r == -1) return 0;
-        if (!r || msg_win16(m.hwnd, m.message)) break;
+        if (!r || msg_win16(m.message)) break;
         DispatchMessageA(&m);
     }
     put_msg16(p, &m);
@@ -502,7 +501,7 @@ static uint32_t u_PeekMessage(Cpu *c, Args *a)
        after all, as it always used to, rather than this peeking forever. */
     for (;;) {
         if (!PeekMessageA(&m, HWND_32(hwnd), first, last, flags)) return 0;
-        if (msg_win16(m.hwnd, m.message)) break;
+        if (msg_win16(m.message)) break;
         if (flags & PM_REMOVE) DispatchMessageA(&m);
         else if (!drain_one(HWND_32(hwnd), m.message)) break;
     }

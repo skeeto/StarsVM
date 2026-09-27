@@ -181,10 +181,19 @@ void winproc_set_pending(uint32_t proc16, uint16_t hinst)
 /* Win16 numbered each stock control's messages from WM_USER, so BM_GETCHECK,
    EM_GETSEL and CB_GETEDITSEL are all 0x0400 and only the window's class says
    which one is meant; Win32 gave each class a block of its own below WM_USER.
-   So a number is renumbered only for a window of the class it belongs to.  To
-   any other window a number from WM_USER up is its own business - the game
-   posts its frame WM_USER+100 - and it has to arrive as it was sent, whichever
-   way it goes round.
+   So on the way out a number is renumbered only for a window of the class it
+   belongs to.  To any other window a number from WM_USER up is its own
+   business - the game posts its frame WM_USER+100 - and it has to arrive as
+   it was sent, whichever way it goes round.
+
+   On the way back the blocks do not overlap, so the number alone says which
+   message it is, and it becomes the Win16 number whatever the window.  That
+   is how Windows 3.1 had it: USER sends BM_SETCHECK to whatever dialog item
+   CheckDlgButton names, and EM_SETSEL and BM_SETSTYLE to whatever control
+   answers WM_GETDLGCODE for them, and a control of a program's own class got
+   the same WM_USER numbers a button or an edit did.  Wine's 16-bit USER goes
+   by number this way too (WINPROC_CallProc32ATo16).  It cannot catch a
+   number of the guest's own, which goes out from WM_USER up whatever it is.
 
    The blocks run as far as Win16's did (Wine's winuser16.h has them all).
    Win32 went on adding to the end of each - BM_CLICK, EM_SETMARGINS,
@@ -211,39 +220,43 @@ static int ctl_has(const struct ctlblock *b, uint32_t msg, int win16)
     return msg - (win16 ? b->msg16 : b->msg32) < b->count;
 }
 
-/* The block `msg` is in for `hwnd`, numbered as Win16 had it when `win16`:
-   NULL unless the window is a stock control and the number is one of its
-   class's.  RealGetWindowClass names the class whose procedure the window
-   really runs, so a control the guest has subclassed is still what it was,
-   and so is a class of its own that it built on one.  Windows 11 calls a
-   combo box's list a ListBox that way too; the ComboLBox row is for a host
-   that calls it by its own name.  The class is looked up only for a number
-   some block has, which leaves out nearly everything. */
-static const struct ctlblock *ctl_block(HWND hwnd, uint32_t msg, int win16)
+/* The block the Win16 `msg` is in for `hwnd`: NULL unless the window is a
+   stock control and the number is one of its class's.  RealGetWindowClass
+   names the class whose procedure the window really runs, so a control the
+   guest has subclassed is still what it was, and so is a class of its own
+   that it built on one.  Windows 11 calls a combo box's list a ListBox that
+   way too; the ComboLBox row is for a host that calls it by its own name.
+   The class is looked up only for a number some block has, which leaves out
+   nearly everything. */
+static const struct ctlblock *ctl_block(HWND hwnd, uint32_t msg)
 {
     const size_t n = sizeof ctlblocks / sizeof ctlblocks[0];
     char cls[16];
     size_t i;
 
-    for (i = 0; i < n && !ctl_has(&ctlblocks[i], msg, win16); i++)
+    for (i = 0; i < n && !ctl_has(&ctlblocks[i], msg, 1); i++)
         ;
     if (i == n || !hwnd || !RealGetWindowClassA(hwnd, cls, sizeof cls))
         return NULL;
     for (i = 0; i < n; i++)
         if (!_stricmp(cls, ctlblocks[i].cls))
-            return ctl_has(&ctlblocks[i], msg, win16) ? &ctlblocks[i] : NULL;
+            return ctl_has(&ctlblocks[i], msg, 1) ? &ctlblocks[i] : NULL;
     return NULL;
 }
 
-uint32_t msg32_to_16(HWND hwnd, uint32_t msg)
+uint32_t msg32_to_16(uint32_t msg)
 {
-    const struct ctlblock *b = ctl_block(hwnd, msg, 0);
-    return b ? msg - b->msg32 + b->msg16 : msg;
+    size_t i;
+
+    for (i = 0; i < sizeof ctlblocks / sizeof ctlblocks[0]; i++)
+        if (ctl_has(&ctlblocks[i], msg, 0))
+            return msg - ctlblocks[i].msg32 + ctlblocks[i].msg16;
+    return msg;
 }
 
 uint32_t msg16_to_32(HWND hwnd, uint32_t msg)
 {
-    const struct ctlblock *b = ctl_block(hwnd, msg, 1);
+    const struct ctlblock *b = ctl_block(hwnd, msg);
     return b ? msg - b->msg16 + b->msg32 : msg;
 }
 
@@ -263,14 +276,14 @@ uint32_t msg16_to_32(HWND hwnd, uint32_t msg)
    Schulman et al., Undocumented Windows, 1992, lists them), and MMSYSTEM's,
    whose MM_MCINOTIFY the game's frame window handles; so nothing the guest
    could have been sent under Win16 is lost.  A stock control's messages
-   count as far as Win16 took its class's block, and only at a window of that
-   class, which is what `hwnd` is for: Win32 went on adding to each block
+   count as far as Win16 took its class's block, at any window, as they have
+   a Win16 number there (see msg32_to_16); Win32 went on adding to each block
    (BM_CLICK, LB_GETLISTBOXINFO) and put WM_INPUT at the end of the
-   buttons', and at any other window none of it is anything Win16 sent.
+   buttons', and none of that is anything Win16 sent.
    From WM_USER up to the registered range a number is private to its window
    class or application, which is the guest's business; a registered message
    is the host's, since the guest registers none. */
-int msg_win16(HWND hwnd, UINT msg)
+int msg_win16(UINT msg)
 {
     static const struct { uint16_t lo, hi; } known[] = {
         { 0x0000, 0x0024 },     /* WM_NULL .. WM_GETMINMAXINFO           */
@@ -296,7 +309,7 @@ int msg_win16(HWND hwnd, UINT msg)
 
     if (msg >= WM_USER) return msg < 0xC000;
     /* A stock control's own, which is when it has a Win16 number. */
-    if (msg32_to_16(hwnd, msg) != msg) return 1;
+    if (msg32_to_16(msg) != msg) return 1;
     for (i = 0; i < sizeof known / sizeof known[0]; i++)
         if (msg >= known[i].lo && msg <= known[i].hi) return 1;
     return 0;
@@ -400,7 +413,7 @@ static void msg_to_16(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp,
 {
     uint8_t *p = extra;
 
-    x->msg16 = (UINT)msg32_to_16(hwnd, msg);
+    x->msg16 = (UINT)msg32_to_16(msg);
     x->wp16 = (uint16_t)wp;
     x->lp16 = (uint32_t)lp;
     x->extralen = 0;
@@ -632,8 +645,11 @@ static void msg_to_16(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp,
            scrolls a multiline control, so one is told 1, which is what is
            about to happen, and a single-line one 0, which is what Win16 code
            passes.  Wine passes 0 to both, as its own EM_SETSEL scrolls
-           either kind. */
-        x->wp16 = (GetWindowLongA(hwnd, GWL_STYLE) & ES_MULTILINE) ? 1 : 0;
+           either kind.  A control of another class gets it too, from the
+           dialog manager, when it answers DLGC_HASSETSEL; its style's
+           ES_MULTILINE bit means something else, and it is told 0. */
+        x->wp16 = msg16_to_32(hwnd, x->msg16) == EM_SETSEL
+               && (GetWindowLongA(hwnd, GWL_STYLE) & ES_MULTILINE);
         x->lp16 = (uint32_t)MAKELONG(LOWORD(wp), LOWORD(lp));
         break;
 
@@ -978,7 +994,7 @@ LRESULT CALLBACK winproc_bridge(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
        control's own procedure when the guest has subclassed a stock control,
        and otherwise DefWindowProc, which is where every class of the game's
        sends what it does not handle. */
-    if (!msg_win16(hwnd, msg)) {
+    if (!msg_win16(msg)) {
         WNDPROC cls = (WNDPROC)(uintptr_t)GetClassLongPtrA(hwnd, GCLP_WNDPROC);
         if (cls && cls != winproc_bridge)
             return CallWindowProcA(cls, hwnd, msg, wp, lp);

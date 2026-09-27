@@ -46,15 +46,16 @@ const char *class_menu(const char *name);
 int      winproc_original(HWND hwnd, UINT msg16, UINT *msg32,
                           WPARAM *wp, LPARAM *lp);
 
-/* Renumber a message between Win32 and Win16 for the window it is going to:
-   only a stock control's own messages differ, so only the class can say. */
-uint32_t msg32_to_16(HWND hwnd, uint32_t msg);
+/* Renumber a message between Win32 and Win16.  Only a stock control's own
+   messages differ.  Going to Win32 only the class of the window it is going
+   to can say which a number is; coming back the number says it alone. */
+uint32_t msg32_to_16(uint32_t msg);
 uint32_t msg16_to_32(HWND hwnd, uint32_t msg);
 
-/* Whether a Win32 message for `hwnd` is one Win16 had, so that the guest can
-   know what it means.  Those that are not are answered on this side and never
-   reach it. */
-int      msg_win16(HWND hwnd, UINT msg);
+/* Whether a Win32 message is one Win16 had, so that the guest can know what
+   it means.  Those that are not are answered on this side and never reach
+   it. */
+int      msg_win16(UINT msg);
 
 /* Translate a message into Win16 form and run `proc16` with it.  Shared by the
    window-procedure bridge and the dialog-procedure bridge; *ret_handle comes
