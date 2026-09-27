@@ -24,11 +24,11 @@ HOSTCFLAGS := -std=c99 -O2 -Wall -Wextra
 CFLAGS  := -std=c11 -O3 -g -Wall -Wextra -Wshadow -Wstrict-prototypes \
            -Wno-unused-parameter -MMD -MP -D__USE_MINGW_ANSI_STDIO=0
 
-# FPU picks how the guest's x87 is carried out: hw hands each instruction to
-# this machine's own x87, soft carries it out in integers (src/x80.c), which
-# works on any machine, and dual runs both and logs where they differ (see
-# src/x80dual.c), which makes it a development build.  Empty takes the
-# default for the target: hw on an x86, soft anywhere else.  XCFLAGS is
+# FPU picks how the guest's x87 is carried out: soft carries it out in
+# integers (src/x80.c), on any machine, and is the default; hw hands each
+# instruction to this machine's own x87 (src/x87hw.c), and dual runs both and
+# logs where they differ (src/x80dual.c).  Those two need an x86 and are for
+# development: see src/fpusel.h.  XCFLAGS is
 # for experiments - a rebuild with, say, -falign-functions=64 to see how much
 # of a timing difference is only code layout - and keys the build directory
 # like everything else here, so it never borrows objects from a build without.

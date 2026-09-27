@@ -178,11 +178,12 @@ selector arena is reserved `PAGE_NOACCESS` and committed `PAGE_READWRITE`,
 because guest code is interpreted rather than run. `StarsVM.exe` never asks the
 system for a page it can both write and execute.
 
-The x87 is carried out by one of two backends, chosen when building with
-`FPU=`. `hw`, `src/x87hw.c`, hands each operation to the host's own x87, and
-is the default on an x86. `soft`, `src/x80.c`, does the x87's arithmetic in
-integers, rounding and status word included, so that it runs anywhere, and is
-the default everywhere else. Its exact operations - the arithmetic, loads and
+The x87 is carried out in integers, by `src/x80.c`: the x87's arithmetic,
+rounding and status word included, so that it runs anywhere. It began as the
+second of two backends, beside `src/x87hw.c`, which hands each operation to
+the host's own x87; that one is still there for development (`make FPU=hw`),
+and as the fuzzer's oracle, but it is no longer what gets built - see "Turn
+generation" for why. `x80.c`'s exact operations - the arithmetic, loads and
 stores, compares, square root and the rest - agree with the host's x87 in
 every bit: `StarsVM-fuzz --x80` runs each against `x87hw.c` across every
 precision and rounding control, and billions of cases have found no
@@ -264,6 +265,37 @@ seeking. Each was a `ReadFile` or `WriteFile`. A 16 KB buffer per handle,
 read-ahead or write-behind, turns that into a few hundred; `src/fs_win32.c`
 says how it stays exact when two handles are the same file.
 
+The x87 is a small part of it. The profiler puts `fpu_exec` at 0.2% of a
+ten-turn run, 376,000 operations; the native routines do some 4.8 million
+more, most of them habitability's float tail. And the integer x87 carries
+those out faster than the host's own: each of `x87hw.c`'s operations loads
+the guest's control word with `FLDCW`, which serialises, and costs about 50
+ns, where `x80.c`'s take 1 to 17 ns, its square root 22 ns and its division
+40 (32-bit, operation by operation). What moves a whole run more is where the
+compiler happens to put the interpreter: the same source built with
+`-falign-functions=64` generates turns 5.1% faster, 32-bit, and 0.5% faster
+64-bit. So `tools/ab.ps1` compared the integer x87 with the hardware one as
+it was before this work both ways, as built and with both builds aligned
+alike; seven A/B/B/A rounds each (five at 50 turns without the routines),
+every run checked against the golden output, 32-bit and the native routines
+on unless it says otherwise:
+
+| integer x87, against the hardware one | as built | both aligned |
+|---|---|---|
+| 10 turns | +4.5% | +2.4%, not in every round |
+| 50 turns | +3.2% | +1.7% |
+| 10 turns, `--no-native` | +3.2% | +1.7% |
+| 50 turns, `--no-native` | +2.0% | |
+| 10 turns, 64-bit | +2.9% | +0.7%, not in every round |
+| 10 turns, 64-bit, `--no-native` | +0.7%, not in every round | |
+
+Two copies of one executable timed against each other differ by 0.6%. The
+hardware backend as it is now, with the status word put right - every
+operation starting with `FNCLEX` - measured +3.4% as built, 32-bit, and
++6.5% 64-bit, where it is slower than the integer one. What is left is within
+the layout's own reach either way, and the integer x87 gives the same turns
+on every machine, so it is what gets built.
+
 ## Hosting as a library
 
 The batch modes — a new game from a `.def` (`-a`), turn generation (`-g`) and
@@ -303,10 +335,10 @@ make libtest    # the library against the emulator's output
 make libbench   # the library timed, generating the benchmark game's turns
 ```
 
-It builds with any GCC or Clang for any little-endian machine, Windows or not:
-on an x86 it runs the game's floating point on the host's x87 by default, and
-anywhere else it carries it out in integers (`FPU=soft`, above), which is what
-`tools/portcheck.sh` runs on AArch64. Under it is the same interpreter,
+It builds with any GCC or Clang for any little-endian machine, Windows or not,
+the game's floating point being carried out in integers (see "Building"
+above); `tools/portcheck.sh` runs it on AArch64 under qemu. Under it is the
+same interpreter,
 loader and KERNEL as the emulator's, with the Win32 halves swapped for an
 in-memory directory (`src/fs_mem.c`) and a window system that exists only as
 far as the game can tell (`src/headless.c`): windows and messages are real,

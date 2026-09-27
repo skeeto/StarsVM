@@ -31,6 +31,13 @@
  * stub is a second implementation to get wrong.
  */
 
+/* fpu.c on the host's x87, whatever the emulator defaults to: the rounds
+   compare the interpreter with this CPU bit for bit, and x80.c's
+   transcendentals only agree with it approximately.  x80.c is tested
+   against x87hw.c by --x80 instead, operation by operation - and fpu.c's
+   part is the same whichever backend it calls. */
+#define STARSVM_FPU_HW 1
+
 #include "cpu.c"
 #include "fpu.c"
 #include "fuzz.c"
