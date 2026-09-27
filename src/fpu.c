@@ -121,8 +121,8 @@ static uint16_t sw_value(Cpu *c)
 /* --------------------------------------------------------------- host bridge */
 
 /* Run a two-operand host x87 operation under the guest control word.
-   `code` selects the operation; both operands are host long doubles. */
-enum { OP_ADD, OP_SUB, OP_SUBR, OP_MUL, OP_DIV, OP_DIVR };
+   `code` selects the operation (FPU_ADD and so on, from fpu.h); both operands
+   are host long doubles. */
 
 static long double host_arith(Cpu *c, int code, long double a, long double b)
 {
@@ -130,32 +130,32 @@ static long double host_arith(Cpu *c, int code, long double a, long double b)
     uint16_t cw = c->fpu_cw, sw = 0;
 
     switch (code) {
-    case OP_ADD:
+    case FPU_ADD:
         __asm__ volatile ("fldcw %3\n\tfldt %1\n\tfldt %2\n\tfaddp\n\t"
                           "fnstsw %0\n\tfstpt %1"
                           : "=a"(sw), "+m"(a) : "m"(b), "m"(cw) : "st", "st(1)");
         r = a; break;
-    case OP_SUB:   /* a - b */
+    case FPU_SUB:   /* a - b */
         __asm__ volatile ("fldcw %3\n\tfldt %2\n\tfldt %1\n\tfsubp\n\t"
                           "fnstsw %0\n\tfstpt %1"
                           : "=a"(sw), "+m"(a) : "m"(b), "m"(cw) : "st", "st(1)");
         r = a; break;
-    case OP_SUBR:  /* b - a */
+    case FPU_SUBR:  /* b - a */
         __asm__ volatile ("fldcw %3\n\tfldt %1\n\tfldt %2\n\tfsubp\n\t"
                           "fnstsw %0\n\tfstpt %1"
                           : "=a"(sw), "+m"(a) : "m"(b), "m"(cw) : "st", "st(1)");
         r = a; break;
-    case OP_MUL:
+    case FPU_MUL:
         __asm__ volatile ("fldcw %3\n\tfldt %1\n\tfldt %2\n\tfmulp\n\t"
                           "fnstsw %0\n\tfstpt %1"
                           : "=a"(sw), "+m"(a) : "m"(b), "m"(cw) : "st", "st(1)");
         r = a; break;
-    case OP_DIV:   /* a / b */
+    case FPU_DIV:   /* a / b */
         __asm__ volatile ("fldcw %3\n\tfldt %2\n\tfldt %1\n\tfdivp\n\t"
                           "fnstsw %0\n\tfstpt %1"
                           : "=a"(sw), "+m"(a) : "m"(b), "m"(cw) : "st", "st(1)");
         r = a; break;
-    default:       /* OP_DIVR: b / a */
+    default:       /* FPU_DIVR: b / a */
         __asm__ volatile ("fldcw %3\n\tfldt %1\n\tfldt %2\n\tfdivp\n\t"
                           "fnstsw %0\n\tfstpt %1"
                           : "=a"(sw), "+m"(a) : "m"(b), "m"(cw) : "st", "st(1)");
@@ -445,14 +445,14 @@ int fpu_exec(Cpu *c, uint8_t op, uint8_t modrm, int is_reg,
         case 0xD8: {                               /* arithmetic with m32 */
             long double m = load_f32(sel, off);
             switch (reg) {
-            case 0: ld_set(c, 0, host_arith(c, OP_ADD,  ld_get(c, 0), m)); return 1;
-            case 1: ld_set(c, 0, host_arith(c, OP_MUL,  ld_get(c, 0), m)); return 1;
+            case 0: ld_set(c, 0, host_arith(c, FPU_ADD,  ld_get(c, 0), m)); return 1;
+            case 1: ld_set(c, 0, host_arith(c, FPU_MUL,  ld_get(c, 0), m)); return 1;
             case 2: host_compare(c, ld_get(c, 0), m); return 1;
             case 3: host_compare(c, ld_get(c, 0), m); fpu_discard(c); return 1;
-            case 4: ld_set(c, 0, host_arith(c, OP_SUB,  ld_get(c, 0), m)); return 1;
-            case 5: ld_set(c, 0, host_arith(c, OP_SUBR, ld_get(c, 0), m)); return 1;
-            case 6: ld_set(c, 0, host_arith(c, OP_DIV,  ld_get(c, 0), m)); return 1;
-            default:ld_set(c, 0, host_arith(c, OP_DIVR, ld_get(c, 0), m)); return 1;
+            case 4: ld_set(c, 0, host_arith(c, FPU_SUB,  ld_get(c, 0), m)); return 1;
+            case 5: ld_set(c, 0, host_arith(c, FPU_SUBR, ld_get(c, 0), m)); return 1;
+            case 6: ld_set(c, 0, host_arith(c, FPU_DIV,  ld_get(c, 0), m)); return 1;
+            default:ld_set(c, 0, host_arith(c, FPU_DIVR, ld_get(c, 0), m)); return 1;
             }
         }
         case 0xD9:
@@ -484,14 +484,14 @@ int fpu_exec(Cpu *c, uint8_t op, uint8_t modrm, int is_reg,
         case 0xDA: {                               /* integer m32 arithmetic */
             long double m = (long double)(int32_t)sel_rd32(sel, off);
             switch (reg) {
-            case 0: ld_set(c, 0, host_arith(c, OP_ADD,  ld_get(c, 0), m)); return 1;
-            case 1: ld_set(c, 0, host_arith(c, OP_MUL,  ld_get(c, 0), m)); return 1;
+            case 0: ld_set(c, 0, host_arith(c, FPU_ADD,  ld_get(c, 0), m)); return 1;
+            case 1: ld_set(c, 0, host_arith(c, FPU_MUL,  ld_get(c, 0), m)); return 1;
             case 2: host_compare(c, ld_get(c, 0), m); return 1;
             case 3: host_compare(c, ld_get(c, 0), m); fpu_discard(c); return 1;
-            case 4: ld_set(c, 0, host_arith(c, OP_SUB,  ld_get(c, 0), m)); return 1;
-            case 5: ld_set(c, 0, host_arith(c, OP_SUBR, ld_get(c, 0), m)); return 1;
-            case 6: ld_set(c, 0, host_arith(c, OP_DIV,  ld_get(c, 0), m)); return 1;
-            default:ld_set(c, 0, host_arith(c, OP_DIVR, ld_get(c, 0), m)); return 1;
+            case 4: ld_set(c, 0, host_arith(c, FPU_SUB,  ld_get(c, 0), m)); return 1;
+            case 5: ld_set(c, 0, host_arith(c, FPU_SUBR, ld_get(c, 0), m)); return 1;
+            case 6: ld_set(c, 0, host_arith(c, FPU_DIV,  ld_get(c, 0), m)); return 1;
+            default:ld_set(c, 0, host_arith(c, FPU_DIVR, ld_get(c, 0), m)); return 1;
             }
         }
         case 0xDB:
@@ -516,14 +516,14 @@ int fpu_exec(Cpu *c, uint8_t op, uint8_t modrm, int is_reg,
         case 0xDC: {                               /* arithmetic with m64 */
             long double m = load_f64(sel, off);
             switch (reg) {
-            case 0: ld_set(c, 0, host_arith(c, OP_ADD,  ld_get(c, 0), m)); return 1;
-            case 1: ld_set(c, 0, host_arith(c, OP_MUL,  ld_get(c, 0), m)); return 1;
+            case 0: ld_set(c, 0, host_arith(c, FPU_ADD,  ld_get(c, 0), m)); return 1;
+            case 1: ld_set(c, 0, host_arith(c, FPU_MUL,  ld_get(c, 0), m)); return 1;
             case 2: host_compare(c, ld_get(c, 0), m); return 1;
             case 3: host_compare(c, ld_get(c, 0), m); fpu_discard(c); return 1;
-            case 4: ld_set(c, 0, host_arith(c, OP_SUB,  ld_get(c, 0), m)); return 1;
-            case 5: ld_set(c, 0, host_arith(c, OP_SUBR, ld_get(c, 0), m)); return 1;
-            case 6: ld_set(c, 0, host_arith(c, OP_DIV,  ld_get(c, 0), m)); return 1;
-            default:ld_set(c, 0, host_arith(c, OP_DIVR, ld_get(c, 0), m)); return 1;
+            case 4: ld_set(c, 0, host_arith(c, FPU_SUB,  ld_get(c, 0), m)); return 1;
+            case 5: ld_set(c, 0, host_arith(c, FPU_SUBR, ld_get(c, 0), m)); return 1;
+            case 6: ld_set(c, 0, host_arith(c, FPU_DIV,  ld_get(c, 0), m)); return 1;
+            default:ld_set(c, 0, host_arith(c, FPU_DIVR, ld_get(c, 0), m)); return 1;
             }
         }
         case 0xDD:
@@ -538,14 +538,14 @@ int fpu_exec(Cpu *c, uint8_t op, uint8_t modrm, int is_reg,
         case 0xDE: {                               /* integer m16 arithmetic */
             long double m = (long double)(int16_t)sel_rd16(sel, off);
             switch (reg) {
-            case 0: ld_set(c, 0, host_arith(c, OP_ADD,  ld_get(c, 0), m)); return 1;
-            case 1: ld_set(c, 0, host_arith(c, OP_MUL,  ld_get(c, 0), m)); return 1;
+            case 0: ld_set(c, 0, host_arith(c, FPU_ADD,  ld_get(c, 0), m)); return 1;
+            case 1: ld_set(c, 0, host_arith(c, FPU_MUL,  ld_get(c, 0), m)); return 1;
             case 2: host_compare(c, ld_get(c, 0), m); return 1;
             case 3: host_compare(c, ld_get(c, 0), m); fpu_discard(c); return 1;
-            case 4: ld_set(c, 0, host_arith(c, OP_SUB,  ld_get(c, 0), m)); return 1;
-            case 5: ld_set(c, 0, host_arith(c, OP_SUBR, ld_get(c, 0), m)); return 1;
-            case 6: ld_set(c, 0, host_arith(c, OP_DIV,  ld_get(c, 0), m)); return 1;
-            default:ld_set(c, 0, host_arith(c, OP_DIVR, ld_get(c, 0), m)); return 1;
+            case 4: ld_set(c, 0, host_arith(c, FPU_SUB,  ld_get(c, 0), m)); return 1;
+            case 5: ld_set(c, 0, host_arith(c, FPU_SUBR, ld_get(c, 0), m)); return 1;
+            case 6: ld_set(c, 0, host_arith(c, FPU_DIV,  ld_get(c, 0), m)); return 1;
+            default:ld_set(c, 0, host_arith(c, FPU_DIVR, ld_get(c, 0), m)); return 1;
             }
         }
         case 0xDF:
@@ -591,14 +591,14 @@ int fpu_exec(Cpu *c, uint8_t op, uint8_t modrm, int is_reg,
     switch (op) {
     case 0xD8:                                     /* op ST(0), ST(i) */
         switch (reg) {
-        case 0: ld_set(c, 0, host_arith(c, OP_ADD,  ld_get(c, 0), ld_get(c, rm))); return 1;
-        case 1: ld_set(c, 0, host_arith(c, OP_MUL,  ld_get(c, 0), ld_get(c, rm))); return 1;
+        case 0: ld_set(c, 0, host_arith(c, FPU_ADD,  ld_get(c, 0), ld_get(c, rm))); return 1;
+        case 1: ld_set(c, 0, host_arith(c, FPU_MUL,  ld_get(c, 0), ld_get(c, rm))); return 1;
         case 2: host_compare(c, ld_get(c, 0), ld_get(c, rm)); return 1;
         case 3: host_compare(c, ld_get(c, 0), ld_get(c, rm)); fpu_discard(c); return 1;
-        case 4: ld_set(c, 0, host_arith(c, OP_SUB,  ld_get(c, 0), ld_get(c, rm))); return 1;
-        case 5: ld_set(c, 0, host_arith(c, OP_SUBR, ld_get(c, 0), ld_get(c, rm))); return 1;
-        case 6: ld_set(c, 0, host_arith(c, OP_DIV,  ld_get(c, 0), ld_get(c, rm))); return 1;
-        default:ld_set(c, 0, host_arith(c, OP_DIVR, ld_get(c, 0), ld_get(c, rm))); return 1;
+        case 4: ld_set(c, 0, host_arith(c, FPU_SUB,  ld_get(c, 0), ld_get(c, rm))); return 1;
+        case 5: ld_set(c, 0, host_arith(c, FPU_SUBR, ld_get(c, 0), ld_get(c, rm))); return 1;
+        case 6: ld_set(c, 0, host_arith(c, FPU_DIV,  ld_get(c, 0), ld_get(c, rm))); return 1;
+        default:ld_set(c, 0, host_arith(c, FPU_DIVR, ld_get(c, 0), ld_get(c, rm))); return 1;
         }
     case 0xD9:
         switch (reg) {
@@ -682,12 +682,12 @@ int fpu_exec(Cpu *c, uint8_t op, uint8_t modrm, int is_reg,
         return 0;
     case 0xDC:                                     /* op ST(i), ST(0) */
         switch (reg) {
-        case 0: ld_set(c, rm, host_arith(c, OP_ADD,  ld_get(c, rm), ld_get(c, 0))); return 1;
-        case 1: ld_set(c, rm, host_arith(c, OP_MUL,  ld_get(c, rm), ld_get(c, 0))); return 1;
-        case 4: ld_set(c, rm, host_arith(c, OP_SUBR, ld_get(c, rm), ld_get(c, 0))); return 1;
-        case 5: ld_set(c, rm, host_arith(c, OP_SUB,  ld_get(c, rm), ld_get(c, 0))); return 1;
-        case 6: ld_set(c, rm, host_arith(c, OP_DIVR, ld_get(c, rm), ld_get(c, 0))); return 1;
-        case 7: ld_set(c, rm, host_arith(c, OP_DIV,  ld_get(c, rm), ld_get(c, 0))); return 1;
+        case 0: ld_set(c, rm, host_arith(c, FPU_ADD,  ld_get(c, rm), ld_get(c, 0))); return 1;
+        case 1: ld_set(c, rm, host_arith(c, FPU_MUL,  ld_get(c, rm), ld_get(c, 0))); return 1;
+        case 4: ld_set(c, rm, host_arith(c, FPU_SUBR, ld_get(c, rm), ld_get(c, 0))); return 1;
+        case 5: ld_set(c, rm, host_arith(c, FPU_SUB,  ld_get(c, rm), ld_get(c, 0))); return 1;
+        case 6: ld_set(c, rm, host_arith(c, FPU_DIVR, ld_get(c, rm), ld_get(c, 0))); return 1;
+        case 7: ld_set(c, rm, host_arith(c, FPU_DIV,  ld_get(c, rm), ld_get(c, 0))); return 1;
         default: return 0;
         }
     case 0xDD:
@@ -702,9 +702,9 @@ int fpu_exec(Cpu *c, uint8_t op, uint8_t modrm, int is_reg,
         }
     case 0xDE:                                     /* op ST(i), ST(0) then pop */
         switch (reg) {
-        case 0: ld_set(c, rm, host_arith(c, OP_ADD,  ld_get(c, rm), ld_get(c, 0)));
+        case 0: ld_set(c, rm, host_arith(c, FPU_ADD,  ld_get(c, rm), ld_get(c, 0)));
                 fpu_discard(c); return 1;
-        case 1: ld_set(c, rm, host_arith(c, OP_MUL,  ld_get(c, rm), ld_get(c, 0)));
+        case 1: ld_set(c, rm, host_arith(c, FPU_MUL,  ld_get(c, rm), ld_get(c, 0)));
                 fpu_discard(c); return 1;
         case 3: if (rm == 1) {                     /* FCOMPP */
                     host_compare(c, ld_get(c, 0), ld_get(c, 1));
@@ -713,13 +713,13 @@ int fpu_exec(Cpu *c, uint8_t op, uint8_t modrm, int is_reg,
                     return 1;
                 }
                 return 0;
-        case 4: ld_set(c, rm, host_arith(c, OP_SUBR, ld_get(c, rm), ld_get(c, 0)));
+        case 4: ld_set(c, rm, host_arith(c, FPU_SUBR, ld_get(c, rm), ld_get(c, 0)));
                 fpu_discard(c); return 1;
-        case 5: ld_set(c, rm, host_arith(c, OP_SUB,  ld_get(c, rm), ld_get(c, 0)));
+        case 5: ld_set(c, rm, host_arith(c, FPU_SUB,  ld_get(c, rm), ld_get(c, 0)));
                 fpu_discard(c); return 1;
-        case 6: ld_set(c, rm, host_arith(c, OP_DIVR, ld_get(c, rm), ld_get(c, 0)));
+        case 6: ld_set(c, rm, host_arith(c, FPU_DIVR, ld_get(c, rm), ld_get(c, 0)));
                 fpu_discard(c); return 1;
-        default:ld_set(c, rm, host_arith(c, OP_DIV,  ld_get(c, rm), ld_get(c, 0)));
+        default:ld_set(c, rm, host_arith(c, FPU_DIV,  ld_get(c, rm), ld_get(c, 0)));
                 fpu_discard(c); return 1;
         }
     case 0xDF:
@@ -735,43 +735,39 @@ int fpu_exec(Cpu *c, uint8_t op, uint8_t modrm, int is_reg,
 
 /* ------------------------------------------------------- for native routines */
 
-/* See fpu.h.  Wrappers, so that fpu_exec's own calls to the helpers stay
-   inlinable and their names stay private. */
-long double fpu_get(Cpu *c, int i) { return ld_get(c, i); }
-void        fpu_set(Cpu *c, int i, long double v) { ld_set(c, i, v); }
-void        fpu_load(Cpu *c, long double v) { fpu_push(c, v); }
-void        fpu_pop(Cpu *c) { fpu_discard(c); }
-uint16_t    fpu_status(Cpu *c) { return sw_value(c); }
-long double fpu_load_f64(uint16_t sel, uint16_t off) { return load_f64(sel, off); }
+/* See fpu.h.  Each is the body of the fpu_exec case it names, so that the
+   two cannot drift apart without one of them being edited on purpose. */
+void fpu_fild(Cpu *c, int32_t v) { fpu_push(c, (long double)v); }
 
-long double fpu_arith(Cpu *c, int op, long double a, long double b)
+void fpu_arith_m64(Cpu *c, int op, uint16_t sel, uint16_t off)
 {
-    static const int codes[6] = { OP_ADD, OP_SUB, OP_SUBR, OP_MUL, OP_DIV, OP_DIVR };
-    return host_arith(c, codes[op], a, b);
+    ld_set(c, 0, host_arith(c, op, ld_get(c, 0), load_f64(sel, off)));
 }
 
-long double fpu_sqrt(Cpu *c, long double a)
+void fpu_sqrt(Cpu *c)
 {
-    long double second;
+    long double second = 0;
     int pushed;
-    return host_unary(c, U_SQRT, a, 0, &second, &pushed);
+    ld_set(c, 0, host_unary(c, U_SQRT, ld_get(c, 0), 0, &second, &pushed));
 }
 
-void fpu_xam(Cpu *c, long double a)
+void fpu_xam(Cpu *c)
 {
-    long double second;
+    long double second = 0;
     int pushed;
-    host_unary(c, U_XAM, a, 0, &second, &pushed);
+    host_unary(c, U_XAM, ld_get(c, 0), 0, &second, &pushed);
 }
 
-int64_t fpu_to_int(Cpu *c, long double v, unsigned width)
+void fpu_store_f64(Cpu *c, uint16_t sel, uint16_t off)
 {
-    return to_int(c, v, c->fpu_cw, width);
+    store_f64(c, sel, off, ld_get(c, 0), c->fpu_cw);
 }
 
-void fpu_store_f64(Cpu *c, uint16_t sel, uint16_t off, long double v)
+int64_t fpu_fistp64(Cpu *c)
 {
-    store_f64(c, sel, off, v, c->fpu_cw);
+    int64_t v = to_int(c, ld_get(c, 0), c->fpu_cw, 8);
+    fpu_discard(c);
+    return v;
 }
 
 void fpu_clex(Cpu *c) { c->fpu_sw &= ~0x80FFu; }

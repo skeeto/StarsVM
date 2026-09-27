@@ -182,20 +182,20 @@ static void dump_cpu(const char *who, const Cpu *c)
             c->seg[S_SS], (unsigned)(c->eflags & 0xFFFF));
 }
 
-/* The x87 registers by physical slot, as values, with the control, status
-   and tag words and the top: a stale value in a popped slot is what a
-   routine's last computation was. */
+/* The x87 registers by physical slot, with the control, status and tag words
+   and the top: a stale value in a popped slot is what a routine's last
+   computation was.  In hex, sign and exponent then significand, because a
+   disagreement is usually in the last bit and a decimal rendering would
+   print both sides the same. */
 static void dump_x87(const char *who, const Cpu *c)
 {
-    int i;
+    int i, k;
     log_msg("    %-8s x87 cw=%04X sw=%04X tw=%04X top=%u:", who, c->fpu_cw,
             c->fpu_sw, c->fpu_tw, c->fpu_top);
     for (i = 0; i < 8; i++) {
-        long double v;
-        memcpy(&v, c->st[i].b, 10);
-        /* As a double: this printf's long double is MSVCRT's, which is a
-           double, so %Lg would read the ten bytes as something else. */
-        log_msg(" %.10g", (double)v);
+        const uint8_t *b = c->st[i].b;
+        log_msg(" %02X%02X:", b[9], b[8]);
+        for (k = 7; k >= 0; k--) log_msg("%02X", b[k]);
     }
     log_msg("\n");
 }
@@ -654,25 +654,38 @@ static int nat_scan_loop(Cpu *c)
    is so large that storing it or its root as a double could overflow, which
    is where the epilogue's check would send it down another path. */
 
-/* A double in guest memory that is a positive normal. */
-static int f64_is_plain_positive(uint16_t sel, uint16_t off)
+/* A double in guest memory that is a positive normal below 2^below. */
+static int f64_is_plain_positive(uint16_t sel, uint16_t off, int below)
 {
     uint32_t hi = sel_rd32(sel, (uint16_t)(off + 4));
     unsigned exp = (hi >> 20) & 0x7FF;
-    return !(hi & 0x80000000u) && exp != 0 && exp != 0x7FF;
+    return !(hi & 0x80000000u) && exp != 0 && (int)exp < 0x3FF + below;
 }
 
-/* ST(0) is a positive normal below 2^1000, and is present. */
-static int st0_is_plain_positive(Cpu *c)
+/* The x87 state the routines below assume rather than check as they go:
+   every exception masked, so that nothing the operations raise can trap;
+   and room for `pushes` more values on the stack, since a push onto a full
+   slot takes the stack-fault path.  Neither is modelled beyond what the
+   interpreter does, and a routine that ran regardless would be assuming
+   what nothing had checked. */
+static int x87_ready(const Cpu *c, int pushes)
 {
-    uint8_t b[10];
-    long double v;
-    unsigned exp;
+    int k;
+    if ((c->fpu_cw & 0x3F) != 0x3F) return 0;
+    for (k = 1; k <= pushes; k++)
+        if (((c->fpu_tw >> (((c->fpu_top - k) & 7) * 2)) & 3) != 3) return 0;
+    return 1;
+}
 
-    if (((c->fpu_tw >> ((c->fpu_top & 7) * 2)) & 3) == 3) return 0;   /* empty */
-    v = fpu_get(c, 0);
-    memcpy(b, &v, 10);
-    exp = ((unsigned)(b[9] & 0x7F) << 8) | b[8];
+/* ST(0) is a positive normal below 2^1000, and is present.  Read from the
+   register itself, whose ten bytes are the x87's own layout. */
+static int st0_is_plain_positive(const Cpu *c)
+{
+    int p = c->fpu_top & 7;
+    const uint8_t *b = c->st[p].b;
+    unsigned exp = ((unsigned)(b[9] & 0x7F) << 8) | b[8];
+
+    if (((c->fpu_tw >> (p * 2)) & 3) == 3) return 0;                   /* empty */
     return !(b[9] & 0x80) && exp != 0 && exp < 0x3FFF + 1000 && (b[7] & 0x80);
 }
 
@@ -680,21 +693,20 @@ static int crt_sqrt_body(Cpu *c, uint16_t bp)
 {
     uint16_t ds = c->seg[S_DS];
     uint16_t cw0 = c->fpu_cw;
-    long double a = fpu_get(c, 0);
     int n = 79;
 
     /* 1C9B: with the runtime's flag at 1BC8 clear the argument is saved first
        at 1A14 (three more instructions); set, the classifier is called at
        once.  The flag is set once the runtime has found the coprocessor,
        which is the state a running game is in. */
-    if (sel_rd8(ds, 0x1BC8) == 0) fpu_store_f64(c, ds, 0x1A14, a);
+    if (sel_rd8(ds, 0x1BC8) == 0) fpu_store_f64(c, ds, 0x1A14);
     else                          n = 76;
     c->fpu_cw = (uint16_t)(0x1300 | (cw0 & 0xFF) | 0x38);  /* 20C2 fldcw [bp-8] */
-    fpu_xam(c, a);                                          /* fxam: normal, +  */
-    fpu_set(c, 0, fpu_sqrt(c, a));                          /* 12E1 fsqrt        */
+    fpu_xam(c);                                             /* fxam: normal, +  */
+    fpu_sqrt(c);                                            /* 12E1 fsqrt        */
     sel_wr8(ds, 0x1A44, 1);                                 /* 1CA5              */
     fpu_clex(c);                                            /* 1CF5 fnclex       */
-    fpu_store_f64(c, ds, 0x16A6, fpu_get(c, 0));            /* 1CF8 fst [16A6]   */
+    fpu_store_f64(c, ds, 0x16A6);                           /* 1CF8 fst [16A6]   */
     c->fpu_cw = cw0;                                        /* 1D1D fldcw [bp-6] */
 
     /* What the registers hold on the way out: the class index 0 in AX, the
@@ -717,8 +729,7 @@ static int crt_ftol_body(Cpu *c, uint16_t bp, int64_t *out)
 
     cpu_flags_logic(c, ((cw0 >> 8) | 0x0C) & 0xFF, 1);     /* 0E5A or ah,0C     */
     c->fpu_cw = (uint16_t)(cw0 | 0x0C00);                  /* 0E61 fldcw: trunc */
-    v = fpu_to_int(c, fpu_get(c, 0), 8);                    /* 0E65 fistp qword  */
-    fpu_pop(c);
+    v = fpu_fistp64(c);                                     /* 0E65 fistp qword  */
     c->fpu_cw = cw0;                                        /* 0E69 fldcw        */
     set_reg16(c, R_AX, (uint16_t)v);
     set_reg16(c, R_DX, (uint16_t)(v >> 16));
@@ -738,7 +749,7 @@ static void far_return(Cpu *c)
 static int nat_sqrt(Cpu *c)
 {
     int n;
-    if (!st0_is_plain_positive(c)) return 0;
+    if (!x87_ready(c, 0) || !st0_is_plain_positive(c)) return 0;
     n = crt_sqrt_body(c, reg16(c, R_BP));
     far_return(c);
     return n;
@@ -748,6 +759,7 @@ static int nat_ftol(Cpu *c)
 {
     int64_t v;
     int n;
+    if (!x87_ready(c, 0)) return 0;
     if (((c->fpu_tw >> ((c->fpu_top & 7) * 2)) & 3) == 3) return 0;    /* empty */
     n = crt_ftol_body(c, reg16(c, R_BP), &v);
     far_return(c);
@@ -946,23 +958,25 @@ static int nat_habitability(Cpu *c)
         SET16(eax, ax);
         cpu_flags_logic(c, ax, 2);
         instrs += 3;
-        if (ax == 0 && (int32_t)sum > 0 && f64_is_plain_positive(ds, 0x1D02)) {
+        if (ax == 0 && (int32_t)sum > 0 && x87_ready(c, 1) &&
+            f64_is_plain_positive(ds, 0x1D02, 1000 - 32)) {
             /* The float tail, 4A4E-4A8D, with the two runtime calls inline:
                  push 2710; push [bp-12]; fild [bp-C]; fmul [1D02]; call sqrt;
                  fadd [1D0A]; call _ftol; push dx; push ax; pop eax; pop ecx;
                  imul ecx; pop ecx; cdq; idiv ecx; mov edx,eax; shr edx,10;
                  mov [bp-C],ax; pop si; pop di; leave; retf
-               A positive sum times a positive normal constant is the positive
-               normal sqrt wants, so the condition above is the routine's whole
-               precondition.  Everything pushed here is below the final stack
-               pointer, and so is the frame: dead. */
+               A positive sum, below 2^31, times a positive normal constant
+               below 2^968 is the positive normal below 2^1000 sqrt wants, so
+               the condition above is the routine's whole precondition.
+               Everything pushed here is below the final stack pointer, and so
+               is the frame: dead. */
             uint32_t prod, q;
             int64_t v;
 
-            fpu_load(c, (long double)(int32_t)sum);
-            fpu_set(c, 0, fpu_arith(c, FPU_MUL, fpu_get(c, 0), fpu_load_f64(ds, 0x1D02)));
+            fpu_fild(c, (int32_t)sum);                     /* fild dword [bp-C] */
+            fpu_arith_m64(c, FPU_MUL, ds, 0x1D02);         /* fmul qword [1D02] */
             instrs += crt_sqrt_body(c, bp);
-            fpu_set(c, 0, fpu_arith(c, FPU_ADD, fpu_get(c, 0), fpu_load_f64(ds, 0x1D0A)));
+            fpu_arith_m64(c, FPU_ADD, ds, 0x1D0A);         /* fadd qword [1D0A] */
             instrs += crt_ftol_body(c, bp, &v);
             c->r32[R_AX] = (uint32_t)v;                    /* push dx; push ax; pop eax */
             c->r32[R_CX] = factor;                         /* pop ecx */

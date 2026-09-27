@@ -255,13 +255,23 @@ than the body. It touches no flags.
 ### seg37:0DC2 and seg37:0E40 — the C runtime's sqrt and _ftol
 
 Both are x87 code, and the only way to be bit-exact with the interpreter is
-to perform the same host operations in the same order under the same guest
-control word. `fpu.h` exports the primitives `fpu_exec` is made of for this —
-`fpu_get`, `fpu_set`, `fpu_load`, `fpu_pop`, `fpu_arith`, `fpu_sqrt`,
-`fpu_xam`, `fpu_to_int`, `fpu_store_f64`, `fpu_clex` — and the routines do no
-floating-point arithmetic in C at all. Each is written as a body (the effects
+to perform the same operations in the same order under the same guest
+control word. `fpu.h` exports, for this, the instructions the routines are
+made of, each as the path `fpu_exec` itself takes for it — `fpu_fild`,
+`fpu_arith_m64`, `fpu_sqrt`, `fpu_xam`, `fpu_store_f64`, `fpu_fistp64`,
+`fpu_clex` — and they work on the x87 stack as the instructions do, so no
+value ever leaves it for C to hold and the routines do no floating-point
+arithmetic of their own at all. Each is written as a body (the effects
 between the far call and the `retf`) with a site routine around it, so the
 habitability tail can run the bodies where the guest calls the functions.
+
+All three decline unless every x87 exception is masked (the control word's
+low six bits set), which the game never changes: an unmasked exception would
+trap into the runtime's handler, which none of them reproduces. The
+habitability tail also declines unless the slot its `fild` pushes into is
+empty, since a push onto a full one takes the stack-fault path, and unless
+the constant at DS:1D02 is below 2^968, so that the value sqrt sees is below
+the 2^1000 its own routine insists on.
 
 `_ftol`:
 

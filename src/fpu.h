@@ -26,24 +26,21 @@ int  fpu_exec(Cpu *c, uint8_t op, uint8_t modrm, int is_reg,
 void fpu_host_enter(void);
 void fpu_host_leave(void);
 
-/* The primitives fpu_exec is made of, for a native routine (native.h) that
-   stands in for guest code containing x87 instructions.  Going through these
-   rather than through C arithmetic is what keeps such a routine bit-exact
-   with the interpreter: the same host instruction under the same guest
-   control word, with the same effect on the tag word and status word.
-   ST(i) is relative to the guest's top of stack, as in the instructions. */
-long double fpu_get(Cpu *c, int i);                 /* ld_get             */
-void        fpu_set(Cpu *c, int i, long double v);  /* ld_set             */
-void        fpu_load(Cpu *c, long double v);        /* push: FLD          */
-void        fpu_pop(Cpu *c);                        /* FSTP's pop         */
+/* Instructions, one call each, for a native routine (native.h) that stands
+   in for guest code containing x87 instructions.  Each is the path fpu_exec
+   takes for that instruction, so a routine built from them is bit-exact with
+   the interpreter by construction: the same operation under the same guest
+   control word, with the same effect on the stack, the tag word and the
+   status word.  They work on the stack as the instructions do, so no value
+   ever leaves it for C to hold, and nothing here says how the arithmetic is
+   carried out. */
 enum { FPU_ADD, FPU_SUB, FPU_SUBR, FPU_MUL, FPU_DIV, FPU_DIVR };
-long double fpu_arith(Cpu *c, int op, long double a, long double b);
-long double fpu_sqrt(Cpu *c, long double a);        /* FSQRT              */
-void        fpu_xam(Cpu *c, long double a);         /* FXAM: sets C3..C0  */
-int64_t     fpu_to_int(Cpu *c, long double v, unsigned width);  /* FIST(P) */
-uint16_t    fpu_status(Cpu *c);                     /* FNSTSW's value     */
-long double fpu_load_f64(uint16_t sel, uint16_t off);
-void        fpu_store_f64(Cpu *c, uint16_t sel, uint16_t off, long double v); /* FST m64 */
-void        fpu_clex(Cpu *c);                       /* FNCLEX             */
+void    fpu_fild(Cpu *c, int32_t v);                /* FILD m32           */
+void    fpu_arith_m64(Cpu *c, int op, uint16_t sel, uint16_t off); /* DC /r */
+void    fpu_sqrt(Cpu *c);                           /* FSQRT              */
+void    fpu_xam(Cpu *c);                            /* FXAM               */
+void    fpu_store_f64(Cpu *c, uint16_t sel, uint16_t off); /* FST m64     */
+int64_t fpu_fistp64(Cpu *c);             /* FISTP m64, less the memory    */
+void    fpu_clex(Cpu *c);                           /* FNCLEX             */
 
 #endif
