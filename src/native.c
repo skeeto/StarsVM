@@ -974,9 +974,9 @@ static int nat_habitability(Cpu *c)
             int64_t v;
 
             fpu_fild(c, (int32_t)sum);                     /* fild dword [bp-C] */
-            fpu_arith_m64(c, FPU_MUL, ds, 0x1D02);         /* fmul qword [1D02] */
+            fpu_arith_m64(c, X80_MUL, ds, 0x1D02);         /* fmul qword [1D02] */
             instrs += crt_sqrt_body(c, bp);
-            fpu_arith_m64(c, FPU_ADD, ds, 0x1D0A);         /* fadd qword [1D0A] */
+            fpu_arith_m64(c, X80_ADD, ds, 0x1D0A);         /* fadd qword [1D0A] */
             instrs += crt_ftol_body(c, bp, &v);
             c->r32[R_AX] = (uint32_t)v;                    /* push dx; push ax; pop eax */
             c->r32[R_CX] = factor;                         /* pop ecx */

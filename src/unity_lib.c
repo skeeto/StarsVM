@@ -40,3 +40,4 @@
 #include "sel.c"
 #include "task.c"
 #include "thunk.c"
+#include "x87hw.c"

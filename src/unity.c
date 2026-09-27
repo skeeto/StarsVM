@@ -72,3 +72,4 @@
 #include "thunk.c"
 #include "unpack.c"
 #include "winproc.c"
+#include "x87hw.c"

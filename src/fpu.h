@@ -2,16 +2,17 @@
  *
  * Stars! contains 751 hardware x87 sites covering 86 distinct instruction forms,
  * including the transcendentals the MS C library uses (F2XM1, FYL2X, FPTAN,
- * FPATAN, FPREM, FSQRT, FRNDINT, FSCALE).  Writing a soft-float x87 with correct
- * 80-bit semantics for all of that would be the largest and least interesting
- * part of this project - so instead each guest instruction is handed to the
- * host's real x87 with the guest control word loaded, which is bit-exact and
- * small.  This is also why the 32-bit x86 host is the natural target.
+ * FPATAN, FPREM, FSQRT, FRNDINT, FSCALE).  fpu.c decodes them and keeps the
+ * guest's registers, stack and status word; the arithmetic is a backend's,
+ * through the interface in x80.h.  The one there is so far, x87hw.c, hands
+ * each operation to the host's real x87 with the guest control word loaded,
+ * which is bit-exact and small, and is why an x86 host is needed.
  */
 #ifndef FPU_H
 #define FPU_H
 
 #include "cpu.h"
+#include "x80.h"
 
 void fpu_reset(Cpu *c);
 
@@ -21,8 +22,10 @@ void fpu_reset(Cpu *c);
 int  fpu_exec(Cpu *c, uint8_t op, uint8_t modrm, int is_reg,
               uint16_t sel, uint16_t off);
 
-/* Save and restore the host control word around guest execution, so MinGW's
-   default 53-bit precision does not leak into guest arithmetic. */
+/* Save and restore whatever of the host the backend changes around guest
+   execution: the host's own x87 control word, for x87hw.c, so that MinGW's
+   default 53-bit precision does not leak into guest arithmetic nor the
+   guest's into the host's. */
 void fpu_host_enter(void);
 void fpu_host_leave(void);
 
@@ -33,10 +36,9 @@ void fpu_host_leave(void);
    control word, with the same effect on the stack, the tag word and the
    status word.  They work on the stack as the instructions do, so no value
    ever leaves it for C to hold, and nothing here says how the arithmetic is
-   carried out. */
-enum { FPU_ADD, FPU_SUB, FPU_SUBR, FPU_MUL, FPU_DIV, FPU_DIVR };
+   carried out.  An `op` is x80.h's: X80_ADD, X80_MUL and so on. */
 void    fpu_fild(Cpu *c, int32_t v);                /* FILD m32           */
-void    fpu_arith_m64(Cpu *c, int op, uint16_t sel, uint16_t off); /* DC /r */
+void    fpu_arith_m64(Cpu *c, int op, uint16_t sel, uint16_t off); /* DC /op */
 void    fpu_sqrt(Cpu *c);                           /* FSQRT              */
 void    fpu_xam(Cpu *c);                            /* FXAM               */
 void    fpu_store_f64(Cpu *c, uint16_t sel, uint16_t off); /* FST m64     */

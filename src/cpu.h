@@ -45,7 +45,7 @@ enum {
 };
 
 typedef struct {
-    uint8_t  b[10];     /* 80-bit extended precision, host x87 layout */
+    uint8_t  b[10];     /* 80-bit extended precision, the x87's memory image */
 } F80;
 
 typedef struct {
@@ -54,7 +54,7 @@ typedef struct {
     uint32_t eip;
     uint32_t eflags;
 
-    /* x87.  Values are kept in host 80-bit form and handed to the host FPU. */
+    /* x87.  See fpu.c: the registers are kept as their memory images. */
     F80      st[8];
     uint16_t fpu_cw, fpu_sw, fpu_tw;
     uint8_t  fpu_top;

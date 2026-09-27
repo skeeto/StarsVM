@@ -1,14 +1,14 @@
-/* fpu.c - x87 emulation by delegation to the host x87.
+/* fpu.c - the guest's x87: its registers, stack, tags and status word.
  *
- * The guest's eight registers are kept as 80-bit values in host layout, so a
- * guest operation is: load the guest control word, FLD the operands, run the
- * real instruction, read the status word back, FSTP the result.  Rounding,
- * precision control, the condition codes and the transcendentals then all come
- * out exactly right for free.
+ * The guest's eight registers are kept as the ten bytes of each one's memory
+ * image, and the stack is modelled explicitly (top-of-stack index plus tag
+ * word) rather than mapped onto anything of the host's, because the guest
+ * can leave values live across arbitrary amounts of host code.
  *
- * The guest stack is modelled explicitly (top-of-stack index plus tag word)
- * rather than mapped onto the host stack, because the guest can leave values
- * live across arbitrary amounts of host code.
+ * The arithmetic is not done here.  Each operation goes to a backend through
+ * FX(), as X80s (x80.h) with the guest's control word, and comes back as a
+ * result and an effect on the status word, which is committed by the rule
+ * x80.h gives.  Which backend is decided when the emulator is built.
  */
 
 #include "fpu.h"
@@ -16,7 +16,10 @@
 #include "log.h"
 
 #include <string.h>
-#include <math.h>
+
+/* The backend.  x87hw.c hands each operation to this machine's own x87. */
+#include "x87hw.h"
+#define FX(name) x87hw_##name
 
 /* x87 status word condition-code bits. */
 #define SW_C0 0x0100u
@@ -30,17 +33,8 @@
 #define TAG_SPEC  2
 #define TAG_EMPTY 3
 
-static uint16_t host_cw_saved;
-
-void fpu_host_enter(void)
-{
-    __asm__ volatile ("fnstcw %0" : "=m"(host_cw_saved));
-}
-
-void fpu_host_leave(void)
-{
-    __asm__ volatile ("fldcw %0" : : "m"(host_cw_saved));
-}
+void fpu_host_enter(void) { FX(host_enter)(); }
+void fpu_host_leave(void) { FX(host_leave)(); }
 
 void fpu_reset(Cpu *c)
 {
@@ -62,40 +56,22 @@ static void set_tag(Cpu *c, int p, int t)
     c->fpu_tw = (uint16_t)((c->fpu_tw & ~(3u << (p * 2))) | ((unsigned)t << (p * 2)));
 }
 
-/* True for +0 and -0: a zero exponent with a zero significand.  A denormal has
-   the zero exponent but a significand, so it is correctly not zero here.  This
-   replaces comparing against 0.0L, which pulled the value back into the FPU
-   just to ask. */
-static int f80_zero(const uint8_t *b)
+static void st_get(Cpu *c, int i, X80 *v)
 {
-    int i;
-
-    if ((((unsigned)b[9] << 8 | b[8]) & 0x7FFFu) != 0) return 0;
-    for (i = 0; i < 8; i++) if (b[i]) return 0;
-    return 1;
+    x80_get(v, c->st[phys(c, i)].b);
 }
 
-/* Read ST(i) into a host long double.  F80 already holds the host's 80-bit
-   layout, so fldt/fstpt here was an expensive way to copy ten bytes. */
-static long double ld_get(Cpu *c, int i)
-{
-    long double v = 0;
-
-    memcpy(&v, c->st[phys(c, i)].b, 10);
-    return v;
-}
-
-/* Write a host long double into ST(i) and mark it valid. */
-static void ld_set(Cpu *c, int i, long double v)
+/* Write ST(i) and tag it: zero for +0 and -0 (a denormal has the zero
+   exponent but a significand, so it is correctly not zero), valid for
+   everything else. */
+static void st_set(Cpu *c, int i, const X80 *v)
 {
     int p = phys(c, i);
-    uint8_t *dst = c->st[p].b;
-
-    memcpy(dst, &v, 10);
-    set_tag(c, p, f80_zero(dst) ? TAG_ZERO : TAG_VALID);
+    x80_put(c->st[p].b, v);
+    set_tag(c, p, !(v->se & 0x7FFFu) && !v->m ? TAG_ZERO : TAG_VALID);
 }
 
-static void fpu_push(Cpu *c, long double v)
+static void fpu_push(Cpu *c, const X80 *v)
 {
     c->fpu_top = (uint8_t)((c->fpu_top - 1) & 7);
     if (tag_of(c, phys(c, 0)) != TAG_EMPTY) {
@@ -103,7 +79,7 @@ static void fpu_push(Cpu *c, long double v)
            hardware would push anyway with C1 set. */
         c->fpu_sw |= SW_C1 | 0x0041u;
     }
-    ld_set(c, 0, v);
+    st_set(c, 0, v);
 }
 
 static void fpu_discard(Cpu *c)
@@ -118,198 +94,22 @@ static uint16_t sw_value(Cpu *c)
     return (uint16_t)((c->fpu_sw & ~0x3800u) | ((unsigned)c->fpu_top << 11));
 }
 
-/* --------------------------------------------------------------- host bridge */
-
-/* Run a two-operand host x87 operation under the guest control word.
-   `code` selects the operation (FPU_ADD and so on, from fpu.h); both operands
-   are host long doubles. */
-
-static long double host_arith(Cpu *c, int code, long double a, long double b)
+/* What an operation needs of the machine, and how what it reports goes back:
+   see x80.h. */
+static X80Env env(Cpu *c)
 {
-    long double r;
-    uint16_t cw = c->fpu_cw, sw = 0;
-
-    switch (code) {
-    case FPU_ADD:
-        __asm__ volatile ("fldcw %3\n\tfldt %1\n\tfldt %2\n\tfaddp\n\t"
-                          "fnstsw %0\n\tfstpt %1"
-                          : "=a"(sw), "+m"(a) : "m"(b), "m"(cw) : "st", "st(1)");
-        r = a; break;
-    case FPU_SUB:   /* a - b */
-        __asm__ volatile ("fldcw %3\n\tfldt %2\n\tfldt %1\n\tfsubp\n\t"
-                          "fnstsw %0\n\tfstpt %1"
-                          : "=a"(sw), "+m"(a) : "m"(b), "m"(cw) : "st", "st(1)");
-        r = a; break;
-    case FPU_SUBR:  /* b - a */
-        __asm__ volatile ("fldcw %3\n\tfldt %1\n\tfldt %2\n\tfsubp\n\t"
-                          "fnstsw %0\n\tfstpt %1"
-                          : "=a"(sw), "+m"(a) : "m"(b), "m"(cw) : "st", "st(1)");
-        r = a; break;
-    case FPU_MUL:
-        __asm__ volatile ("fldcw %3\n\tfldt %1\n\tfldt %2\n\tfmulp\n\t"
-                          "fnstsw %0\n\tfstpt %1"
-                          : "=a"(sw), "+m"(a) : "m"(b), "m"(cw) : "st", "st(1)");
-        r = a; break;
-    case FPU_DIV:   /* a / b */
-        __asm__ volatile ("fldcw %3\n\tfldt %2\n\tfldt %1\n\tfdivp\n\t"
-                          "fnstsw %0\n\tfstpt %1"
-                          : "=a"(sw), "+m"(a) : "m"(b), "m"(cw) : "st", "st(1)");
-        r = a; break;
-    default:       /* FPU_DIVR: b / a */
-        __asm__ volatile ("fldcw %3\n\tfldt %1\n\tfldt %2\n\tfdivp\n\t"
-                          "fnstsw %0\n\tfstpt %1"
-                          : "=a"(sw), "+m"(a) : "m"(b), "m"(cw) : "st", "st(1)");
-        r = a; break;
-    }
-    c->fpu_sw = (uint16_t)((c->fpu_sw & 0x3800u) | (sw & ~0x3800u));
-    return r;
+    X80Env e;
+    e.cw = c->fpu_cw;
+    e.sw = e.cc = 0;
+    return e;
 }
 
-/* Compare and set C3/C2/C0 exactly as FCOM does. */
-static void host_compare(Cpu *c, long double a, long double b)
+static void commit(Cpu *c, const X80Env *e)
 {
-    uint16_t sw = 0, cw = c->fpu_cw;
-
-    __asm__ volatile ("fldcw %3\n\tfldt %2\n\tfldt %1\n\tfcompp\n\tfnstsw %0"
-                      : "=a"(sw) : "m"(a), "m"(b), "m"(cw) : "st", "st(1)");
-    c->fpu_sw = (uint16_t)((c->fpu_sw & ~(SW_C0 | SW_C1 | SW_C2 | SW_C3)) |
-                           (sw & (SW_C0 | SW_C1 | SW_C2 | SW_C3)));
+    c->fpu_sw = (uint16_t)((c->fpu_sw & ~e->cc) | e->sw);
 }
 
-/* One-operand host operations that need the real instruction. */
-enum { U_SQRT, U_RNDINT, U_2XM1, U_TAN, U_ATAN, U_YL2X, U_YL2XP1, U_PREM,
-       U_SCALE, U_XTRACT, U_SIN, U_COS, U_ABS, U_CHS, U_TST, U_XAM };
-
-static long double host_unary(Cpu *c, int code, long double a, long double b,
-                              long double *second, int *pushed)
-{
-    uint16_t sw = 0, cw = c->fpu_cw;
-    long double r = a;
-
-    *pushed = 0;
-    switch (code) {
-    case U_SQRT:
-        __asm__ volatile ("fldcw %2\n\tfldt %1\n\tfsqrt\n\tfnstsw %0\n\tfstpt %1"
-                          : "=a"(sw), "+m"(r) : "m"(cw) : "st");
-        break;
-    case U_RNDINT:
-        __asm__ volatile ("fldcw %2\n\tfldt %1\n\tfrndint\n\tfnstsw %0\n\tfstpt %1"
-                          : "=a"(sw), "+m"(r) : "m"(cw) : "st");
-        break;
-    case U_2XM1:
-        __asm__ volatile ("fldcw %2\n\tfldt %1\n\tf2xm1\n\tfnstsw %0\n\tfstpt %1"
-                          : "=a"(sw), "+m"(r) : "m"(cw) : "st");
-        break;
-    case U_ABS:
-        __asm__ volatile ("fldt %1\n\tfabs\n\tfnstsw %0\n\tfstpt %1"
-                          : "=a"(sw), "+m"(r) : : "st");
-        break;
-    case U_CHS:
-        __asm__ volatile ("fldt %1\n\tfchs\n\tfnstsw %0\n\tfstpt %1"
-                          : "=a"(sw), "+m"(r) : : "st");
-        break;
-    case U_TAN:
-        /* FPTAN replaces ST with tan(ST) and pushes 1.0 - but only if the
-           argument is in range.  Outside it, C2 comes back set and the stack is
-           left exactly as it was.  Popping twice regardless therefore underflowed
-           the host's own stack and returned the indefinite, so the second pop is
-           conditional and the caller is told whether a push happened. */
-        __asm__ volatile ("fldcw %3\n\tfldt %1\n\tfptan\n\tfnstsw %%ax\n\t"
-                          "testb $0x04, %%ah\n\tjnz 1f\n\tfstpt %2\n\t"
-                          "1:\tfstpt %1"
-                          : "=a"(sw), "+m"(r), "=m"(*second) : "m"(cw)
-                          : "st", "st(1)", "cc");
-        *pushed = (sw & SW_C2) == 0;
-        break;
-    case U_ATAN:  /* FPATAN: atan(ST(1)/ST(0)), pops one */
-        __asm__ volatile ("fldcw %3\n\tfldt %2\n\tfldt %1\n\tfpatan\n\t"
-                          "fnstsw %0\n\tfstpt %1"
-                          : "=a"(sw), "+m"(r) : "m"(b), "m"(cw) : "st", "st(1)");
-        break;
-    case U_YL2X:  /* ST(1) * log2(ST(0)), pops one */
-        __asm__ volatile ("fldcw %3\n\tfldt %2\n\tfldt %1\n\tfyl2x\n\t"
-                          "fnstsw %0\n\tfstpt %1"
-                          : "=a"(sw), "+m"(r) : "m"(b), "m"(cw) : "st", "st(1)");
-        break;
-    case U_YL2XP1:
-        __asm__ volatile ("fldcw %3\n\tfldt %2\n\tfldt %1\n\tfyl2xp1\n\t"
-                          "fnstsw %0\n\tfstpt %1"
-                          : "=a"(sw), "+m"(r) : "m"(b), "m"(cw) : "st", "st(1)");
-        break;
-    case U_PREM:  /* ST(0) remainder ST(1) */
-        __asm__ volatile ("fldcw %3\n\tfldt %2\n\tfldt %1\n\tfprem\n\t"
-                          "fnstsw %0\n\tfstpt %1\n\tfstp %%st(0)"
-                          : "=a"(sw), "+m"(r) : "m"(b), "m"(cw) : "st", "st(1)");
-        break;
-    case U_SCALE: /* ST(0) * 2^trunc(ST(1)) */
-        __asm__ volatile ("fldcw %3\n\tfldt %2\n\tfldt %1\n\tfscale\n\t"
-                          "fnstsw %0\n\tfstpt %1\n\tfstp %%st(0)"
-                          : "=a"(sw), "+m"(r) : "m"(b), "m"(cw) : "st", "st(1)");
-        break;
-    case U_XTRACT:
-        __asm__ volatile ("fldcw %3\n\tfldt %1\n\tfxtract\n\tfnstsw %0\n\t"
-                          "fstpt %1\n\tfstpt %2"
-                          : "=a"(sw), "+m"(r), "=m"(*second) : "m"(cw) : "st", "st(1)");
-        *pushed = 1;
-        break;
-    case U_SIN:
-        __asm__ volatile ("fldcw %2\n\tfldt %1\n\tfsin\n\tfnstsw %0\n\tfstpt %1"
-                          : "=a"(sw), "+m"(r) : "m"(cw) : "st");
-        break;
-    case U_COS:
-        __asm__ volatile ("fldcw %2\n\tfldt %1\n\tfcos\n\tfnstsw %0\n\tfstpt %1"
-                          : "=a"(sw), "+m"(r) : "m"(cw) : "st");
-        break;
-    case U_TST:
-        __asm__ volatile ("fldt %1\n\tftst\n\tfnstsw %0\n\tfstp %%st(0)"
-                          : "=a"(sw) : "m"(r) : "st");
-        break;
-    default:      /* U_XAM */
-        __asm__ volatile ("fldt %1\n\tfxam\n\tfnstsw %0\n\tfstp %%st(0)"
-                          : "=a"(sw) : "m"(r) : "st");
-        break;
-    }
-    c->fpu_sw = (uint16_t)((c->fpu_sw & 0x3800u) | (sw & ~0x3800u));
-    return r;
-}
-
-/* ------------------------------------------------------- memory load and store */
-
-/* The constants from the host's own instructions rather than from C literals.
-   Two reasons, and the fuzzer found both at once: the exact 64-bit significands
-   are the hardware's to define, and the hardware rounds them by the current
-   rounding mode, which a literal written once cannot do.  Five of the seven
-   differed in the last byte. */
-static long double host_const(uint16_t cw, int which)
-{
-    long double v;
-
-    switch (which) {
-    case 0: __asm__ volatile ("fldcw %1\n\tfld1\n\tfstpt %0"
-                              : "=m"(v) : "m"(cw) : "st"); break;
-    case 1: __asm__ volatile ("fldcw %1\n\tfldl2t\n\tfstpt %0"
-                              : "=m"(v) : "m"(cw) : "st"); break;
-    case 2: __asm__ volatile ("fldcw %1\n\tfldl2e\n\tfstpt %0"
-                              : "=m"(v) : "m"(cw) : "st"); break;
-    case 3: __asm__ volatile ("fldcw %1\n\tfldpi\n\tfstpt %0"
-                              : "=m"(v) : "m"(cw) : "st"); break;
-    case 4: __asm__ volatile ("fldcw %1\n\tfldlg2\n\tfstpt %0"
-                              : "=m"(v) : "m"(cw) : "st"); break;
-    case 5: __asm__ volatile ("fldcw %1\n\tfldln2\n\tfstpt %0"
-                              : "=m"(v) : "m"(cw) : "st"); break;
-    default: __asm__ volatile ("fldcw %1\n\tfldz\n\tfstpt %0"
-                              : "=m"(v) : "m"(cw) : "st"); break;
-    }
-    return v;
-}
-
-static long double load_f32(uint16_t sel, uint16_t off)
-{
-    float f;
-    uint32_t bits = sel_rd32(sel, off);
-    memcpy(&f, &bits, 4);
-    return (long double)f;
-}
+/* ------------------------------------------------------------ memory operands */
 
 /* One translation instead of eight or ten.  An access that runs off the end of
    a selector keeps the byte path, where the offset wraps inside the selector as
@@ -337,97 +137,169 @@ static void fpu_mem_write(uint16_t sel, uint16_t off, const uint8_t *src,
     for (i = 0; i < n; i++) sel_wr8(sel, (uint16_t)(off + i), src[i]);
 }
 
-static long double load_f64(uint16_t sel, uint16_t off)
+static uint64_t rd64(uint16_t sel, uint16_t off)
 {
-    double d;
     uint8_t b[8];
+    uint64_t v = 0;
+    int i;
 
     fpu_mem_read(sel, off, b, 8);
-    memcpy(&d, b, 8);
-    return (long double)d;
-}
-
-static long double load_f80(uint16_t sel, uint16_t off)
-{
-    uint8_t b[10];
-    long double v = 0;
-
-    fpu_mem_read(sel, off, b, 10);
-    memcpy(&v, b, 10);
+    for (i = 7; i >= 0; i--) v = v << 8 | b[i];
     return v;
 }
 
-/* Narrowing a value to store it rounds, and rounding is something the status
-   word reports: C1 says whether the result went up.  These used to leave it
-   alone entirely. */
-static void store_f32(Cpu *c, uint16_t sel, uint16_t off, long double v,
-                      uint16_t cw)
+static void wr64(uint16_t sel, uint16_t off, uint64_t v)
 {
-    float f;
-    uint32_t bits;
-    uint16_t sw;
-
-    __asm__ volatile ("fldcw %3\n\tfldt %2\n\tfstps %1\n\tfnstsw %0"
-                      : "=a"(sw), "=m"(f) : "m"(v), "m"(cw) : "st");
-    c->fpu_sw = (uint16_t)((c->fpu_sw & 0x3800u) | (sw & ~0x3800u));
-    memcpy(&bits, &f, 4);
-    sel_wr32(sel, off, bits);
-}
-
-static void store_f64(Cpu *c, uint16_t sel, uint16_t off, long double v,
-                      uint16_t cw)
-{
-    double d;
     uint8_t b[8];
-    uint16_t sw;
+    int i;
 
-    __asm__ volatile ("fldcw %3\n\tfldt %2\n\tfstpl %1\n\tfnstsw %0"
-                      : "=a"(sw), "=m"(d) : "m"(v), "m"(cw) : "st");
-    c->fpu_sw = (uint16_t)((c->fpu_sw & 0x3800u) | (sw & ~0x3800u));
-    memcpy(b, &d, 8);
+    for (i = 0; i < 8; i++) b[i] = (uint8_t)(v >> (8 * i));
     fpu_mem_write(sel, off, b, 8);
 }
 
-static void store_f80(uint16_t sel, uint16_t off, long double v)
+/* The operand of a D8, DA, DC or DE memory form, as a value: a float, a
+   32-bit integer, a double and a 16-bit integer respectively. */
+static void mem_operand(Cpu *c, uint8_t op, uint16_t sel, uint16_t off, X80 *m)
 {
-    uint8_t b[10];
+    X80Env e = env(c);
 
-    memcpy(b, &v, 10);
-    fpu_mem_write(sel, off, b, 10);
+    switch (op) {
+    case 0xD8: FX(from_f32)(&e, sel_rd32(sel, off), m); break;
+    case 0xDA: FX(from_int)(&e, (int32_t)sel_rd32(sel, off), m); break;
+    case 0xDC: FX(from_f64)(&e, rd64(sel, off), m); break;
+    default:   FX(from_int)(&e, (int16_t)sel_rd16(sel, off), m); break;
+    }
+    commit(c, &e);
 }
 
-/* Integer conversions go through the host too, so the guest rounding mode in the
-   control word decides how FIST rounds - which is exactly what C code relies on
-   after setting the control word for truncation. */
-static int64_t to_int(Cpu *c, long double v, uint16_t cw, unsigned width)
+/* ---------------------------------------------------------------- operations */
+
+/* ST(dst) = a op b, where a is ST(dst)'s own value. */
+static void arith(Cpu *c, int op, int dst, const X80 *a, const X80 *b)
 {
-    int64_t r;
-    uint16_t sw;
+    X80Env e = env(c);
+    X80 r;
 
-    __asm__ volatile ("fldcw %3\n\tfldt %2\n\tfistpll %1\n\tfnstsw %0"
-                      : "=a"(sw), "=m"(r) : "m"(v), "m"(cw) : "st");
-    c->fpu_sw = (uint16_t)((c->fpu_sw & 0x3800u) | (sw & ~0x3800u));
+    FX(arith)(&e, op, a, b, &r);
+    commit(c, &e);
+    st_set(c, dst, &r);
+}
 
-    /* The narrowing belongs here, not in the caller.  A value that does not fit
-       the destination is not truncated to it: the hardware writes the integer
-       indefinite for that width and raises IE.  Casting the 64-bit result down
-       wrote 0 instead, which is a plausible number and therefore the worst kind
-       of wrong.  A conversion that already failed comes back as the 64-bit
-       indefinite, which is out of range for the narrower widths and so lands in
-       the same place. */
-    if (width == 8) return r;
-    if (width == 4) {
-        if (r < -2147483647LL - 1 || r > 2147483647LL) {
-            c->fpu_sw |= 0x0001u;                          /* IE */
-            return (int64_t)(int32_t)0x80000000u;
+static void compare(Cpu *c, const X80 *a, const X80 *b)
+{
+    X80Env e = env(c);
+
+    FX(compare)(&e, a, b);
+    commit(c, &e);
+}
+
+/* A D8, DA, DC or DE memory form: ST(0) against the operand, by the ModRM reg
+   field, which is x80.h's operation code for everything but the compares. */
+static void arith_mem(Cpu *c, uint8_t op, int reg, uint16_t sel, uint16_t off)
+{
+    X80 a, m;
+
+    mem_operand(c, op, sel, off, &m);
+    st_get(c, 0, &a);
+    if (reg == 2 || reg == 3) {
+        compare(c, &a, &m);
+        if (reg == 3) fpu_discard(c);
+    } else {
+        arith(c, reg, 0, &a, &m);
+    }
+}
+
+static void fild(Cpu *c, int64_t v)
+{
+    X80Env e = env(c);
+    X80 r;
+
+    FX(from_int)(&e, v, &r);
+    commit(c, &e);
+    fpu_push(c, &r);
+}
+
+/* FIST(P) at the given width in bytes, less the store. */
+static int64_t fist(Cpu *c, unsigned width)
+{
+    X80Env e = env(c);
+    X80 a;
+    int64_t v;
+
+    st_get(c, 0, &a);
+    v = FX(to_int)(&e, &a, width);
+    commit(c, &e);
+    return v;
+}
+
+static void store_f32(Cpu *c, uint16_t sel, uint16_t off)
+{
+    X80Env e = env(c);
+    X80 a;
+    uint32_t bits;
+
+    st_get(c, 0, &a);
+    bits = FX(to_f32)(&e, &a);
+    commit(c, &e);
+    sel_wr32(sel, off, bits);
+}
+
+static void store_f64(Cpu *c, uint16_t sel, uint16_t off)
+{
+    X80Env e = env(c);
+    X80 a;
+    uint64_t bits;
+
+    st_get(c, 0, &a);
+    bits = FX(to_f64)(&e, &a);
+    commit(c, &e);
+    wr64(sel, off, bits);
+}
+
+/* The D9 E0..FF group, less the stack-pointer moves, by its second byte: one
+   operation on ST(0), or on ST(0) and ST(1), and what it does to the stack.
+   The two-operand ones that pop leave their result where ST(1) was. */
+static int special(Cpu *c, uint8_t modrm)
+{
+    X80Env e = env(c);
+    X80 a, b, r, s;
+
+    st_get(c, 0, &a);
+    st_get(c, 1, &b);
+    switch (modrm) {
+    case 0xE0: FX(chs)(&e, &a, &r);        break;             /* FCHS    */
+    case 0xE1: FX(abs)(&e, &a, &r);        break;             /* FABS    */
+    case 0xE4: FX(tst)(&e, &a);            commit(c, &e); return 1; /* FTST */
+    case 0xE5: FX(xam)(&e, &a);            commit(c, &e); return 1; /* FXAM */
+    case 0xF0: FX(f2xm1)(&e, &a, &r);      break;             /* F2XM1   */
+    case 0xF1: FX(yl2x)(&e, &a, &b, &r);   fpu_discard(c); break;   /* FYL2X */
+    case 0xF2:                                                /* FPTAN   */
+        if (FX(ptan)(&e, &a, &r, &s)) {
+            commit(c, &e);
+            st_set(c, 0, &r);
+            fpu_push(c, &s);
+            return 1;
         }
-        return r;
+        break;                              /* out of range: no push */
+    case 0xF3: FX(patan)(&e, &a, &b, &r);  fpu_discard(c); break;   /* FPATAN */
+    case 0xF4:                                                /* FXTRACT */
+        FX(xtract)(&e, &a, &r, &s);
+        commit(c, &e);
+        st_set(c, 0, &r);
+        fpu_push(c, &s);
+        return 1;
+    case 0xF8: FX(prem)(&e, &a, &b, &r);   break;             /* FPREM   */
+    case 0xF9: FX(yl2xp1)(&e, &a, &b, &r); fpu_discard(c); break;   /* FYL2XP1 */
+    case 0xFA: FX(sqrt)(&e, &a, &r);       break;             /* FSQRT   */
+    case 0xFC: FX(rndint)(&e, &a, &r);     break;             /* FRNDINT */
+    case 0xFD: FX(scale)(&e, &a, &b, &r);  break;             /* FSCALE  */
+    case 0xFE: FX(sin)(&e, &a, &r);        break;             /* FSIN    */
+    case 0xFF: FX(cos)(&e, &a, &r);        break;             /* FCOS    */
+    default:   return 0;
     }
-    if (r < -32768LL || r > 32767LL) {
-        c->fpu_sw |= 0x0001u;
-        return (int64_t)(int16_t)0x8000u;
-    }
-    return r;
+    commit(c, &e);
+    st_set(c, 0, &r);
+    return 1;
 }
 
 /* ------------------------------------------------------------------ dispatch */
@@ -437,30 +309,25 @@ int fpu_exec(Cpu *c, uint8_t op, uint8_t modrm, int is_reg,
 {
     int reg = (modrm >> 3) & 7;
     int rm  = modrm & 7;
-    uint16_t cw = c->fpu_cw;
+    X80 a, b;
 
     if (!is_reg) {
         /* ---- memory forms ---- */
         switch (op) {
-        case 0xD8: {                               /* arithmetic with m32 */
-            long double m = load_f32(sel, off);
-            switch (reg) {
-            case 0: ld_set(c, 0, host_arith(c, FPU_ADD,  ld_get(c, 0), m)); return 1;
-            case 1: ld_set(c, 0, host_arith(c, FPU_MUL,  ld_get(c, 0), m)); return 1;
-            case 2: host_compare(c, ld_get(c, 0), m); return 1;
-            case 3: host_compare(c, ld_get(c, 0), m); fpu_discard(c); return 1;
-            case 4: ld_set(c, 0, host_arith(c, FPU_SUB,  ld_get(c, 0), m)); return 1;
-            case 5: ld_set(c, 0, host_arith(c, FPU_SUBR, ld_get(c, 0), m)); return 1;
-            case 6: ld_set(c, 0, host_arith(c, FPU_DIV,  ld_get(c, 0), m)); return 1;
-            default:ld_set(c, 0, host_arith(c, FPU_DIVR, ld_get(c, 0), m)); return 1;
-            }
-        }
+        case 0xD8: case 0xDA: case 0xDC: case 0xDE:
+            arith_mem(c, op, reg, sel, off);
+            return 1;
         case 0xD9:
             switch (reg) {
-            case 0: fpu_push(c, load_f32(sel, off)); return 1;      /* FLD m32   */
-            case 2: store_f32(c, sel, off, ld_get(c, 0), cw); return 1; /* FST m32 */
-            case 3: store_f32(c, sel, off, ld_get(c, 0), cw);
-                    fpu_discard(c); return 1;                        /* FSTP m32 */
+            case 0: {                                                /* FLD m32  */
+                X80Env e = env(c);
+                FX(from_f32)(&e, sel_rd32(sel, off), &a);
+                commit(c, &e);
+                fpu_push(c, &a);
+                return 1;
+            }
+            case 2: store_f32(c, sel, off); return 1;               /* FST m32  */
+            case 3: store_f32(c, sel, off); fpu_discard(c); return 1; /* FSTP m32 */
             case 4: /* FLDENV: restore the 14-byte 16-bit environment */
                 c->fpu_cw = sel_rd16(sel, off);
                 c->fpu_sw = sel_rd16(sel, (uint16_t)(off + 2));
@@ -481,105 +348,52 @@ int fpu_exec(Cpu *c, uint8_t op, uint8_t modrm, int is_reg,
             case 7: sel_wr16(sel, off, c->fpu_cw); return 1;        /* FNSTCW   */
             default: return 0;
             }
-        case 0xDA: {                               /* integer m32 arithmetic */
-            long double m = (long double)(int32_t)sel_rd32(sel, off);
-            switch (reg) {
-            case 0: ld_set(c, 0, host_arith(c, FPU_ADD,  ld_get(c, 0), m)); return 1;
-            case 1: ld_set(c, 0, host_arith(c, FPU_MUL,  ld_get(c, 0), m)); return 1;
-            case 2: host_compare(c, ld_get(c, 0), m); return 1;
-            case 3: host_compare(c, ld_get(c, 0), m); fpu_discard(c); return 1;
-            case 4: ld_set(c, 0, host_arith(c, FPU_SUB,  ld_get(c, 0), m)); return 1;
-            case 5: ld_set(c, 0, host_arith(c, FPU_SUBR, ld_get(c, 0), m)); return 1;
-            case 6: ld_set(c, 0, host_arith(c, FPU_DIV,  ld_get(c, 0), m)); return 1;
-            default:ld_set(c, 0, host_arith(c, FPU_DIVR, ld_get(c, 0), m)); return 1;
-            }
-        }
         case 0xDB:
             switch (reg) {
-            case 0: fpu_push(c, (long double)(int32_t)sel_rd32(sel, off)); return 1;
-            case 2: {                              /* FIST m32 */
-                int64_t v = to_int(c, ld_get(c, 0), cw, 4);
-                sel_wr32(sel, off, (uint32_t)(int32_t)v);
+            case 0: fild(c, (int32_t)sel_rd32(sel, off)); return 1; /* FILD m32 */
+            case 2: sel_wr32(sel, off, (uint32_t)fist(c, 4)); return 1;   /* FIST  */
+            case 3: sel_wr32(sel, off, (uint32_t)fist(c, 4));
+                    fpu_discard(c); return 1;                        /* FISTP m32 */
+            case 5: {                                                /* FLD m80  */
+                uint8_t m[10];
+                fpu_mem_read(sel, off, m, 10);
+                x80_get(&a, m);
+                fpu_push(c, &a);
                 return 1;
             }
-            case 3: {                              /* FISTP m32 */
-                int64_t v = to_int(c, ld_get(c, 0), cw, 4);
-                sel_wr32(sel, off, (uint32_t)(int32_t)v);
+            case 7: {                                                /* FSTP m80 */
+                uint8_t m[10];
+                st_get(c, 0, &a);
+                x80_put(m, &a);
+                fpu_mem_write(sel, off, m, 10);
                 fpu_discard(c);
                 return 1;
             }
-            case 5: fpu_push(c, load_f80(sel, off)); return 1;      /* FLD m80  */
-            case 7: store_f80(sel, off, ld_get(c, 0));
-                    fpu_discard(c); return 1;                        /* FSTP m80 */
             default: return 0;
             }
-        case 0xDC: {                               /* arithmetic with m64 */
-            long double m = load_f64(sel, off);
-            switch (reg) {
-            case 0: ld_set(c, 0, host_arith(c, FPU_ADD,  ld_get(c, 0), m)); return 1;
-            case 1: ld_set(c, 0, host_arith(c, FPU_MUL,  ld_get(c, 0), m)); return 1;
-            case 2: host_compare(c, ld_get(c, 0), m); return 1;
-            case 3: host_compare(c, ld_get(c, 0), m); fpu_discard(c); return 1;
-            case 4: ld_set(c, 0, host_arith(c, FPU_SUB,  ld_get(c, 0), m)); return 1;
-            case 5: ld_set(c, 0, host_arith(c, FPU_SUBR, ld_get(c, 0), m)); return 1;
-            case 6: ld_set(c, 0, host_arith(c, FPU_DIV,  ld_get(c, 0), m)); return 1;
-            default:ld_set(c, 0, host_arith(c, FPU_DIVR, ld_get(c, 0), m)); return 1;
-            }
-        }
         case 0xDD:
             switch (reg) {
-            case 0: fpu_push(c, load_f64(sel, off)); return 1;      /* FLD m64  */
-            case 2: store_f64(c, sel, off, ld_get(c, 0), cw); return 1; /* FST m64 */
-            case 3: store_f64(c, sel, off, ld_get(c, 0), cw);
-                    fpu_discard(c); return 1;                        /* FSTP m64 */
+            case 0: {                                                /* FLD m64  */
+                X80Env e = env(c);
+                FX(from_f64)(&e, rd64(sel, off), &a);
+                commit(c, &e);
+                fpu_push(c, &a);
+                return 1;
+            }
+            case 2: store_f64(c, sel, off); return 1;               /* FST m64  */
+            case 3: store_f64(c, sel, off); fpu_discard(c); return 1; /* FSTP m64 */
             case 7: sel_wr16(sel, off, sw_value(c)); return 1;       /* FNSTSW m16 */
             default: return 0;
             }
-        case 0xDE: {                               /* integer m16 arithmetic */
-            long double m = (long double)(int16_t)sel_rd16(sel, off);
-            switch (reg) {
-            case 0: ld_set(c, 0, host_arith(c, FPU_ADD,  ld_get(c, 0), m)); return 1;
-            case 1: ld_set(c, 0, host_arith(c, FPU_MUL,  ld_get(c, 0), m)); return 1;
-            case 2: host_compare(c, ld_get(c, 0), m); return 1;
-            case 3: host_compare(c, ld_get(c, 0), m); fpu_discard(c); return 1;
-            case 4: ld_set(c, 0, host_arith(c, FPU_SUB,  ld_get(c, 0), m)); return 1;
-            case 5: ld_set(c, 0, host_arith(c, FPU_SUBR, ld_get(c, 0), m)); return 1;
-            case 6: ld_set(c, 0, host_arith(c, FPU_DIV,  ld_get(c, 0), m)); return 1;
-            default:ld_set(c, 0, host_arith(c, FPU_DIVR, ld_get(c, 0), m)); return 1;
-            }
-        }
         case 0xDF:
             switch (reg) {
-            case 0: fpu_push(c, (long double)(int16_t)sel_rd16(sel, off)); return 1;
-            case 2: {                              /* FIST m16 */
-                int64_t v = to_int(c, ld_get(c, 0), cw, 2);
-                sel_wr16(sel, off, (uint16_t)(int16_t)v);
-                return 1;
-            }
-            case 3: {                              /* FISTP m16 */
-                int64_t v = to_int(c, ld_get(c, 0), cw, 2);
-                sel_wr16(sel, off, (uint16_t)(int16_t)v);
-                fpu_discard(c);
-                return 1;
-            }
-            case 5: {                              /* FILD m64 */
-                uint8_t b[8];
-                int64_t v;
-                int i;
-                for (i = 0; i < 8; i++) b[i] = sel_rd8(sel, (uint16_t)(off + i));
-                memcpy(&v, b, 8);
-                fpu_push(c, (long double)v);
-                return 1;
-            }
-            case 7: {                              /* FISTP m64 */
-                int64_t v = to_int(c, ld_get(c, 0), cw, 8);
-                uint8_t b[8];
-                int i;
-                memcpy(b, &v, 8);
-                for (i = 0; i < 8; i++) sel_wr8(sel, (uint16_t)(off + i), b[i]);
-                fpu_discard(c);
-                return 1;
-            }
+            case 0: fild(c, (int16_t)sel_rd16(sel, off)); return 1; /* FILD m16 */
+            case 2: sel_wr16(sel, off, (uint16_t)fist(c, 2)); return 1;   /* FIST  */
+            case 3: sel_wr16(sel, off, (uint16_t)fist(c, 2));
+                    fpu_discard(c); return 1;                        /* FISTP m16 */
+            case 5: fild(c, (int64_t)rd64(sel, off)); return 1;     /* FILD m64 */
+            case 7: wr64(sel, off, (uint64_t)fist(c, 8));
+                    fpu_discard(c); return 1;                        /* FISTP m64 */
             default: return 0;
             }
         default:
@@ -590,89 +404,45 @@ int fpu_exec(Cpu *c, uint8_t op, uint8_t modrm, int is_reg,
     /* ---- register forms ---- */
     switch (op) {
     case 0xD8:                                     /* op ST(0), ST(i) */
-        switch (reg) {
-        case 0: ld_set(c, 0, host_arith(c, FPU_ADD,  ld_get(c, 0), ld_get(c, rm))); return 1;
-        case 1: ld_set(c, 0, host_arith(c, FPU_MUL,  ld_get(c, 0), ld_get(c, rm))); return 1;
-        case 2: host_compare(c, ld_get(c, 0), ld_get(c, rm)); return 1;
-        case 3: host_compare(c, ld_get(c, 0), ld_get(c, rm)); fpu_discard(c); return 1;
-        case 4: ld_set(c, 0, host_arith(c, FPU_SUB,  ld_get(c, 0), ld_get(c, rm))); return 1;
-        case 5: ld_set(c, 0, host_arith(c, FPU_SUBR, ld_get(c, 0), ld_get(c, rm))); return 1;
-        case 6: ld_set(c, 0, host_arith(c, FPU_DIV,  ld_get(c, 0), ld_get(c, rm))); return 1;
-        default:ld_set(c, 0, host_arith(c, FPU_DIVR, ld_get(c, 0), ld_get(c, rm))); return 1;
+        st_get(c, 0, &a);
+        st_get(c, rm, &b);
+        if (reg == 2 || reg == 3) {
+            compare(c, &a, &b);
+            if (reg == 3) fpu_discard(c);
+        } else {
+            arith(c, reg, 0, &a, &b);
         }
+        return 1;
     case 0xD9:
         switch (reg) {
-        case 0: fpu_push(c, ld_get(c, rm == 0 ? 0 : rm)); return 1;   /* FLD ST(i) */
-        case 1: {                                                     /* FXCH      */
-            long double a = ld_get(c, 0), b = ld_get(c, rm);
-            ld_set(c, 0, b);
-            ld_set(c, rm, a);
+        case 0: st_get(c, rm, &a); fpu_push(c, &a); return 1;        /* FLD ST(i) */
+        case 1:                                                       /* FXCH      */
+            st_get(c, 0, &a);
+            st_get(c, rm, &b);
+            st_set(c, 0, &b);
+            st_set(c, rm, &a);
             return 1;
-        }
         case 2: if (rm == 0) return 1; return 0;                      /* FNOP      */
         /* Copy then pop, which is what DD /3 below has always done.  This
            form only popped, so `fstp st(2)` discarded ST(0) and left ST(2)
            alone. */
-        case 3: ld_set(c, rm, ld_get(c, 0)); fpu_discard(c); return 1; /* FSTP ST(i)*/
-        case 4: {
-            int pushed;
-            long double a = ld_get(c, 0), second = 0;
-            switch (rm) {
-            case 0: ld_set(c, 0, host_unary(c, U_CHS, a, 0, &second, &pushed)); return 1;
-            case 1: ld_set(c, 0, host_unary(c, U_ABS, a, 0, &second, &pushed)); return 1;
-            case 4: host_unary(c, U_TST, a, 0, &second, &pushed); return 1;
-            case 5: host_unary(c, U_XAM, a, 0, &second, &pushed); return 1;
-            default: return 0;
-            }
-        }
-        case 5:                                                        /* constants */
+        case 3: st_get(c, 0, &a); st_set(c, rm, &a);
+                fpu_discard(c); return 1;                             /* FSTP ST(i)*/
+        case 5: {                                                     /* constants */
             /* FLD1 L2T L2E PI LG2 LN2 Z, in encoding order. */
+            X80Env e = env(c);
             if (rm > 6) return 0;
-            fpu_push(c, host_const(cw, rm));
+            FX(constant)(&e, rm, &a);
+            commit(c, &e);
+            fpu_push(c, &a);
             return 1;
-        case 6: {                                                      /* FPxx     */
-            int pushed = 0;
-            long double a = ld_get(c, 0), second = 0, r;
-            switch (rm) {
-            case 0: r = host_unary(c, U_2XM1, a, 0, &second, &pushed);
-                    ld_set(c, 0, r); return 1;
-            case 1: r = host_unary(c, U_YL2X, a, ld_get(c, 1), &second, &pushed);
-                    fpu_discard(c); ld_set(c, 0, r); return 1;
-            case 2: r = host_unary(c, U_TAN, a, 0, &second, &pushed);
-                    ld_set(c, 0, r);
-                    if (pushed) fpu_push(c, second);   /* not when out of range */
-                    return 1;
-            case 3: r = host_unary(c, U_ATAN, a, ld_get(c, 1), &second, &pushed);
-                    fpu_discard(c); ld_set(c, 0, r); return 1;
-            case 4: r = host_unary(c, U_XTRACT, a, 0, &second, &pushed);
-                    ld_set(c, 0, second); fpu_push(c, r); return 1;
-            case 6: c->fpu_top = (uint8_t)((c->fpu_top - 1) & 7); return 1; /* FDECSTP */
-            case 7: c->fpu_top = (uint8_t)((c->fpu_top + 1) & 7); return 1; /* FINCSTP */
-            default: return 0;
-            }
         }
-        case 7: {
-            int pushed = 0;
-            long double a = ld_get(c, 0), second = 0, r;
-            switch (rm) {
-            case 0: r = host_unary(c, U_PREM, a, ld_get(c, 1), &second, &pushed);
-                    ld_set(c, 0, r); return 1;
-            case 1: r = host_unary(c, U_YL2XP1, a, ld_get(c, 1), &second, &pushed);
-                    fpu_discard(c); ld_set(c, 0, r); return 1;
-            case 2: r = host_unary(c, U_SQRT, a, 0, &second, &pushed);
-                    ld_set(c, 0, r); return 1;
-            case 4: r = host_unary(c, U_RNDINT, a, 0, &second, &pushed);
-                    ld_set(c, 0, r); return 1;
-            case 5: r = host_unary(c, U_SCALE, a, ld_get(c, 1), &second, &pushed);
-                    ld_set(c, 0, r); return 1;
-            case 6: r = host_unary(c, U_SIN, a, 0, &second, &pushed);
-                    ld_set(c, 0, r); return 1;
-            case 7: r = host_unary(c, U_COS, a, 0, &second, &pushed);
-                    ld_set(c, 0, r); return 1;
-            default: return 0;
-            }
-        }
-        default: return 0;
+        case 6:
+            if (rm == 6) { c->fpu_top = (uint8_t)((c->fpu_top - 1) & 7); return 1; } /* FDECSTP */
+            if (rm == 7) { c->fpu_top = (uint8_t)((c->fpu_top + 1) & 7); return 1; } /* FINCSTP */
+            return special(c, modrm);
+        default:
+            return special(c, modrm);
         }
     case 0xDA:
         return 0;                                  /* FCMOVcc: 686, not emitted */
@@ -681,46 +451,36 @@ int fpu_exec(Cpu *c, uint8_t op, uint8_t modrm, int is_reg,
         if (reg == 4 && rm == 3) { fpu_reset(c); return 1; }           /* FINIT */
         return 0;
     case 0xDC:                                     /* op ST(i), ST(0) */
-        switch (reg) {
-        case 0: ld_set(c, rm, host_arith(c, FPU_ADD,  ld_get(c, rm), ld_get(c, 0))); return 1;
-        case 1: ld_set(c, rm, host_arith(c, FPU_MUL,  ld_get(c, rm), ld_get(c, 0))); return 1;
-        case 4: ld_set(c, rm, host_arith(c, FPU_SUBR, ld_get(c, rm), ld_get(c, 0))); return 1;
-        case 5: ld_set(c, rm, host_arith(c, FPU_SUB,  ld_get(c, rm), ld_get(c, 0))); return 1;
-        case 6: ld_set(c, rm, host_arith(c, FPU_DIVR, ld_get(c, rm), ld_get(c, 0))); return 1;
-        case 7: ld_set(c, rm, host_arith(c, FPU_DIV,  ld_get(c, rm), ld_get(c, 0))); return 1;
-        default: return 0;
+    case 0xDE:                                     /* the same, then pop */
+        /* The reversed forms swap SUB with SUBR and DIV with DIVR, since the
+           destination is now the first operand: DC E8+i is ST(i) - ST(0). */
+        if (op == 0xDE && reg == 3 && rm == 1) {   /* FCOMPP */
+            st_get(c, 0, &a);
+            st_get(c, 1, &b);
+            compare(c, &a, &b);
+            fpu_discard(c);
+            fpu_discard(c);
+            return 1;
         }
+        if (reg == 2 || reg == 3) return 0;
+        st_get(c, rm, &a);
+        st_get(c, 0, &b);
+        arith(c, reg < 4 ? reg : reg ^ 1, rm, &a, &b);
+        if (op == 0xDE) fpu_discard(c);
+        return 1;
     case 0xDD:
         switch (reg) {
         case 0: set_tag(c, phys(c, rm), TAG_EMPTY); return 1;          /* FFREE   */
-        case 2: ld_set(c, rm, ld_get(c, 0)); return 1;                 /* FST ST(i)*/
-        case 3: ld_set(c, rm, ld_get(c, 0)); fpu_discard(c); return 1;  /* FSTP    */
-        case 4: host_compare(c, ld_get(c, 0), ld_get(c, rm)); return 1; /* FUCOM  */
-        case 5: host_compare(c, ld_get(c, 0), ld_get(c, rm));
-                fpu_discard(c); return 1;                               /* FUCOMP */
+        case 2: st_get(c, 0, &a); st_set(c, rm, &a); return 1;         /* FST ST(i)*/
+        case 3: st_get(c, 0, &a); st_set(c, rm, &a);
+                fpu_discard(c); return 1;                               /* FSTP    */
+        case 4: case 5:                                                 /* FUCOM(P)*/
+            st_get(c, 0, &a);
+            st_get(c, rm, &b);
+            compare(c, &a, &b);
+            if (reg == 5) fpu_discard(c);
+            return 1;
         default: return 0;
-        }
-    case 0xDE:                                     /* op ST(i), ST(0) then pop */
-        switch (reg) {
-        case 0: ld_set(c, rm, host_arith(c, FPU_ADD,  ld_get(c, rm), ld_get(c, 0)));
-                fpu_discard(c); return 1;
-        case 1: ld_set(c, rm, host_arith(c, FPU_MUL,  ld_get(c, rm), ld_get(c, 0)));
-                fpu_discard(c); return 1;
-        case 3: if (rm == 1) {                     /* FCOMPP */
-                    host_compare(c, ld_get(c, 0), ld_get(c, 1));
-                    fpu_discard(c);
-                    fpu_discard(c);
-                    return 1;
-                }
-                return 0;
-        case 4: ld_set(c, rm, host_arith(c, FPU_SUBR, ld_get(c, rm), ld_get(c, 0)));
-                fpu_discard(c); return 1;
-        case 5: ld_set(c, rm, host_arith(c, FPU_SUB,  ld_get(c, rm), ld_get(c, 0)));
-                fpu_discard(c); return 1;
-        case 6: ld_set(c, rm, host_arith(c, FPU_DIVR, ld_get(c, rm), ld_get(c, 0)));
-                fpu_discard(c); return 1;
-        default:ld_set(c, rm, host_arith(c, FPU_DIV,  ld_get(c, rm), ld_get(c, 0)));
-                fpu_discard(c); return 1;
         }
     case 0xDF:
         if (reg == 4 && rm == 0) {                 /* FNSTSW AX */
@@ -735,37 +495,22 @@ int fpu_exec(Cpu *c, uint8_t op, uint8_t modrm, int is_reg,
 
 /* ------------------------------------------------------- for native routines */
 
-/* See fpu.h.  Each is the body of the fpu_exec case it names, so that the
-   two cannot drift apart without one of them being edited on purpose. */
-void fpu_fild(Cpu *c, int32_t v) { fpu_push(c, (long double)v); }
+/* See fpu.h.  Each is the path fpu_exec takes for the instruction it names. */
+void fpu_fild(Cpu *c, int32_t v) { fild(c, v); }
 
 void fpu_arith_m64(Cpu *c, int op, uint16_t sel, uint16_t off)
 {
-    ld_set(c, 0, host_arith(c, op, ld_get(c, 0), load_f64(sel, off)));
+    arith_mem(c, 0xDC, op, sel, off);
 }
 
-void fpu_sqrt(Cpu *c)
-{
-    long double second = 0;
-    int pushed;
-    ld_set(c, 0, host_unary(c, U_SQRT, ld_get(c, 0), 0, &second, &pushed));
-}
+void fpu_sqrt(Cpu *c) { special(c, 0xFA); }
+void fpu_xam(Cpu *c)  { special(c, 0xE5); }
 
-void fpu_xam(Cpu *c)
-{
-    long double second = 0;
-    int pushed;
-    host_unary(c, U_XAM, ld_get(c, 0), 0, &second, &pushed);
-}
-
-void fpu_store_f64(Cpu *c, uint16_t sel, uint16_t off)
-{
-    store_f64(c, sel, off, ld_get(c, 0), c->fpu_cw);
-}
+void fpu_store_f64(Cpu *c, uint16_t sel, uint16_t off) { store_f64(c, sel, off); }
 
 int64_t fpu_fistp64(Cpu *c)
 {
-    int64_t v = to_int(c, ld_get(c, 0), c->fpu_cw, 8);
+    int64_t v = fist(c, 8);
     fpu_discard(c);
     return v;
 }

@@ -92,12 +92,12 @@ $(shell rm -f $(TARGET) $(FUZZER) $(PACKER) $(PROF) $(HARNESS) $(ONEFILE) $(LIBA
 endif
 
 # A unity build: src/unity.c includes every other source, so the compiler sees
-# the whole program at once, and src/unity_fuzz.c does the same for the seven
+# the whole program at once, and src/unity_fuzz.c does the same for the eight
 # the fuzzer needs.  Both are filtered out of SRC so neither can include itself.
 #
 # SRC exists only to make the objects depend on every source.  That is
-# deliberately over-broad for the fuzzer, which uses seven of them: naming which
-# seven here would be a second list to keep in step with unity_fuzz.c, and
+# deliberately over-broad for the fuzzer, which uses eight of them: naming which
+# eight here would be a second list to keep in step with unity_fuzz.c, and
 # getting it wrong would mean a stale object rather than a rebuild nobody
 # noticed.
 SRC  := $(filter-out $(SRCDIR)/unity%.c,$(wildcard $(SRCDIR)/*.c))
