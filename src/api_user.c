@@ -478,7 +478,7 @@ static uint32_t u_GetMessage(Cpu *c, Args *a)
         wheel_dispatch();
         r = GetMessageA(&m, HWND_32(hwnd), first, last);
         if (r == -1) return 0;
-        if (!r || msg_win16(m.message)) break;
+        if (!r || msg_win16(m.hwnd, m.message)) break;
         DispatchMessageA(&m);
     }
     put_msg16(p, &m);
@@ -502,7 +502,7 @@ static uint32_t u_PeekMessage(Cpu *c, Args *a)
        after all, as it always used to, rather than this peeking forever. */
     for (;;) {
         if (!PeekMessageA(&m, HWND_32(hwnd), first, last, flags)) return 0;
-        if (msg_win16(m.message)) break;
+        if (msg_win16(m.hwnd, m.message)) break;
         if (flags & PM_REMOVE) DispatchMessageA(&m);
         else if (!drain_one(HWND_32(hwnd), m.message)) break;
     }

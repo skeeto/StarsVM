@@ -362,7 +362,7 @@ static INT_PTR CALLBACK dlgproc_bridge(HWND hwnd, UINT msg,
 
     /* A message Win16 never had would come back not handled, and DefDlgProc
        would take it from there; see msg_win16. */
-    if (!msg_win16(msg)) return FALSE;
+    if (!msg_win16(hwnd, msg)) return FALSE;
 
     r = winproc_call16(hwnd, proc16, hinst, msg, wp, lp, &ret_handle);
 

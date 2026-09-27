@@ -262,14 +262,15 @@ uint32_t msg16_to_32(HWND hwnd, uint32_t msg)
    The ranges are Windows 3.1's own numbers, undocumented ones included (as
    Schulman et al., Undocumented Windows, 1992, lists them), and MMSYSTEM's,
    whose MM_MCINOTIFY the game's frame window handles; so nothing the guest
-   could have been sent under Win16 is lost.  The control messages Win32
-   renumbered below WM_USER are let through a whole block at a time, which is
-   more than Win16 had: Win32 went on adding to each block (BM_CLICK,
-   LB_GETLISTBOXINFO) and put WM_INPUT at the end of the buttons'.  From
-   WM_USER up to the registered range a number is private to its window class
-   or application, which is the guest's business; a registered message is the
-   host's, since the guest registers none. */
-int msg_win16(UINT msg)
+   could have been sent under Win16 is lost.  A stock control's messages
+   count as far as Win16 took its class's block, and only at a window of that
+   class, which is what `hwnd` is for: Win32 went on adding to each block
+   (BM_CLICK, LB_GETLISTBOXINFO) and put WM_INPUT at the end of the
+   buttons', and at any other window none of it is anything Win16 sent.
+   From WM_USER up to the registered range a number is private to its window
+   class or application, which is the guest's business; a registered message
+   is the host's, since the guest registers none. */
+int msg_win16(HWND hwnd, UINT msg)
 {
     static const struct { uint16_t lo, hi; } known[] = {
         { 0x0000, 0x0024 },     /* WM_NULL .. WM_GETMINMAXINFO           */
@@ -294,9 +295,8 @@ int msg_win16(UINT msg)
     size_t i;
 
     if (msg >= WM_USER) return msg < 0xC000;
-    /* The blocks Win32 gave the control messages below WM_USER, whole. */
-    if ((msg >= 0x00B0 && msg <= 0x00FF) || (msg >= 0x0140 && msg <= 0x01FF))
-        return 1;
+    /* A stock control's own, which is when it has a Win16 number. */
+    if (msg32_to_16(hwnd, msg) != msg) return 1;
     for (i = 0; i < sizeof known / sizeof known[0]; i++)
         if (msg >= known[i].lo && msg <= known[i].hi) return 1;
     return 0;
@@ -956,7 +956,7 @@ LRESULT CALLBACK winproc_bridge(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
        control's own procedure when the guest has subclassed a stock control,
        and otherwise DefWindowProc, which is where every class of the game's
        sends what it does not handle. */
-    if (!msg_win16(msg)) {
+    if (!msg_win16(hwnd, msg)) {
         WNDPROC cls = (WNDPROC)(uintptr_t)GetClassLongPtrA(hwnd, GCLP_WNDPROC);
         if (cls && cls != winproc_bridge)
             return CallWindowProcA(cls, hwnd, msg, wp, lp);
