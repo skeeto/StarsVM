@@ -9,7 +9,9 @@
  *
  * Operands are ST(0) first: `a` is ST(0) and `b` ST(1) for the two-operand
  * instructions (FPATAN is atan(b/a), FYL2X is b*log2(a), FSCALE a*2^b), and
- * arith follows x80.h's operation codes.  `r` never aliases an operand.
+ * arith follows x80.h's operation codes.  `r` never aliases an operand.  The
+ * _f32 and _f64 forms take a float or double operand `m` as its bits, the
+ * way the memory forms of the instructions do.
  */
 #ifndef X87HW_H
 #define X87HW_H
@@ -22,7 +24,12 @@ void x87hw_host_enter(void);
 void x87hw_host_leave(void);
 
 void     x87hw_arith(X80Env *e, int op, const X80 *a, const X80 *b, X80 *r);
+void     x87hw_arith_f32(X80Env *e, int op, const X80 *a, uint32_t m, X80 *r);
+void     x87hw_arith_f64(X80Env *e, int op, const X80 *a, uint64_t m, X80 *r);
 void     x87hw_compare(X80Env *e, const X80 *a, const X80 *b);    /* FCOM  */
+void     x87hw_ucompare(X80Env *e, const X80 *a, const X80 *b);   /* FUCOM */
+void     x87hw_compare_f32(X80Env *e, const X80 *a, uint32_t m);
+void     x87hw_compare_f64(X80Env *e, const X80 *a, uint64_t m);
 void     x87hw_sqrt(X80Env *e, const X80 *a, X80 *r);
 void     x87hw_rndint(X80Env *e, const X80 *a, X80 *r);
 void     x87hw_f2xm1(X80Env *e, const X80 *a, X80 *r);

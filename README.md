@@ -159,18 +159,17 @@ is anywhere near the emulator; all it ships is the decoder. It decompresses its
 own output and compares it to the input before writing anything, so the two
 halves of the format cannot drift apart without the build failing.
 
-`make fuzz` builds a second, separate program, `StarsVM-fuzz.exe`, out of seven
-of the same sources — the interpreter, the FPU, the selector arena, the log, and
-the thunk layer that `cpu_step` needs in order to link. It differentially tests
-the interpreter and the FPU against the host CPU — 200,000 rounds by default,
-covering register, immediate, memory and string forms, integer and x87 alike.
-For x87
-the oracle seeds and dumps the whole 80-bit register stack with `FRSTOR` and
-`FNSAVE`; for memory operands it works out the effective address independently
-of `decode_ea` and aims the oracle at a mirror of the same byte, so the address
-arithmetic is under test rather than assumed. It has nothing to say about the
-game, so
-it is not part of the emulator, and neither is `src/fuzz.c`: its oracle works by
+`make fuzz` builds a second, separate program, `StarsVM-fuzz.exe`, out of eight
+of the same sources — the interpreter, the FPU and its x87 backend, the selector
+arena, the log, and the thunk layer that `cpu_step` needs in order to link. It
+differentially tests the interpreter and the FPU against the host CPU — 200,000
+rounds by default, covering register, immediate, memory and string forms,
+integer and x87 alike. For x87 the oracle seeds and dumps the whole 80-bit
+register stack and status word with `FRSTOR` and `FNSAVE`; for memory operands
+it works out the effective address independently of `decode_ea` and aims the
+oracle at a mirror of the same byte, so the address arithmetic is under test
+rather than assumed. It has nothing to say about the game, so it is not part of
+the emulator, and neither is `src/fuzz.c`: its oracle works by
 writing machine code into a page it allocates `PAGE_EXECUTE_READWRITE` and then
 calls. That is the only request for executable memory anywhere in the tree, and
 keeping it in its own program means the emulator makes none at all — the

@@ -88,6 +88,15 @@ static void fpu_discard(Cpu *c)
     c->fpu_top = (uint8_t)((c->fpu_top + 1) & 7);
 }
 
+/* A control word as the x87 keeps it: the reserved bits 7 and 13-15 read
+   back clear and bit 6 set, whatever was loaded, and bit 12, the 287's
+   infinity control, is kept though nothing looks at it.  Measured by the
+   fuzzer, which compares the control word after FLDCW. */
+static uint16_t cw_loaded(uint16_t v)
+{
+    return (uint16_t)((v & 0x1F3Fu) | 0x0040u);
+}
+
 /* Status word with the current top-of-stack encoded, as the guest expects. */
 static uint16_t sw_value(Cpu *c)
 {
@@ -157,21 +166,6 @@ static void wr64(uint16_t sel, uint16_t off, uint64_t v)
     fpu_mem_write(sel, off, b, 8);
 }
 
-/* The operand of a D8, DA, DC or DE memory form, as a value: a float, a
-   32-bit integer, a double and a 16-bit integer respectively. */
-static void mem_operand(Cpu *c, uint8_t op, uint16_t sel, uint16_t off, X80 *m)
-{
-    X80Env e = env(c);
-
-    switch (op) {
-    case 0xD8: FX(from_f32)(&e, sel_rd32(sel, off), m); break;
-    case 0xDA: FX(from_int)(&e, (int32_t)sel_rd32(sel, off), m); break;
-    case 0xDC: FX(from_f64)(&e, rd64(sel, off), m); break;
-    default:   FX(from_int)(&e, (int16_t)sel_rd16(sel, off), m); break;
-    }
-    commit(c, &e);
-}
-
 /* ---------------------------------------------------------------- operations */
 
 /* ST(dst) = a op b, where a is ST(dst)'s own value. */
@@ -185,28 +179,48 @@ static void arith(Cpu *c, int op, int dst, const X80 *a, const X80 *b)
     st_set(c, dst, &r);
 }
 
-static void compare(Cpu *c, const X80 *a, const X80 *b)
+/* FCOM, or with `unordered` FUCOM, which differs in not raising IE for a
+   quiet NaN. */
+static void compare(Cpu *c, const X80 *a, const X80 *b, int unordered)
 {
     X80Env e = env(c);
 
-    FX(compare)(&e, a, b);
+    if (unordered) FX(ucompare)(&e, a, b);
+    else           FX(compare)(&e, a, b);
     commit(c, &e);
 }
 
 /* A D8, DA, DC or DE memory form: ST(0) against the operand, by the ModRM reg
-   field, which is x80.h's operation code for everything but the compares. */
+   field, which is x80.h's operation code for everything but the compares.
+   A float or double goes to the backend as the bits in memory, since the
+   instruction loads and operates in one step and the difference shows (see
+   x87hw.c); an integer converts exactly and raises nothing, so it is widened
+   first. */
 static void arith_mem(Cpu *c, uint8_t op, int reg, uint16_t sel, uint16_t off)
 {
-    X80 a, m;
+    X80Env e = env(c);
+    X80 a, m, r;
+    int cmp = reg == 2 || reg == 3;
 
-    mem_operand(c, op, sel, off, &m);
     st_get(c, 0, &a);
-    if (reg == 2 || reg == 3) {
-        compare(c, &a, &m);
-        if (reg == 3) fpu_discard(c);
+    if (op == 0xD8) {
+        uint32_t v = sel_rd32(sel, off);
+        if (cmp) FX(compare_f32)(&e, &a, v);
+        else     FX(arith_f32)(&e, reg, &a, v, &r);
+    } else if (op == 0xDC) {
+        uint64_t v = rd64(sel, off);
+        if (cmp) FX(compare_f64)(&e, &a, v);
+        else     FX(arith_f64)(&e, reg, &a, v, &r);
     } else {
-        arith(c, reg, 0, &a, &m);
+        X80Env w = env(c);
+        FX(from_int)(&w, op == 0xDA ? (int32_t)sel_rd32(sel, off)
+                                    : (int16_t)sel_rd16(sel, off), &m);
+        if (cmp) FX(compare)(&e, &a, &m);
+        else     FX(arith)(&e, reg, &a, &m, &r);
     }
+    commit(c, &e);
+    if (!cmp)          st_set(c, 0, &r);
+    else if (reg == 3) fpu_discard(c);
 }
 
 static void fild(Cpu *c, int64_t v)
@@ -329,12 +343,12 @@ int fpu_exec(Cpu *c, uint8_t op, uint8_t modrm, int is_reg,
             case 2: store_f32(c, sel, off); return 1;               /* FST m32  */
             case 3: store_f32(c, sel, off); fpu_discard(c); return 1; /* FSTP m32 */
             case 4: /* FLDENV: restore the 14-byte 16-bit environment */
-                c->fpu_cw = sel_rd16(sel, off);
+                c->fpu_cw = cw_loaded(sel_rd16(sel, off));
                 c->fpu_sw = sel_rd16(sel, (uint16_t)(off + 2));
                 c->fpu_tw = sel_rd16(sel, (uint16_t)(off + 4));
                 c->fpu_top = (uint8_t)((c->fpu_sw >> 11) & 7);
                 return 1;
-            case 5: c->fpu_cw = sel_rd16(sel, off); return 1;        /* FLDCW    */
+            case 5: c->fpu_cw = cw_loaded(sel_rd16(sel, off)); return 1; /* FLDCW */
             case 6: /* FSTENV */
                 sel_wr16(sel, off, c->fpu_cw);
                 sel_wr16(sel, (uint16_t)(off + 2), sw_value(c));
@@ -407,7 +421,7 @@ int fpu_exec(Cpu *c, uint8_t op, uint8_t modrm, int is_reg,
         st_get(c, 0, &a);
         st_get(c, rm, &b);
         if (reg == 2 || reg == 3) {
-            compare(c, &a, &b);
+            compare(c, &a, &b, 0);
             if (reg == 3) fpu_discard(c);
         } else {
             arith(c, reg, 0, &a, &b);
@@ -457,7 +471,7 @@ int fpu_exec(Cpu *c, uint8_t op, uint8_t modrm, int is_reg,
         if (op == 0xDE && reg == 3 && rm == 1) {   /* FCOMPP */
             st_get(c, 0, &a);
             st_get(c, 1, &b);
-            compare(c, &a, &b);
+            compare(c, &a, &b, 0);
             fpu_discard(c);
             fpu_discard(c);
             return 1;
@@ -477,7 +491,7 @@ int fpu_exec(Cpu *c, uint8_t op, uint8_t modrm, int is_reg,
         case 4: case 5:                                                 /* FUCOM(P)*/
             st_get(c, 0, &a);
             st_get(c, rm, &b);
-            compare(c, &a, &b);
+            compare(c, &a, &b, 1);
             if (reg == 5) fpu_discard(c);
             return 1;
         default: return 0;

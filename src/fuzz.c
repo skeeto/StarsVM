@@ -80,12 +80,14 @@
  * FRSTOR and FNSAVE in the trampoline move the whole x87 state at once, which
  * is the only way to set TOP and the tag word arbitrarily.
  *
- * Three things are deliberately outside that comparison, because fpu.c does not
+ * The status word is compared whole but for TOP, which is compared as TOP.
+ * The exception flags are seeded at random on both sides, since they are
+ * sticky: an operation that clears one it should have left, or fails to
+ * raise one it should, shows either way.
+ *
+ * Two things are deliberately outside the comparison, because fpu.c does not
  * model them and a failure would say nothing new:
  *
- *  - the exception flags, SF, ES and B.  Nothing issues fnclex on the host and
- *    fpu.c assigns the host status word rather than or-ing it, so those bits
- *    are the host's own accumulated noise.
  *  - the tag word beyond empty against live.  TAG_SPEC is never written, so
  *    NaNs, infinities and denormals are all tagged valid.
  *  - stack underflow.  fpu_discard never checks the tag, so popping an empty
@@ -431,6 +433,7 @@ struct fpstate {
     uint8_t  tag[8];            /* ditto, TAG_* values       */
     unsigned top;
     uint16_t cw;
+    uint16_t sw;                /* the exception flags only  */
 };
 
 /* An interesting 80-bit value.  Extremes and special encodings far more often
@@ -481,6 +484,9 @@ static void fp_gen(struct fpstate *s)
        An unmasked control word does not fail a round - fpu.c hands it to the
        real host FPU, which then faults inside this process. */
     s->cw = (uint16_t)(0x007Fu | (rnd_below(4) << 8) | (rnd_below(4) << 10));
+    /* Some sticky flags already up half the time, so that one an instruction
+       should have left alone is seen to be cleared. */
+    s->sw = rnd_below(2) ? (uint16_t)(rnd() & 0x3Fu) : 0;
     for (i = 0; i < 8; i++) {
         if (i < FZ_LIVE) {
             f80_make(s->st[i]);
@@ -500,7 +506,7 @@ static void fp_to_image(const struct fpstate *s, uint8_t *img)
     memset(img, 0, FPU_IMG);
     img[FPU_O_CW] = (uint8_t)s->cw;
     img[FPU_O_CW + 1] = (uint8_t)(s->cw >> 8);
-    img[FPU_O_SW] = 0;
+    img[FPU_O_SW] = (uint8_t)s->sw;
     img[FPU_O_SW + 1] = (uint8_t)(s->top << 3);        /* TOP is bits 11-13 */
     {
         uint16_t tw = 0;
@@ -519,7 +525,7 @@ static void fp_to_cpu(const struct fpstate *s, Cpu *c)
     unsigned i;
 
     c->fpu_cw = s->cw;
-    c->fpu_sw = 0;
+    c->fpu_sw = s->sw;
     c->fpu_top = (uint8_t)s->top;
     c->fpu_tw = 0;
     for (i = 0; i < 8; i++) {
@@ -529,12 +535,10 @@ static void fp_to_cpu(const struct fpstate *s, Cpu *c)
     }
 }
 
-/* The condition codes, which is what the guest branches on and what the host
-   genuinely decides.  The exception flags are deliberately absent: nothing
-   issues fnclex on the host, and fpu.c assigns the host status word rather than
-   or-ing it, so those bits are the host's own accumulated noise rather than
-   anything the guest computed. */
-#define FP_CC 0x4700u
+/* The status word less TOP: the condition codes the guest branches on, the
+   exception flags it may test, and SF, ES and B, which no generated state
+   should ever set. */
+#define FP_SW 0xC7FFu
 
 static uint16_t img16(const uint8_t *img, unsigned off)
 {
@@ -561,9 +565,9 @@ static int fp_compare(const uint8_t *img, Cpu *c, const char *what)
         log_msg("fuzz: %s cw: host %04X, emu %04X\n", what, hcw, c->fpu_cw);
         bad = 1;
     }
-    if ((hsw ^ gsw) & FP_CC) {
-        log_msg("fuzz: %s condition codes: host %04X, emu %04X\n",
-                what, hsw & FP_CC, gsw & FP_CC);
+    if ((hsw ^ gsw) & FP_SW) {
+        log_msg("fuzz: %s status word: host %04X, emu %04X\n",
+                what, hsw & FP_SW, gsw & FP_SW);
         bad = 1;
     }
     for (i = 0; i < 8; i++) {
@@ -607,7 +611,7 @@ struct form {
        mem_seg is which window the addressing form ought to choose - 0 for DS,
        1 for SS - so picking the other one shows up as a difference. */
     unsigned mem_len;    /* bytes of the operand, 0 when there is none */
-    unsigned mem_float;  /* 4 or 8 when the operand is converted from a float */
+    int      mem_cw;     /* the operand is a control word: keep it masked */
     /* A string instruction.  SI and DI reach the oracle as host pointers into
        the mirror, so they are compared as distances travelled rather than as
        values, and str_df says which way. */
@@ -668,40 +672,6 @@ static unsigned mem_modrm(struct form *f, int reg, unsigned esize, uint8_t *out)
     f->mem_len = esize;
     f->mem_reg = reg;
     return 3;
-}
-
-/* Make a signalling NaN in a float memory operand quiet.
- *
- * This is the one operand shape where fpu.c cannot agree with the hardware, and
- * the reason is structural rather than a mistake.  Hardware loads the operand
- * and operates in a single instruction, so an SNaN in memory meeting a QNaN in
- * ST(0) takes the SNaN-versus-QNaN rule, where the QNaN wins.  fpu.c widens the
- * operand to 80 bits first, which quietens it, so by the time the division
- * happens both are quiet and the larger-significand rule picks the other one.
- *
- * It takes a NaN in ST(0) *and* a signalling NaN in memory to be observable -
- * against any ordinary value the two agree bit for bit, because quietening
- * early and quietening late produce the same bits - and nothing a compiler
- * emits produces either.  Fixing it would mean giving host_arith memory-operand
- * forms so the host does load-and-operate itself, which is a restructuring of
- * the path carrying about 5% of turn generation for a case that cannot arise.
- * So it is recorded here and kept out of the generated operands instead.
- */
-static void mem_quieten(uint8_t *p, unsigned n)
-{
-    if (n == 4) {
-        uint32_t v = (uint32_t)p[0] | ((uint32_t)p[1] << 8) |
-                     ((uint32_t)p[2] << 16) | ((uint32_t)p[3] << 24);
-        if ((v & 0x7F800000u) == 0x7F800000u && (v & 0x007FFFFFu))
-            p[2] |= 0x40;                          /* the quiet bit */
-    } else if (n == 8) {
-        uint32_t hi = (uint32_t)p[4] | ((uint32_t)p[5] << 8) |
-                      ((uint32_t)p[6] << 16) | ((uint32_t)p[7] << 24);
-        uint32_t lo = (uint32_t)p[0] | ((uint32_t)p[1] << 8) |
-                      ((uint32_t)p[2] << 16) | ((uint32_t)p[3] << 24);
-        if ((hi & 0x7FF00000u) == 0x7FF00000u && ((hi & 0x000FFFFFu) || lo))
-            p[6] |= 0x08;
-    }
 }
 
 /* modrm for "register, register", avoiding SP when the size is 16/32. */
@@ -998,36 +968,32 @@ static void gen(struct form *f)
     }
 
     case 19: {                                    /* x87 against memory */
-        /* Every memory escape fpu.c implements, less four that cannot be
-           compared: FLDCW and FLDENV would take a control word out of random
-           bytes and hand it to the real host FPU, where an unmasked exception
-           faults inside this process rather than failing a round; FSTENV writes
-           four words of instruction and operand pointers that fpu.c does not
-           model; and FNSTSW m16 writes the exception flags, which are the
-           host's own accumulated noise rather than anything the guest did. */
-        /* The last column is the width the operand is converted *from* when it
-           is a float, which is what mem_quieten needs; integer and 80-bit
-           operands convert exactly and are left alone. */
-        static const struct { uint8_t op, reg, size, flt; } mf[] = {
-            { 0xD8, 0, 4, 4 }, { 0xD8, 1, 4, 4 }, { 0xD8, 2, 4, 4 },
-            { 0xD8, 3, 4, 4 }, { 0xD8, 4, 4, 4 }, { 0xD8, 5, 4, 4 },
-            { 0xD8, 6, 4, 4 }, { 0xD8, 7, 4, 4 },
-            { 0xD9, 0, 4, 4 }, { 0xD9, 2, 4, 4 }, { 0xD9, 3, 4, 4 },
-            { 0xD9, 7, 2, 0 },
-            { 0xDA, 0, 4, 0 }, { 0xDA, 1, 4, 0 }, { 0xDA, 2, 4, 0 },
-            { 0xDA, 3, 4, 0 }, { 0xDA, 4, 4, 0 }, { 0xDA, 5, 4, 0 },
-            { 0xDA, 6, 4, 0 }, { 0xDA, 7, 4, 0 },
-            { 0xDB, 0, 4, 0 }, { 0xDB, 2, 4, 0 }, { 0xDB, 3, 4, 0 },
-            { 0xDB, 5,10, 0 }, { 0xDB, 7,10, 0 },
-            { 0xDC, 0, 8, 8 }, { 0xDC, 1, 8, 8 }, { 0xDC, 2, 8, 8 },
-            { 0xDC, 3, 8, 8 }, { 0xDC, 4, 8, 8 }, { 0xDC, 5, 8, 8 },
-            { 0xDC, 6, 8, 8 }, { 0xDC, 7, 8, 8 },
-            { 0xDD, 0, 8, 8 }, { 0xDD, 2, 8, 8 }, { 0xDD, 3, 8, 8 },
-            { 0xDE, 0, 2, 0 }, { 0xDE, 1, 2, 0 }, { 0xDE, 2, 2, 0 },
-            { 0xDE, 3, 2, 0 }, { 0xDE, 4, 2, 0 }, { 0xDE, 5, 2, 0 },
-            { 0xDE, 6, 2, 0 }, { 0xDE, 7, 2, 0 },
-            { 0xDF, 0, 2, 0 }, { 0xDF, 2, 2, 0 }, { 0xDF, 3, 2, 0 },
-            { 0xDF, 5, 8, 0 }, { 0xDF, 7, 8, 0 },
+        /* Every memory escape fpu.c implements, less two that cannot be
+           compared: FLDENV would take a control word and a tag word out of
+           random bytes, the one unmasking exceptions on the real host FPU,
+           where they fault inside this process rather than failing a round,
+           and the other emptying or filling registers behind the stack's
+           back; and FSTENV writes four words of instruction and operand
+           pointers that fpu.c does not model.  FLDCW has the first problem
+           too, so its operand has the six mask bits forced on and the rest
+           left random - reserved bits included, since what the hardware
+           keeps of those is for the comparison to say. */
+        static const struct { uint8_t op, reg, size; } mf[] = {
+            { 0xD8, 0, 4 }, { 0xD8, 1, 4 }, { 0xD8, 2, 4 }, { 0xD8, 3, 4 },
+            { 0xD8, 4, 4 }, { 0xD8, 5, 4 }, { 0xD8, 6, 4 }, { 0xD8, 7, 4 },
+            { 0xD9, 0, 4 }, { 0xD9, 2, 4 }, { 0xD9, 3, 4 }, { 0xD9, 5, 2 },
+            { 0xD9, 7, 2 },
+            { 0xDA, 0, 4 }, { 0xDA, 1, 4 }, { 0xDA, 2, 4 }, { 0xDA, 3, 4 },
+            { 0xDA, 4, 4 }, { 0xDA, 5, 4 }, { 0xDA, 6, 4 }, { 0xDA, 7, 4 },
+            { 0xDB, 0, 4 }, { 0xDB, 2, 4 }, { 0xDB, 3, 4 }, { 0xDB, 5,10 },
+            { 0xDB, 7,10 },
+            { 0xDC, 0, 8 }, { 0xDC, 1, 8 }, { 0xDC, 2, 8 }, { 0xDC, 3, 8 },
+            { 0xDC, 4, 8 }, { 0xDC, 5, 8 }, { 0xDC, 6, 8 }, { 0xDC, 7, 8 },
+            { 0xDD, 0, 8 }, { 0xDD, 2, 8 }, { 0xDD, 3, 8 }, { 0xDD, 7, 2 },
+            { 0xDE, 0, 2 }, { 0xDE, 1, 2 }, { 0xDE, 2, 2 }, { 0xDE, 3, 2 },
+            { 0xDE, 4, 2 }, { 0xDE, 5, 2 }, { 0xDE, 6, 2 }, { 0xDE, 7, 2 },
+            { 0xDF, 0, 2 }, { 0xDF, 2, 2 }, { 0xDF, 3, 2 }, { 0xDF, 5, 8 },
+            { 0xDF, 7, 8 },
         };
         unsigned k = rnd_below(sizeof mf / sizeof *mf);
 
@@ -1037,7 +1003,7 @@ static void gen(struct form *f)
         f->len = 1 + mem_modrm(f, mf[k].reg, mf[k].size, f->bytes + 1);
         f->mem_op[0] = mf[k].op;
         f->mem_opn = 1;
-        f->mem_float = mf[k].flt;
+        f->mem_cw = mf[k].op == 0xD9 && mf[k].reg == 5;
         f->what = "x87 memory";
         break;
     }
@@ -1330,8 +1296,7 @@ static int fuzz_run(long rounds, unsigned seed)
                 fz.mem[1][k] = (uint8_t)rnd();
                 fz.mem[2][k] = (uint8_t)rnd();
             }
-            if (f.mem_float)
-                mem_quieten(fz.mem[f.mem_seg] + f.mem_off, f.mem_float);
+            if (f.mem_cw) fz.mem[f.mem_seg][f.mem_off] |= 0x3F;
             if (f.mem_len)
                 memcpy(operand_in, fz.mem[f.mem_seg] + f.mem_off, f.mem_len);
             for (k = 0; k < MEM_WIN; k++) {
