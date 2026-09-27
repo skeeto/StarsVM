@@ -18,4 +18,9 @@
 uint32_t msg16_send(HWND hwnd, uint16_t msg16, uint16_t wp, uint32_t lp);
 uint32_t msg16_post(HWND hwnd, uint16_t msg16, uint16_t wp, uint32_t lp);
 
+/* The same for a message the guest hands a real window procedure with
+   CallWindowProc, calling `proc` rather than sending. */
+uint32_t msg16_call(WNDPROC proc, HWND hwnd, uint16_t msg16, uint16_t wp,
+                    uint32_t lp);
+
 #endif

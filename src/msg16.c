@@ -423,7 +423,10 @@ static uint32_t marshal_out(struct marshal *m, LRESULT r)
     return (uint32_t)r;
 }
 
-uint32_t msg16_send(HWND hwnd, uint16_t msg16, uint16_t wp, uint32_t lp)
+/* A send, or with `proc` a call of that procedure, which is the same thing
+   done by hand. */
+static uint32_t deliver(WNDPROC proc, HWND hwnd, uint16_t msg16, uint16_t wp,
+                        uint32_t lp)
 {
     struct marshal m;
     LRESULT r;
@@ -434,9 +437,25 @@ uint32_t msg16_send(HWND hwnd, uint16_t msg16, uint16_t wp, uint32_t lp)
                 "a 16-bit struct with no translation on this path\n", msg16, m.msg);
         return 0;
     }
-    r = SendMessageA(hwnd, m.msg, m.wp, m.lp);
-    if (m.after) SendMessageA(hwnd, m.after, 0, 0);
+    if (proc) {
+        r = CallWindowProcA(proc, hwnd, m.msg, m.wp, m.lp);
+        if (m.after) CallWindowProcA(proc, hwnd, m.after, 0, 0);
+    } else {
+        r = SendMessageA(hwnd, m.msg, m.wp, m.lp);
+        if (m.after) SendMessageA(hwnd, m.after, 0, 0);
+    }
     return marshal_out(&m, r);
+}
+
+uint32_t msg16_send(HWND hwnd, uint16_t msg16, uint16_t wp, uint32_t lp)
+{
+    return deliver(NULL, hwnd, msg16, wp, lp);
+}
+
+uint32_t msg16_call(WNDPROC proc, HWND hwnd, uint16_t msg16, uint16_t wp,
+                    uint32_t lp)
+{
+    return deliver(proc, hwnd, msg16, wp, lp);
 }
 
 /* The messages Win32 will not post whatever their lParam, where marshal_in

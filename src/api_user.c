@@ -1147,7 +1147,10 @@ static uint32_t u_CallWindowProc(Cpu *c, Args *a)
     (void)c;
     if (host) {
         /* A wrapped host procedure: use the original 32-bit parameters when this
-           is the message we are dispatching. */
+           is the message we are dispatching.  Any other message the guest made
+           up itself, and it goes the way of one it sends: renumbered for the
+           window's class alone, a far pointer would reach USER32 as a flat
+           address, and EM_SETSEL's two ends would select the whole field. */
         UINT msg32;
         WPARAM wp32;
         LPARAM lp32;
@@ -1157,9 +1160,7 @@ static uint32_t u_CallWindowProc(Cpu *c, Args *a)
             if (type != H_NONE) return h16(type, (void *)(uintptr_t)r);
             return (uint32_t)r;
         }
-        return (uint32_t)CallWindowProcA(host, hwnd,
-                                         (UINT)msg16_to_32(hwnd, msg),
-                                         wp, (LPARAM)lp);
+        return msg16_call(host, hwnd, msg, wp, lp);
     }
     {   /* A guest procedure: 16 to 16 needs no translation. */
         uint16_t args[5];
