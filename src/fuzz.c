@@ -106,6 +106,7 @@
 #include "cpu.h"
 #include "sel.h"
 #include "log.h"
+#include "x80gen.h"
 
 #include <cpuid.h>
 #include <stddef.h>
@@ -439,47 +440,54 @@ struct fpstate {
     uint16_t sw;                /* exception flags and C0-C3 */
 };
 
-/* An interesting 80-bit value.  Extremes and special encodings far more often
-   than noise, for the same reason rnd_value prefers them. */
-static void f80_make(uint8_t *b)
-{
-    static const struct { uint16_t se; uint64_t m; } pat[] = {
-        { 0x0000, 0x0000000000000000ull },   /* +0            */
-        { 0x8000, 0x0000000000000000ull },   /* -0            */
-        { 0x3FFF, 0x8000000000000000ull },   /* +1            */
-        { 0xBFFF, 0x8000000000000000ull },   /* -1            */
-        { 0x4000, 0x8000000000000000ull },   /* +2            */
-        { 0x3FFE, 0x8000000000000000ull },   /* +0.5          */
-        { 0x4000, 0xC90FDAA22168C235ull },   /* pi            */
-        { 0x7FFF, 0x8000000000000000ull },   /* +inf          */
-        { 0xFFFF, 0x8000000000000000ull },   /* -inf          */
-        { 0x7FFF, 0xC000000000000000ull },   /* QNaN          */
-        { 0x7FFF, 0xA000000000000000ull },   /* SNaN          */
-        { 0x0000, 0x0000000000000001ull },   /* denormal      */
-        { 0x7FFE, 0xFFFFFFFFFFFFFFFFull },   /* max normal    */
-        { 0x0001, 0x8000000000000000ull },   /* min normal    */
-        { 0x4005, 0xFA00000000000000ull },   /* 125           */
-        { 0x400C, 0x9C40000000000000ull },   /* 10000         */
-    };
-    uint64_t m;
-    uint16_t se;
-    int i;
+/* What an x87 memory form loads, so the fuzzer can put something worth
+   loading there: FT_NONE for a form that only stores. */
+enum { FT_NONE, FT_F32, FT_F64, FT_F80, FT_I16, FT_I32, FT_I64, FT_CW };
 
-    if (rnd_below(8) == 0) {                  /* sometimes just noise */
-        se = (uint16_t)rnd();
-        m  = ((uint64_t)rnd() << 32) | rnd();
-    } else {
-        unsigned k = rnd_below(sizeof pat / sizeof *pat);
-        se = pat[k].se;
-        m  = pat[k].m;
+/* A generator for the x87 operands of one round, seeded from the round's own
+   stream so that a printed seed still replays the round exactly. */
+static X80Rng fp_rng(void)
+{
+    X80Rng g;
+    g.s = (uint64_t)rnd() << 32 | rnd();
+    return g;
+}
+
+/* An x87 memory operand of the given type at p, written over the noise the
+   window was filled with: floats and doubles from x80gen's classes or near
+   ST(0), integers at the edges of every width or near ST(0), an 80-bit value
+   related to ST(0), and a control word with its exception masks forced on -
+   an unmasked one would fault inside this process on the host FPU - and
+   everything else, reserved bits included, left to chance. */
+static void fp_mem_operand(const struct fpstate *s, int type, uint8_t *p)
+{
+    X80Rng g = fp_rng();
+    X80 a, v;
+    uint64_t bits;
+    unsigned i, n;
+
+    x80_get(&a, s->st[0]);
+    switch (type) {
+    case FT_F32: bits = x80gen_ieee(&g, &a, 0);           n = 4; break;
+    case FT_F64: bits = x80gen_ieee(&g, &a, 1);           n = 8; break;
+    case FT_I16: bits = (uint64_t)x80gen_int(&g, &a, 2);  n = 2; break;
+    case FT_I32: bits = (uint64_t)x80gen_int(&g, &a, 4);  n = 4; break;
+    case FT_I64: bits = (uint64_t)x80gen_int(&g, &a, 8);  n = 8; break;
+    case FT_CW:  bits = x80gen_u64(&g) | 0x3F;            n = 2; break;
+    case FT_F80:
+        x80gen_near(&g, &a, &v);
+        x80_put(p, &v);
+        return;
+    default:
+        return;
     }
-    for (i = 0; i < 8; i++) b[i] = (uint8_t)(m >> (i * 8));
-    b[8] = (uint8_t)se;
-    b[9] = (uint8_t)(se >> 8);
+    for (i = 0; i < n; i++) p[i] = (uint8_t)(bits >> (8 * i));
 }
 
 static void fp_gen(struct fpstate *s)
 {
+    X80Rng g = fp_rng();
+    X80 v[FZ_LIVE];
     unsigned i;
 
     s->top = rnd_below(8);
@@ -491,9 +499,19 @@ static void fp_gen(struct fpstate *s)
        should have left alone is seen to be cleared, and the condition codes
        anything at all, for the same reason. */
     s->sw = (uint16_t)((rnd_below(2) ? rnd() & 0x3Fu : 0) | (rnd() & 0x4700u));
+    /* Each live register an interesting value (x80gen.h), or half the time
+       one related to a register before it - equal, negated, a power of two
+       or a few units away - since the operands that make exact cancellations,
+       rounding ties and equal compares are pairs, and independent draws
+       almost never are. */
+    x80gen_value(&g, &v[0]);
+    for (i = 1; i < FZ_LIVE; i++) {
+        if (x80gen_below(&g, 2)) x80gen_near(&g, &v[x80gen_below(&g, i)], &v[i]);
+        else                     x80gen_value(&g, &v[i]);
+    }
     for (i = 0; i < 8; i++) {
         if (i < FZ_LIVE) {
-            f80_make(s->st[i]);
+            x80_put(s->st[i], &v[i]);
             s->tag[i] = 0;                    /* TAG_VALID; fpu.c retags */
         } else {
             memset(s->st[i], 0, 10);
@@ -615,7 +633,7 @@ struct form {
        mem_seg is which window the addressing form ought to choose - 0 for DS,
        1 for SS - so picking the other one shows up as a difference. */
     unsigned mem_len;    /* bytes of the operand, 0 when there is none */
-    int      mem_cw;     /* the operand is a control word: keep it masked */
+    int      mem_type;   /* an x87 operand the form loads: FT_*, 0 for none */
     /* A string instruction.  SI and DI reach the oracle as host pointers into
        the mirror, so they are compared as distances travelled rather than as
        values, and str_df says which way. */
@@ -979,25 +997,29 @@ static void gen(struct form *f)
            and the other emptying or filling registers behind the stack's
            back; and FSTENV writes four words of instruction and operand
            pointers that fpu.c does not model.  FLDCW has the first problem
-           too, so its operand has the six mask bits forced on and the rest
-           left random - reserved bits included, since what the hardware
-           keeps of those is for the comparison to say. */
-        static const struct { uint8_t op, reg, size; } mf[] = {
-            { 0xD8, 0, 4 }, { 0xD8, 1, 4 }, { 0xD8, 2, 4 }, { 0xD8, 3, 4 },
-            { 0xD8, 4, 4 }, { 0xD8, 5, 4 }, { 0xD8, 6, 4 }, { 0xD8, 7, 4 },
-            { 0xD9, 0, 4 }, { 0xD9, 2, 4 }, { 0xD9, 3, 4 }, { 0xD9, 5, 2 },
-            { 0xD9, 7, 2 },
-            { 0xDA, 0, 4 }, { 0xDA, 1, 4 }, { 0xDA, 2, 4 }, { 0xDA, 3, 4 },
-            { 0xDA, 4, 4 }, { 0xDA, 5, 4 }, { 0xDA, 6, 4 }, { 0xDA, 7, 4 },
-            { 0xDB, 0, 4 }, { 0xDB, 2, 4 }, { 0xDB, 3, 4 }, { 0xDB, 5,10 },
-            { 0xDB, 7,10 },
-            { 0xDC, 0, 8 }, { 0xDC, 1, 8 }, { 0xDC, 2, 8 }, { 0xDC, 3, 8 },
-            { 0xDC, 4, 8 }, { 0xDC, 5, 8 }, { 0xDC, 6, 8 }, { 0xDC, 7, 8 },
-            { 0xDD, 0, 8 }, { 0xDD, 2, 8 }, { 0xDD, 3, 8 }, { 0xDD, 7, 2 },
-            { 0xDE, 0, 2 }, { 0xDE, 1, 2 }, { 0xDE, 2, 2 }, { 0xDE, 3, 2 },
-            { 0xDE, 4, 2 }, { 0xDE, 5, 2 }, { 0xDE, 6, 2 }, { 0xDE, 7, 2 },
-            { 0xDF, 0, 2 }, { 0xDF, 2, 2 }, { 0xDF, 3, 2 }, { 0xDF, 5, 8 },
-            { 0xDF, 7, 8 },
+           too, which fp_mem_operand deals with.  The last column is what the
+           form loads, if anything, for fp_mem_operand to put there. */
+        static const struct { uint8_t op, reg, size, type; } mf[] = {
+            { 0xD8, 0, 4, FT_F32 }, { 0xD8, 1, 4, FT_F32 }, { 0xD8, 2, 4, FT_F32 },
+            { 0xD8, 3, 4, FT_F32 }, { 0xD8, 4, 4, FT_F32 }, { 0xD8, 5, 4, FT_F32 },
+            { 0xD8, 6, 4, FT_F32 }, { 0xD8, 7, 4, FT_F32 },
+            { 0xD9, 0, 4, FT_F32 }, { 0xD9, 2, 4, FT_NONE }, { 0xD9, 3, 4, FT_NONE },
+            { 0xD9, 5, 2, FT_CW },  { 0xD9, 7, 2, FT_NONE },
+            { 0xDA, 0, 4, FT_I32 }, { 0xDA, 1, 4, FT_I32 }, { 0xDA, 2, 4, FT_I32 },
+            { 0xDA, 3, 4, FT_I32 }, { 0xDA, 4, 4, FT_I32 }, { 0xDA, 5, 4, FT_I32 },
+            { 0xDA, 6, 4, FT_I32 }, { 0xDA, 7, 4, FT_I32 },
+            { 0xDB, 0, 4, FT_I32 }, { 0xDB, 2, 4, FT_NONE }, { 0xDB, 3, 4, FT_NONE },
+            { 0xDB, 5,10, FT_F80 }, { 0xDB, 7,10, FT_NONE },
+            { 0xDC, 0, 8, FT_F64 }, { 0xDC, 1, 8, FT_F64 }, { 0xDC, 2, 8, FT_F64 },
+            { 0xDC, 3, 8, FT_F64 }, { 0xDC, 4, 8, FT_F64 }, { 0xDC, 5, 8, FT_F64 },
+            { 0xDC, 6, 8, FT_F64 }, { 0xDC, 7, 8, FT_F64 },
+            { 0xDD, 0, 8, FT_F64 }, { 0xDD, 2, 8, FT_NONE }, { 0xDD, 3, 8, FT_NONE },
+            { 0xDD, 7, 2, FT_NONE },
+            { 0xDE, 0, 2, FT_I16 }, { 0xDE, 1, 2, FT_I16 }, { 0xDE, 2, 2, FT_I16 },
+            { 0xDE, 3, 2, FT_I16 }, { 0xDE, 4, 2, FT_I16 }, { 0xDE, 5, 2, FT_I16 },
+            { 0xDE, 6, 2, FT_I16 }, { 0xDE, 7, 2, FT_I16 },
+            { 0xDF, 0, 2, FT_I16 }, { 0xDF, 2, 2, FT_NONE }, { 0xDF, 3, 2, FT_NONE },
+            { 0xDF, 5, 8, FT_I64 }, { 0xDF, 7, 8, FT_NONE },
         };
         unsigned k = rnd_below(sizeof mf / sizeof *mf);
 
@@ -1007,7 +1029,7 @@ static void gen(struct form *f)
         f->len = 1 + mem_modrm(f, mf[k].reg, mf[k].size, f->bytes + 1);
         f->mem_op[0] = mf[k].op;
         f->mem_opn = 1;
-        f->mem_cw = mf[k].op == 0xD9 && mf[k].reg == 5;
+        f->mem_type = mf[k].type;
         f->what = "x87 memory";
         break;
     }
@@ -1300,7 +1322,8 @@ static int fuzz_run(long rounds, unsigned seed)
                 fz.mem[1][k] = (uint8_t)rnd();
                 fz.mem[2][k] = (uint8_t)rnd();
             }
-            if (f.mem_cw) fz.mem[f.mem_seg][f.mem_off] |= 0x3F;
+            if (f.mem_type)
+                fp_mem_operand(&fs, f.mem_type, fz.mem[f.mem_seg] + f.mem_off);
             if (f.mem_len)
                 memcpy(operand_in, fz.mem[f.mem_seg] + f.mem_off, f.mem_len);
             for (k = 0; k < MEM_WIN; k++) {
