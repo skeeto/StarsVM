@@ -108,66 +108,23 @@ static int wp_is_index(UINT msg)
     }
 }
 
-static void marshal_in(HWND hwnd, uint16_t msg16, uint16_t wp, uint32_t lp,
-                       struct marshal *m)
+/* The rewrites that need nothing but the message's own three values: the
+   renumbering, an index's sign, a handle's 32-bit value, the pairs whose
+   parameters Win32 packs differently.  Each undoes one of winproc.c's
+   msg_to_16_values, and the two are all a posted message can need: the
+   guest's message loop hands the guest a MSG made by msg16_pack, and what it
+   is handed back goes to DispatchMessage and the rest through here. */
+void msg16_unpack(HWND hwnd, uint16_t msg16, uint16_t wp, uint32_t lp,
+                  struct msg32 *m)
 {
-    memset(m, 0, sizeof *m);
-    m->msg = msg16_to_32(hwnd, msg16);
-    m->wp  = wp;
-    m->lp  = (LPARAM)lp;
+    m->msg   = msg16_to_32(hwnd, msg16);
+    m->wp    = wp;
+    m->lp    = (LPARAM)lp;
+    m->after = 0;
     if (wp_is_index(m->msg))
         m->wp = (WPARAM)(int16_t)wp;
 
-    if (lp_is_in_string(hwnd, m->msg)) {
-        g_str(lp, m->buf, sizeof m->buf);
-        m->lp = (LPARAM)m->buf;
-        m->local = 1;
-        return;
-    }
-
     switch (m->msg) {
-
-    /* ---- text coming back out --------------------------------------------- */
-
-    case LB_GETTEXTLEN:
-    case CB_GETLBTEXTLEN:
-        /* An item's "length" when it is item data is its size, which is the
-           4 of Win16's DWORD whatever a ULONG_PTR is here: see OUT_DATA. */
-        if (!keeps_strings(hwnd, m->msg == CB_GETLBTEXTLEN))
-            m->out = OUT_DATALEN;
-        break;
-
-    case LB_GETTEXT:
-    case CB_GETLBTEXT:
-        if (!keeps_strings(hwnd, m->msg == CB_GETLBTEXT)) {
-            /* No string to fetch: the control writes the item's data. */
-            m->out  = OUT_DATA;
-            m->outp = lp;
-            m->lp   = (LPARAM)m->buf;
-            break;
-        }
-        /* fall through */
-    case WM_GETTEXT:
-        /* WM_GETTEXT is bounded by wParam; the listbox and combobox forms are
-           not bounded at all, which is a hazard in Win16 just as much as here -
-           the caller is expected to have asked for the length first. */
-        m->out    = OUT_STR;
-        m->outp   = lp;
-        m->outmax = (m->msg == WM_GETTEXT) ? (wp ? wp : 1) : sizeof m->buf;
-        if (m->outmax > sizeof m->buf) m->outmax = sizeof m->buf;
-        if (m->msg == WM_GETTEXT) m->wp = m->outmax;
-        m->lp = (LPARAM)m->buf;
-        break;
-
-    case EM_GETLINE:
-        /* The buffer's first word carries its own size, in and out. */
-        m->out    = OUT_LINE;
-        m->outp   = lp;
-        m->outmax = sel_rd16(SEGPTR_SEL(lp), SEGPTR_OFF(lp));
-        if (m->outmax > sizeof m->buf - 2) m->outmax = sizeof m->buf - 2;
-        *(uint16_t *)m->buf = (uint16_t)m->outmax;
-        m->lp = (LPARAM)m->buf;
-        break;
 
     case EM_SETSEL:
         /* Win16 packs both ends into lParam and uses wParam as a scroll flag;
@@ -189,60 +146,6 @@ static void marshal_in(HWND hwnd, uint16_t msg16, uint16_t wp, uint32_t lp,
         if (!wp && (GetWindowLongA(hwnd, GWL_STYLE) & ES_MULTILINE))
             m->after = EM_SCROLLCARET;
         break;
-
-    case LB_GETSELITEMS: {
-        /* The guest's array is 16-bit; USER32 writes 32-bit ints.  Forwarded
-           raw this scribbles over whatever lies at the numeric value of the far
-           pointer - about 21 MB into the address space - which is why the only
-           multi-select list in the game, Merge Fleets, took the process with
-           it. */
-        unsigned n = wp;
-        if (n > sizeof m->ints / sizeof m->ints[0])
-            n = sizeof m->ints / sizeof m->ints[0];
-        m->out    = OUT_INTS;
-        m->outp   = lp;
-        m->outmax = n;
-        m->wp     = n;
-        m->lp     = n ? (LPARAM)m->ints : 0;
-        break;
-    }
-
-    /* ---- rectangles -------------------------------------------------------- */
-
-    case EM_SETRECT:
-    case EM_SETRECTNP: {
-        int16_t r16[4];
-        g_read(lp, r16, sizeof r16);
-        m->rect.left = r16[0]; m->rect.top = r16[1];
-        m->rect.right = r16[2]; m->rect.bottom = r16[3];
-        m->lp = (LPARAM)&m->rect;
-        m->local = 1;
-        break;
-    }
-
-    case EM_GETRECT:
-    case LB_GETITEMRECT:
-    case CB_GETDROPPEDCONTROLRECT:
-        m->out  = OUT_RECT;
-        m->outp = lp;
-        m->lp   = (LPARAM)&m->rect;
-        break;
-
-    /* ---- an array of ints, 16 bits wide in Win16 --------------------------- */
-
-    case EM_SETTABSTOPS:
-    case LB_SETTABSTOPS: {
-        unsigned n = wp, i;
-        if (n > sizeof m->tabs / sizeof m->tabs[0])
-            n = sizeof m->tabs / sizeof m->tabs[0];
-        for (i = 0; i < n; i++)
-            m->tabs[i] = (int16_t)sel_rd16(SEGPTR_SEL(lp),
-                                           (uint16_t)(SEGPTR_OFF(lp) + i * 2));
-        m->wp = n;
-        m->lp = n ? (LPARAM)m->tabs : 0;
-        m->local = n != 0;
-        break;
-    }
 
     /* ---- an index that can be -1 ------------------------------------------- */
 
@@ -275,10 +178,6 @@ static void marshal_in(HWND hwnd, uint16_t msg16, uint16_t wp, uint32_t lp,
         m->wp = (WPARAM)h32(H_FONT, wp);
         break;
 
-    case WM_GETFONT:
-        m->ret = H_FONT;
-        break;
-
     case WM_ERASEBKGND:
     case WM_ICONERASEBKGND:
     case WM_PAINT:
@@ -296,10 +195,6 @@ static void marshal_in(HWND hwnd, uint16_t msg16, uint16_t wp, uint32_t lp,
     case WM_INITMENU:
     case WM_INITMENUPOPUP:
         m->wp = (WPARAM)HMENU_32(wp);
-        break;
-
-    case WM_QUERYDRAGICON:
-        m->ret = H_ICON;
         break;
 
     /* ---- the pairs whose two parameters swap round ------------------------- */
@@ -374,9 +269,150 @@ static void marshal_in(HWND hwnd, uint16_t msg16, uint16_t wp, uint32_t lp,
         m->msg = WM_CTLCOLORMSGBOX + type;
         m->wp  = (WPARAM)HDC_32(wp);
         m->lp  = (LPARAM)HWND_32(LOWORD(lp));
-        m->ret = H_BRUSH;
         break;
     }
+
+    default:
+        break;
+    }
+}
+
+static void marshal_in(HWND hwnd, uint16_t msg16, uint16_t wp, uint32_t lp,
+                       struct marshal *m)
+{
+    struct msg32 v;
+
+    msg16_unpack(hwnd, msg16, wp, lp, &v);
+    memset(m, 0, sizeof *m);
+    m->msg   = v.msg;
+    m->wp    = v.wp;
+    m->lp    = v.lp;
+    m->after = v.after;
+
+    if (lp_is_in_string(hwnd, m->msg)) {
+        g_str(lp, m->buf, sizeof m->buf);
+        m->lp = (LPARAM)m->buf;
+        m->local = 1;
+        return;
+    }
+
+    switch (m->msg) {
+
+    /* ---- text coming back out --------------------------------------------- */
+
+    case LB_GETTEXTLEN:
+    case CB_GETLBTEXTLEN:
+        /* An item's "length" when it is item data is its size, which is the
+           4 of Win16's DWORD whatever a ULONG_PTR is here: see OUT_DATA. */
+        if (!keeps_strings(hwnd, m->msg == CB_GETLBTEXTLEN))
+            m->out = OUT_DATALEN;
+        break;
+
+    case LB_GETTEXT:
+    case CB_GETLBTEXT:
+        if (!keeps_strings(hwnd, m->msg == CB_GETLBTEXT)) {
+            /* No string to fetch: the control writes the item's data. */
+            m->out  = OUT_DATA;
+            m->outp = lp;
+            m->lp   = (LPARAM)m->buf;
+            break;
+        }
+        /* fall through */
+    case WM_GETTEXT:
+        /* WM_GETTEXT is bounded by wParam; the listbox and combobox forms are
+           not bounded at all, which is a hazard in Win16 just as much as here -
+           the caller is expected to have asked for the length first. */
+        m->out    = OUT_STR;
+        m->outp   = lp;
+        m->outmax = (m->msg == WM_GETTEXT) ? (wp ? wp : 1) : sizeof m->buf;
+        if (m->outmax > sizeof m->buf) m->outmax = sizeof m->buf;
+        if (m->msg == WM_GETTEXT) m->wp = m->outmax;
+        m->lp = (LPARAM)m->buf;
+        break;
+
+    case EM_GETLINE:
+        /* The buffer's first word carries its own size, in and out. */
+        m->out    = OUT_LINE;
+        m->outp   = lp;
+        m->outmax = sel_rd16(SEGPTR_SEL(lp), SEGPTR_OFF(lp));
+        if (m->outmax > sizeof m->buf - 2) m->outmax = sizeof m->buf - 2;
+        *(uint16_t *)m->buf = (uint16_t)m->outmax;
+        m->lp = (LPARAM)m->buf;
+        break;
+
+    case LB_GETSELITEMS: {
+        /* The guest's array is 16-bit; USER32 writes 32-bit ints.  Forwarded
+           raw this scribbles over whatever lies at the numeric value of the far
+           pointer - about 21 MB into the address space - which is why the only
+           multi-select list in the game, Merge Fleets, took the process with
+           it. */
+        unsigned n = wp;
+        if (n > sizeof m->ints / sizeof m->ints[0])
+            n = sizeof m->ints / sizeof m->ints[0];
+        m->out    = OUT_INTS;
+        m->outp   = lp;
+        m->outmax = n;
+        m->wp     = n;
+        m->lp     = n ? (LPARAM)m->ints : 0;
+        break;
+    }
+
+    /* ---- rectangles -------------------------------------------------------- */
+
+    case EM_SETRECT:
+    case EM_SETRECTNP: {
+        int16_t r16[4];
+        g_read(lp, r16, sizeof r16);
+        m->rect.left = r16[0]; m->rect.top = r16[1];
+        m->rect.right = r16[2]; m->rect.bottom = r16[3];
+        m->lp = (LPARAM)&m->rect;
+        m->local = 1;
+        break;
+    }
+
+    case EM_GETRECT:
+    case LB_GETITEMRECT:
+    case CB_GETDROPPEDCONTROLRECT:
+        m->out  = OUT_RECT;
+        m->outp = lp;
+        m->lp   = (LPARAM)&m->rect;
+        break;
+
+    /* ---- an array of ints, 16 bits wide in Win16 --------------------------- */
+
+    case EM_SETTABSTOPS:
+    case LB_SETTABSTOPS: {
+        unsigned n = wp, i;
+        if (n > sizeof m->tabs / sizeof m->tabs[0])
+            n = sizeof m->tabs / sizeof m->tabs[0];
+        for (i = 0; i < n; i++)
+            m->tabs[i] = (int16_t)sel_rd16(SEGPTR_SEL(lp),
+                                           (uint16_t)(SEGPTR_OFF(lp) + i * 2));
+        m->wp = n;
+        m->lp = n ? (LPARAM)m->tabs : 0;
+        m->local = n != 0;
+        break;
+    }
+
+    /* ---- results that are handles ------------------------------------------ */
+
+    case WM_GETFONT:
+        m->ret = H_FONT;
+        break;
+
+    case WM_QUERYDRAGICON:
+        m->ret = H_ICON;
+        break;
+
+    case WM_CTLCOLORMSGBOX:
+    case WM_CTLCOLOREDIT:
+    case WM_CTLCOLORLISTBOX:
+    case WM_CTLCOLORBTN:
+    case WM_CTLCOLORDLG:
+    case WM_CTLCOLORSCROLLBAR:
+    case WM_CTLCOLORSTATIC:                         /* WM_CTLCOLOR, unpacked */
+        m->ret = H_BRUSH;
+        break;
 
     /* ---- messages that only make sense coming the other way ---------------- */
 

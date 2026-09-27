@@ -52,6 +52,12 @@ int      winproc_original(HWND hwnd, UINT msg16, UINT *msg32,
 uint32_t msg32_to_16(uint32_t msg);
 uint32_t msg16_to_32(HWND hwnd, uint32_t msg);
 
+/* A message in Win16's form as far as its parameters are values, which is
+   as far as a posted one needs; the guest's message loop fills in its MSG
+   this way.  msg16_unpack (msg16.h) is the other way. */
+void     msg16_pack(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp,
+                    uint16_t *msg16, uint16_t *wp16, uint32_t *lp16);
+
 /* Whether a Win32 message is one Win16 had, so that the guest can know what
    it means.  Those that are not are answered on this side and never reach
    it. */

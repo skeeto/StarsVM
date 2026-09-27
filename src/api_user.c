@@ -391,30 +391,55 @@ static uint32_t u_GetWindowRect(Cpu *c, Args *a)
 
 /* ---- the message loop ------------------------------------------------------ */
 
-/* MSG16 is 18 bytes: hwnd, message, wParam, lParam, time, pt. */
+/* MSG16 is 18 bytes: hwnd, message, wParam, lParam, time, pt.
+ *
+ * A message that comes through the guest's loop is translated both ways, as
+ * one sent to a window procedure is: into Win16's form for the guest, whose
+ * code reads it there, and back into Win32's for DispatchMessage, whose window
+ * procedure may be USER32's own.  Renumbered and cut to 16 bits and no more,
+ * a posted EM_LINESCROLL two columns left came back as 65534 right, a posted
+ * EM_SETSEL deselect selected everything, a posted LB_SETCURSEL(-1) left the
+ * selection alone, and a WM_COMMAND lost its notify code and gave the guest a
+ * host HWND.  Only the values need translating: nothing posted carries a
+ * pointer.  Wine does the same in GetMessage16 and DispatchMessage16. */
 static void put_msg16(uint32_t p, const MSG *m)
 {
     uint16_t sel = SEGPTR_SEL(p), off = SEGPTR_OFF(p);
+    uint16_t msg16, wp16;
+    uint32_t lp16;
+
+    msg16_pack(m->hwnd, m->message, m->wParam, m->lParam, &msg16, &wp16, &lp16);
     sel_wr16(sel, off,               HWND_16(m->hwnd));
-    sel_wr16(sel, (uint16_t)(off+2), (uint16_t)msg32_to_16(m->message));
-    sel_wr16(sel, (uint16_t)(off+4), (uint16_t)m->wParam);
-    sel_wr32(sel, (uint16_t)(off+6), (uint32_t)m->lParam);
+    sel_wr16(sel, (uint16_t)(off+2), msg16);
+    sel_wr16(sel, (uint16_t)(off+4), wp16);
+    sel_wr32(sel, (uint16_t)(off+6), lp16);
     sel_wr32(sel, (uint16_t)(off+10),m->time);
     sel_wr16(sel, (uint16_t)(off+14),(uint16_t)m->pt.x);
     sel_wr16(sel, (uint16_t)(off+16),(uint16_t)m->pt.y);
 }
 
-static void get_msg16(uint32_t p, MSG *m)
+/* Returns the message without parameters that has to follow this one, or 0:
+   see msg16_unpack.  That is only ever the EM_SCROLLCARET for a guest's own
+   EM_SETSEL(0) to a multiline edit, in a MSG it wrote itself; one from
+   GetMessage says 1 there, and the EM_SCROLLCARET that msg16_post queued
+   behind it comes next. */
+static UINT get_msg16(uint32_t p, MSG *m)
 {
     uint16_t sel = SEGPTR_SEL(p), off = SEGPTR_OFF(p);
+    struct msg32 v;
+
     memset(m, 0, sizeof *m);
     m->hwnd    = HWND_32(sel_rd16(sel, off));
-    m->message = msg16_to_32(m->hwnd, sel_rd16(sel, (uint16_t)(off + 2)));
-    m->wParam  = sel_rd16(sel, (uint16_t)(off + 4));
-    m->lParam  = (LPARAM)sel_rd32(sel, (uint16_t)(off + 6));
+    msg16_unpack(m->hwnd, sel_rd16(sel, (uint16_t)(off + 2)),
+                 sel_rd16(sel, (uint16_t)(off + 4)),
+                 sel_rd32(sel, (uint16_t)(off + 6)), &v);
+    m->message = v.msg;
+    m->wParam  = v.wp;
+    m->lParam  = v.lp;
     m->time    = sel_rd32(sel, (uint16_t)(off + 10));
     m->pt.x    = (int16_t)sel_rd16(sel, (uint16_t)(off + 14));
     m->pt.y    = (int16_t)sel_rd16(sel, (uint16_t)(off + 16));
+    return v.after;
 }
 
 /* A wheel message must not reach the guest's loop.  MSG16's wParam is 16 bits
@@ -520,9 +545,13 @@ static uint32_t u_TranslateMessage(Cpu *c, Args *a)
 static uint32_t u_DispatchMessage(Cpu *c, Args *a)
 {
     MSG m;
+    UINT after;
+    LRESULT r;
     (void)c;
-    get_msg16(arg_long(a), &m);
-    return (uint32_t)DispatchMessageA(&m);
+    after = get_msg16(arg_long(a), &m);
+    r = DispatchMessageA(&m);
+    if (after) SendMessageA(m.hwnd, after, 0, 0);
+    return (uint32_t)r;
 }
 
 /* Everything the guest sends goes out through real USER32, even when the target

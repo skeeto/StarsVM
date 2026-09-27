@@ -408,17 +408,15 @@ struct xlat {
     int      ret_handle;    /* H_* type when the return value is a handle      */
 };
 
+static void msg_to_16_values(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp,
+                             struct xlat *x);
+
 static void msg_to_16(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp,
                       uint16_t hinst, uint8_t *extra, struct xlat *x)
 {
     uint8_t *p = extra;
 
-    x->msg16 = (UINT)msg32_to_16(msg);
-    x->wp16 = (uint16_t)wp;
-    x->lp16 = (uint32_t)lp;
-    x->extralen = 0;
-    x->back = BACK_NONE;
-    x->ret_handle = H_NONE;
+    msg_to_16_values(hwnd, msg, wp, lp, x);
 
     switch (msg) {
 
@@ -572,6 +570,30 @@ static void msg_to_16(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp,
         x->extralen = 18;
         break;
     }
+
+    default:
+        break;
+    }
+}
+
+/* The rewrites that need nothing but the message's own three values: the
+   renumbering, a handle's 16-bit number, the pairs whose parameters Win32
+   packs differently.  They are all a posted message can need, as nothing
+   posted carries a pointer - Win32 refuses one, and msg16_post sends what it
+   cannot post - so they are what the guest's message loop does to the MSG it
+   hands the guest, through msg16_pack.  msg16_unpack, in msg16.c, undoes
+   each of them, for the MSG the guest hands back. */
+static void msg_to_16_values(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp,
+                             struct xlat *x)
+{
+    x->msg16 = (UINT)msg32_to_16(msg);
+    x->wp16 = (uint16_t)wp;
+    x->lp16 = (uint32_t)lp;
+    x->extralen = 0;
+    x->back = BACK_NONE;
+    x->ret_handle = H_NONE;
+
+    switch (msg) {
 
     /* ---- messages that merely repack their two parameters ------------------ */
 
@@ -733,6 +755,17 @@ static void msg_to_16(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp,
     default:
         break;
     }
+}
+
+void msg16_pack(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp,
+                uint16_t *msg16, uint16_t *wp16, uint32_t *lp16)
+{
+    struct xlat x;
+
+    msg_to_16_values(hwnd, msg, wp, lp, &x);
+    *msg16 = (uint16_t)x.msg16;
+    *wp16  = x.wp16;
+    *lp16  = x.lp16;
 }
 
 /* Copy the parts of a guest-side struct that the message contract says flow
