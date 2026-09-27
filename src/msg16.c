@@ -289,6 +289,7 @@ static void marshal_in(HWND hwnd, uint16_t msg16, uint16_t wp, uint32_t lp,
     case WM_MOUSEACTIVATE:
     case WM_SETFOCUS:
     case WM_KILLFOCUS:
+    case WM_INITDIALOG:
         m->wp = (WPARAM)HWND_32(wp);
         break;
 
@@ -304,6 +305,10 @@ static void marshal_in(HWND hwnd, uint16_t msg16, uint16_t wp, uint32_t lp,
     /* ---- the pairs whose two parameters swap round ------------------------- */
 
     case WM_COMMAND:
+    case WM_VKEYTOITEM:
+    case WM_CHARTOITEM:
+        /* The control in lParam's low word, and in the high word a notify
+           code, or for the list box's two the caret's index. */
         m->wp = MAKEWPARAM(wp, HIWORD(lp));
         m->lp = (LPARAM)HWND_32(LOWORD(lp));
         break;
@@ -320,8 +325,34 @@ static void marshal_in(HWND hwnd, uint16_t msg16, uint16_t wp, uint32_t lp,
         break;
 
     case WM_MENUSELECT:
-        m->wp = MAKEWPARAM(wp, HIWORD(lp));
-        m->lp = (LPARAM)HMENU_32(LOWORD(lp));
+    case WM_MENUCHAR:
+        /* The flags in lParam's low word and the menu in its high word.
+           Win16 names a submenu by its handle where Win32 gives its position
+           in the menu, so the handle has to be looked for there. */
+        m->wp = MAKEWPARAM(wp, LOWORD(lp));
+        m->lp = (LPARAM)HMENU_32(HIWORD(lp));
+        if (m->msg == WM_MENUSELECT && (LOWORD(lp) & MF_POPUP) && m->lp) {
+            HMENU menu = (HMENU)m->lp, sub = HMENU_32(wp);
+            int i, n = GetMenuItemCount(menu);
+            for (i = 0; sub && i < n; i++)
+                if (GetSubMenu(menu, i) == sub) {
+                    m->wp = MAKEWPARAM(i, LOWORD(lp));
+                    break;
+                }
+        }
+        break;
+
+    case WM_PARENTNOTIFY:
+        /* For a child's birth or death, the child in lParam's low word and its
+           id in the high; for a click, where it was, the same both ways. */
+        if (wp == WM_CREATE || wp == WM_DESTROY) {
+            m->wp = MAKEWPARAM(wp, HIWORD(lp));
+            m->lp = (LPARAM)HWND_32(LOWORD(lp));
+        }
+        break;
+
+    case WM_ENTERIDLE:
+        m->lp = (LPARAM)HWND_32(LOWORD(lp));
         break;
 
     case EM_LINESCROLL:
