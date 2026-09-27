@@ -178,23 +178,73 @@ void winproc_set_pending(uint32_t proc16, uint16_t hinst)
 
 /* ---- message translation -------------------------------------------------- */
 
-/* Win16 control messages live in the WM_USER range; Win32 gave the same
-   messages dedicated numbers.  These are the fixed offsets between them. */
-uint32_t msg32_to_16(uint32_t msg)
+/* Win16 numbered each stock control's messages from WM_USER, so BM_GETCHECK,
+   EM_GETSEL and CB_GETEDITSEL are all 0x0400 and only the window's class says
+   which one is meant; Win32 gave each class a block of its own below WM_USER.
+   So a number is renumbered only for a window of the class it belongs to.  To
+   any other window a number from WM_USER up is its own business - the game
+   posts its frame WM_USER+100 - and it has to arrive as it was sent, whichever
+   way it goes round.
+
+   The blocks run as far as Win16's did (Wine's winuser16.h has them all).
+   Win32 went on adding to the end of each - BM_CLICK, EM_SETMARGINS,
+   LB_GETLISTBOXINFO - and those have no Win16 number to be given.  The
+   static's pair has a block of its own, which Win32 put in the numbers left
+   over after the combo box's. */
+static const struct ctlblock {
+    const char *cls;            /* the class, as RealGetWindowClass names it */
+    uint16_t    msg32, msg16;   /* the first message's two numbers           */
+    uint16_t    count;
+} ctlblocks[] = {
+    { "Edit",      0x00B0, 0x0400, 35 },  /* EM_GETSEL .. EM_GETPASSWORDCHAR  */
+    { "ScrollBar", 0x00E0, 0x0400,  5 },  /* SBM_SETPOS .. SBM_ENABLE_ARROWS  */
+    { "Button",    0x00F0, 0x0400,  5 },  /* BM_GETCHECK .. BM_SETSTYLE       */
+    { "ComboBox",  0x0140, 0x0400, 25 },  /* CB_GETEDITSEL ..
+                                             CB_FINDSTRINGEXACT               */
+    { "Static",    0x0170, 0x0400,  2 },  /* STM_SETICON, STM_GETICON         */
+    { "ListBox",   0x0180, 0x0401, 37 },  /* LB_ADDSTRING .. LB_CARETOFF      */
+    { "ComboLBox", 0x0180, 0x0401, 37 },  /* a combo box's list, by its name  */
+};
+
+static int ctl_has(const struct ctlblock *b, uint32_t msg, int win16)
 {
-    if (msg >= 0x00F0 && msg <= 0x00FF) return msg + 0x0310;   /* BM_*  */
-    if (msg >= 0x00B0 && msg <= 0x00DF) return msg + 0x0350;   /* EM_*  */
-    if (msg >= 0x0180 && msg <= 0x01FF) return msg + 0x0281;   /* LB_*  */
-    if (msg >= 0x0140 && msg <= 0x017F) return msg + 0x02C0;   /* CB_*  */
-    if (msg >= 0x00E0 && msg <= 0x00EF) return msg + 0x0320;   /* SBM_* */
-    return msg;
+    return msg - (win16 ? b->msg16 : b->msg32) < b->count;
 }
 
-uint32_t msg16_to_32(uint32_t msg)
+/* The block `msg` is in for `hwnd`, numbered as Win16 had it when `win16`:
+   NULL unless the window is a stock control and the number is one of its
+   class's.  RealGetWindowClass names the class whose procedure the window
+   really runs, so a control the guest has subclassed is still what it was,
+   and so is a class of its own that it built on one.  Windows 11 calls a
+   combo box's list a ListBox that way too; the ComboLBox row is for a host
+   that calls it by its own name.  The class is looked up only for a number
+   some block has, which leaves out nearly everything. */
+static const struct ctlblock *ctl_block(HWND hwnd, uint32_t msg, int win16)
 {
-    if (msg >= 0x0400 && msg <= 0x040F) return msg - 0x0310;
-    if (msg >= 0x0400 && msg <= 0x042F) return msg - 0x0350;
-    return msg;
+    const size_t n = sizeof ctlblocks / sizeof ctlblocks[0];
+    char cls[16];
+    size_t i;
+
+    for (i = 0; i < n && !ctl_has(&ctlblocks[i], msg, win16); i++)
+        ;
+    if (i == n || !hwnd || !RealGetWindowClassA(hwnd, cls, sizeof cls))
+        return NULL;
+    for (i = 0; i < n; i++)
+        if (!_stricmp(cls, ctlblocks[i].cls))
+            return ctl_has(&ctlblocks[i], msg, win16) ? &ctlblocks[i] : NULL;
+    return NULL;
+}
+
+uint32_t msg32_to_16(HWND hwnd, uint32_t msg)
+{
+    const struct ctlblock *b = ctl_block(hwnd, msg, 0);
+    return b ? msg - b->msg32 + b->msg16 : msg;
+}
+
+uint32_t msg16_to_32(HWND hwnd, uint32_t msg)
+{
+    const struct ctlblock *b = ctl_block(hwnd, msg, 1);
+    return b ? msg - b->msg16 + b->msg32 : msg;
 }
 
 /* Whether the guest can know what a message means, which below WM_USER is
@@ -214,14 +264,11 @@ uint32_t msg16_to_32(uint32_t msg)
    whose MM_MCINOTIFY the game's frame window handles; so nothing the guest
    could have been sent under Win16 is lost.  The control messages Win32
    renumbered below WM_USER are let through a whole block at a time, which is
-   more than Win16 had - Win32 went on adding to each block (BM_CLICK,
-   LB_GETLISTBOXINFO) and put WM_INPUT at the end of the buttons' - because the
-   same blocks carry the guest's own private messages: dispatching one,
-   get_msg16 renumbers WM_USER+5 into the button block whatever the window's
-   class, and it has to come back.  From WM_USER up to the registered range a
-   number is private to its window class or application, which is the guest's
-   business; a registered message is the host's, since the guest registers
-   none. */
+   more than Win16 had: Win32 went on adding to each block (BM_CLICK,
+   LB_GETLISTBOXINFO) and put WM_INPUT at the end of the buttons'.  From
+   WM_USER up to the registered range a number is private to its window class
+   or application, which is the guest's business; a registered message is the
+   host's, since the guest registers none. */
 int msg_win16(UINT msg)
 {
     static const struct { uint16_t lo, hi; } known[] = {
@@ -247,8 +294,9 @@ int msg_win16(UINT msg)
     size_t i;
 
     if (msg >= WM_USER) return msg < 0xC000;
-    /* The control messages Win32 renumbered below WM_USER. */
-    if (msg32_to_16(msg) != msg) return 1;
+    /* The blocks Win32 gave the control messages below WM_USER, whole. */
+    if ((msg >= 0x00B0 && msg <= 0x00FF) || (msg >= 0x0140 && msg <= 0x01FF))
+        return 1;
     for (i = 0; i < sizeof known / sizeof known[0]; i++)
         if (msg >= known[i].lo && msg <= known[i].hi) return 1;
     return 0;
@@ -352,7 +400,7 @@ static void msg_to_16(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp,
 {
     uint8_t *p = extra;
 
-    x->msg16 = (UINT)msg32_to_16(msg);
+    x->msg16 = (UINT)msg32_to_16(hwnd, msg);
     x->wp16 = (uint16_t)wp;
     x->lp16 = (uint32_t)lp;
     x->extralen = 0;

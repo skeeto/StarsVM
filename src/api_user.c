@@ -363,7 +363,8 @@ static uint32_t u_DefWindowProc(Cpu *c, Args *a)
         return (uint32_t)r;
     }
 
-    return (uint32_t)winproc_default(hwnd, (UINT)msg16_to_32(msg), wp, (LPARAM)lp);
+    return (uint32_t)winproc_default(hwnd, (UINT)msg16_to_32(hwnd, msg), wp,
+                                     (LPARAM)lp);
 }
 
 static uint32_t u_GetClientRect(Cpu *c, Args *a)
@@ -395,7 +396,8 @@ static void put_msg16(uint32_t p, const MSG *m)
 {
     uint16_t sel = SEGPTR_SEL(p), off = SEGPTR_OFF(p);
     sel_wr16(sel, off,               HWND_16(m->hwnd));
-    sel_wr16(sel, (uint16_t)(off+2), (uint16_t)msg32_to_16(m->message));
+    sel_wr16(sel, (uint16_t)(off+2),
+             (uint16_t)msg32_to_16(m->hwnd, m->message));
     sel_wr16(sel, (uint16_t)(off+4), (uint16_t)m->wParam);
     sel_wr32(sel, (uint16_t)(off+6), (uint32_t)m->lParam);
     sel_wr32(sel, (uint16_t)(off+10),m->time);
@@ -408,7 +410,7 @@ static void get_msg16(uint32_t p, MSG *m)
     uint16_t sel = SEGPTR_SEL(p), off = SEGPTR_OFF(p);
     memset(m, 0, sizeof *m);
     m->hwnd    = HWND_32(sel_rd16(sel, off));
-    m->message = msg16_to_32(sel_rd16(sel, (uint16_t)(off + 2)));
+    m->message = msg16_to_32(m->hwnd, sel_rd16(sel, (uint16_t)(off + 2)));
     m->wParam  = sel_rd16(sel, (uint16_t)(off + 4));
     m->lParam  = (LPARAM)sel_rd32(sel, (uint16_t)(off + 6));
     m->time    = sel_rd32(sel, (uint16_t)(off + 10));
@@ -1156,7 +1158,8 @@ static uint32_t u_CallWindowProc(Cpu *c, Args *a)
             if (type != H_NONE) return h16(type, (void *)(uintptr_t)r);
             return (uint32_t)r;
         }
-        return (uint32_t)CallWindowProcA(host, hwnd, (UINT)msg16_to_32(msg),
+        return (uint32_t)CallWindowProcA(host, hwnd,
+                                         (UINT)msg16_to_32(hwnd, msg),
                                          wp, (LPARAM)lp);
     }
     {   /* A guest procedure: 16 to 16 needs no translation. */

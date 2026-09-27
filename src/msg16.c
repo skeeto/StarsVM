@@ -4,38 +4,10 @@
 #include "handle.h"
 #include "gmem.h"
 #include "log.h"
+#include "winproc.h"
 
 #include <stdio.h>
 #include <string.h>
-
-/* ---- renumbering ---------------------------------------------------------- */
-
-/* The offset between a Win16 control message and its Win32 number, per class.
-   Win16 numbered all of these from WM_USER, which is why the ranges collide and
-   why the class has to be consulted. */
-UINT msg16_to_32_for(HWND hwnd, uint16_t msg16)
-{
-    char cls[32];
-
-    if (msg16 < 0x0400 || !hwnd) return msg16;
-    if (!GetClassNameA(hwnd, cls, sizeof cls)) return msg16;
-
-    if (!_stricmp(cls, "Button")) {
-        if (msg16 <= 0x0404) return msg16 - 0x0310;          /* BM_*  */
-    } else if (!_stricmp(cls, "Edit")) {
-        if (msg16 <= 0x0422) return msg16 - 0x0350;          /* EM_*  */
-    } else if (!_stricmp(cls, "ListBox")) {
-        if (msg16 >= 0x0401 && msg16 <= 0x0427)
-            return msg16 - 0x0281;                           /* LB_*  */
-    } else if (!_stricmp(cls, "ComboBox")) {
-        if (msg16 <= 0x0421) return msg16 - 0x02C0;          /* CB_*  */
-    } else if (!_stricmp(cls, "ScrollBar")) {
-        if (msg16 <= 0x0409) return msg16 - 0x0320;          /* SBM_* */
-    } else if (!_stricmp(cls, "Static")) {
-        if (msg16 <= 0x0402) return msg16 - 0x0290;          /* STM_* */
-    }
-    return msg16;
-}
 
 /* ---- marshaling ----------------------------------------------------------- */
 
@@ -108,7 +80,7 @@ static void marshal_in(HWND hwnd, uint16_t msg16, uint16_t wp, uint32_t lp,
                        struct marshal *m)
 {
     memset(m, 0, sizeof *m);
-    m->msg = msg16_to_32_for(hwnd, msg16);
+    m->msg = msg16_to_32(hwnd, msg16);
     m->wp  = wp;
     m->lp  = (LPARAM)lp;
 

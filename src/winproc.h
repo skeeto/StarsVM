@@ -46,8 +46,10 @@ const char *class_menu(const char *name);
 int      winproc_original(HWND hwnd, UINT msg16, UINT *msg32,
                           WPARAM *wp, LPARAM *lp);
 
-uint32_t msg32_to_16(uint32_t msg);
-uint32_t msg16_to_32(uint32_t msg);
+/* Renumber a message between Win32 and Win16 for the window it is going to:
+   only a stock control's own messages differ, so only the class can say. */
+uint32_t msg32_to_16(HWND hwnd, uint32_t msg);
+uint32_t msg16_to_32(HWND hwnd, uint32_t msg);
 
 /* Whether a Win32 message is one Win16 had, so that the guest can know what it
    means.  Those that are not are answered on this side and never reach it. */
