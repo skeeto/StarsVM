@@ -364,9 +364,11 @@ const struct inflight *winproc_inflight(HWND hwnd, UINT msg16)
    sent, so that whether the scroll happens is up to that procedure - pass the
    message on as it came and it scrolls, change the flag or keep the message
    and it does not - as it was in Win16, where the scroll was part of the
-   edit's own EM_SETSEL.  The only way there is through SendMessage, so msg16.c
-   leaves the flag here for the length of the send, and msg_to_16 takes it for
-   the first EM_SETSEL through with the same window and ends. */
+   edit's own EM_SETSEL.  The only way there is through USER32, so msg16.c's
+   send, and DispatchMessage of the guest's own MSG, leave the flag here for as
+   long as that takes, and msg_to_16 takes it for the first EM_SETSEL through
+   with the same window and ends.  The queue cannot carry it: a posted one is
+   handed the flag Win32's EM_SETSEL amounts to. */
 static struct {
     HWND     hwnd;
     WPARAM   start;
@@ -686,8 +688,8 @@ static void msg_to_16_values(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp,
            either kind.  A control of another class gets it too, from the
            dialog manager, when it answers DLGC_HASSETSEL; its style's
            ES_MULTILINE bit means something else, and it is told 0.  When
-           the guest sent this one, it gets the flag it sent: see
-           winproc_sending_setsel. */
+           the guest sent this one or dispatched it itself, it gets the flag
+           it used: see winproc_sending_setsel. */
         x->lp16 = (uint32_t)MAKELONG(LOWORD(wp), LOWORD(lp));
         if (setsel_out.hwnd == hwnd && setsel_out.start == wp &&
             setsel_out.end == lp) {

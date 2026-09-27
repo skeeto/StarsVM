@@ -59,9 +59,9 @@ struct inflight {
    NULL. */
 const struct inflight *winproc_inflight(HWND hwnd, UINT msg16);
 
-/* The scroll flag of an EM_SETSEL the guest is sending to an edit it has
-   subclassed, for its procedure to be handed; hwnd NULL when the send is
-   over. */
+/* The scroll flag of an EM_SETSEL the guest is sending or dispatching to an
+   edit it has subclassed, for its procedure to be handed; hwnd NULL when the
+   send or the dispatch is over. */
 void     winproc_sending_setsel(HWND hwnd, WPARAM start, LPARAM end,
                                 uint16_t flag);
 

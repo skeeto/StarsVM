@@ -528,12 +528,24 @@ static uint32_t u_TranslateMessage(Cpu *c, Args *a)
 
 static uint32_t u_DispatchMessage(Cpu *c, Args *a)
 {
+    uint32_t p = arg_long(a);
     MSG m;
     UINT after;
     LRESULT r;
+    int carried = 0;
     (void)c;
-    after = get_msg16(arg_long(a), &m);
+    after = get_msg16(p, &m);
+    /* To an edit the guest has subclassed, an EM_SETSEL takes its Win16 scroll
+       flag with it for the subclass to be handed, as a send of one does, and
+       the scroll is left to the subclass passing a 0 on (msg16.c, deliver). */
+    if (m.message == EM_SETSEL && winproc_get(m.hwnd)) {
+        winproc_sending_setsel(m.hwnd, m.wParam, m.lParam,
+                               sel_rd16(SEGPTR_SEL(p), (uint16_t)(SEGPTR_OFF(p) + 4)));
+        carried = 1;
+        after = 0;
+    }
     r = DispatchMessageA(&m);
+    if (carried) winproc_sending_setsel(NULL, 0, 0, 0);
     if (after) SendMessageA(m.hwnd, after, 0, 0);
     return (uint32_t)r;
 }
