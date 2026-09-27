@@ -209,29 +209,39 @@ uint32_t msg16_to_32(uint32_t msg)
    before the game exits is down to timing, which made a --fixed-clock run's
    instruction count vary, 32 at a time.
 
-   The ranges are Windows 3.1's own numbers, undocumented ones included, so
-   nothing the guest could have been sent under Win16 is lost.  From WM_USER
-   up to the registered range a number is private to its window class or
-   application, which is the guest's business; a registered message is the
-   host's, since the guest registers none. */
+   The ranges are Windows 3.1's own numbers, undocumented ones included (as
+   Schulman et al., Undocumented Windows, 1992, lists them), and MMSYSTEM's,
+   whose MM_MCINOTIFY the game's frame window handles; so nothing the guest
+   could have been sent under Win16 is lost.  The control messages Win32
+   renumbered below WM_USER are let through a whole block at a time, which is
+   more than Win16 had - Win32 went on adding to each block (BM_CLICK,
+   LB_GETLISTBOXINFO) and put WM_INPUT at the end of the buttons' - because the
+   same blocks carry the guest's own private messages: dispatching one,
+   get_msg16 renumbers WM_USER+5 into the button block whatever the window's
+   class, and it has to come back.  From WM_USER up to the registered range a
+   number is private to its window class or application, which is the guest's
+   business; a registered message is the host's, since the guest registers
+   none. */
 int msg_win16(UINT msg)
 {
     static const struct { uint16_t lo, hi; } known[] = {
         { 0x0000, 0x0024 },     /* WM_NULL .. WM_GETMINMAXINFO           */
-        { 0x0026, 0x0031 },     /* WM_PAINTICON .. WM_GETFONT            */
-        { 0x0035, 0x0039 },     /* WM_ISACTIVEICON .. WM_COMPAREITEM     */
+        { 0x0026, 0x0039 },     /* WM_PAINTICON .. WM_COMPAREITEM, the
+                                   hot keys and WM_FILESYSCHANGE among them */
         { 0x0041, 0x0048 },     /* WM_COMPACTING .. WM_POWER             */
         { 0x0081, 0x0089 },     /* WM_NCCREATE .. WM_SYNCTASK            */
         { 0x00A0, 0x00A9 },     /* the non-client mouse                  */
         { 0x0100, 0x0108 },     /* the keyboard                          */
         { 0x0110, 0x0118 },     /* WM_INITDIALOG .. WM_SYSTIMER          */
         { 0x011F, 0x0121 },     /* WM_MENUSELECT .. WM_ENTERIDLE         */
-        { 0x0132, 0x0138 },     /* Win32's WM_CTLCOLOR, split seven ways */
+        { 0x0131, 0x0138 },     /* WM_LBTRACKPOINT, and Win32's
+                                   WM_CTLCOLOR split seven ways          */
         { 0x0200, 0x0209 },     /* the mouse                             */
         { 0x0210, 0x0212 },     /* WM_PARENTNOTIFY, the menu loop        */
         { 0x0220, 0x0234 },     /* MDI, drag and drop, size and move     */
         { 0x0300, 0x0311 },     /* the clipboard and the palette         */
         { 0x0380, 0x039F },     /* pen windows, coalescing               */
+        { 0x03A0, 0x03DF },     /* MMSYSTEM: joystick, MCI, wave, MIDI   */
         { 0x03E0, 0x03E8 },     /* DDE                                   */
     };
     size_t i;
