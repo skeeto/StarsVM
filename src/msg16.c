@@ -76,6 +76,34 @@ static int lp_is_in_string(HWND hwnd, UINT msg)
     }
 }
 
+/* A message whose wParam is an item index, which Win16 passed as a 16-bit int
+   with -1 part of the contract: append for an insert, no selection for a
+   SETCURSEL, the whole list for a find or select, the selection field rather
+   than the items for CB_GETITEMHEIGHT and CB_SETITEMHEIGHT.  Zero-extended,
+   -1 reaches USER32 as 65535, an index past the end: the insert fails and adds
+   nothing, the selection stays where it was, the heights are the items'.  The
+   finds only work because USER32 starts a search from an out-of-range index
+   at the top.  This is the list Wine's user.exe16 sign-extends, in
+   listbox_proc16 and combo_proc16, but for LB_SETSEL, which is below.  It has
+   CB_SETITEMDATA but not LB_SETITEMDATA, a difference that makes none in Wine,
+   whose list box refuses -1 to either; USER32 takes -1 to either as every
+   item, so here a combo box gets that and a list box does not. */
+static int wp_is_index(UINT msg)
+{
+    switch (msg) {
+    case LB_INSERTSTRING: case LB_FINDSTRING: case LB_FINDSTRINGEXACT:
+    case LB_SELECTSTRING: case LB_SETCURSEL: case LB_GETSEL:
+    case LB_SETANCHORINDEX: case LB_GETITEMRECT:
+    case CB_INSERTSTRING: case CB_FINDSTRING: case CB_FINDSTRINGEXACT:
+    case CB_SELECTSTRING: case CB_SETCURSEL: case CB_GETLBTEXT:
+    case CB_GETLBTEXTLEN: case CB_GETITEMDATA: case CB_SETITEMDATA:
+    case CB_GETITEMHEIGHT: case CB_SETITEMHEIGHT:
+        return 1;
+    default:
+        return 0;
+    }
+}
+
 static void marshal_in(HWND hwnd, uint16_t msg16, uint16_t wp, uint32_t lp,
                        struct marshal *m)
 {
@@ -83,6 +111,8 @@ static void marshal_in(HWND hwnd, uint16_t msg16, uint16_t wp, uint32_t lp,
     m->msg = msg16_to_32(hwnd, msg16);
     m->wp  = wp;
     m->lp  = (LPARAM)lp;
+    if (wp_is_index(m->msg))
+        m->wp = (WPARAM)(int16_t)wp;
 
     if (lp_is_in_string(hwnd, m->msg)) {
         g_str(lp, m->buf, sizeof m->buf);
@@ -121,7 +151,7 @@ static void marshal_in(HWND hwnd, uint16_t msg16, uint16_t wp, uint32_t lp,
         m->outp   = lp;
         m->outmax = (m->msg == WM_GETTEXT) ? (wp ? wp : 1) : sizeof m->buf;
         if (m->outmax > sizeof m->buf) m->outmax = sizeof m->buf;
-        m->wp = (m->msg == WM_GETTEXT) ? m->outmax : wp;
+        if (m->msg == WM_GETTEXT) m->wp = m->outmax;
         m->lp = (LPARAM)m->buf;
         break;
 
@@ -202,6 +232,31 @@ static void marshal_in(HWND hwnd, uint16_t msg16, uint16_t wp, uint32_t lp,
         m->local = n != 0;
         break;
     }
+
+    /* ---- an index that can be -1 ------------------------------------------- */
+
+    /* The list and combo box messages with one in wParam were taken care of
+       at the top, by wp_is_index. */
+
+    case LB_SETSEL:
+        /* The item is lParam's low word, -1 for every item, and the high word
+           goes unread.  Wine's listbox_proc16 sign-extends wParam instead,
+           which is only the select-or-deselect flag.  USER32 happens to take
+           a zero-extended 0xFFFF as -1 here, but not a high word that Win16
+           would have ignored. */
+        m->lp = (LPARAM)(int16_t)LOWORD(lp);
+        break;
+
+    case EM_LINEINDEX:
+    case EM_LINEFROMCHAR:
+    case EM_LINELENGTH:
+        /* -1 is the caret's line, or for EM_LINELENGTH what is left unselected
+           on the selection's lines; zero-extended, it asks about a character
+           or line past the end.  Only -1 itself, as Wine does for
+           EM_LINEINDEX: the others take a character position, and an edit
+           control's text can run past 32K. */
+        if (wp == 0xFFFF) m->wp = (WPARAM)-1;
+        break;
 
     /* ---- handles in wParam ------------------------------------------------- */
 
