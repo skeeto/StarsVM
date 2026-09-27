@@ -71,6 +71,9 @@ static void st_set(Cpu *c, int i, const X80 *v)
     set_tag(c, p, !(v->se & 0x7FFFu) && !v->m ? TAG_ZERO : TAG_VALID);
 }
 
+/* Push, leaving C1 as the instruction left it: the loads have cleared it
+   already, and FPTAN's is the rounding of the tangent under the 1.0 it
+   pushes. */
 static void fpu_push(Cpu *c, const X80 *v)
 {
     c->fpu_top = (uint8_t)((c->fpu_top - 1) & 7);
@@ -80,6 +83,14 @@ static void fpu_push(Cpu *c, const X80 *v)
         c->fpu_sw |= SW_C1 | 0x0041u;
     }
     st_set(c, 0, v);
+}
+
+/* For the instructions that only move values - FLD ST(i), FLD m80, FST and
+   FSTP to a register or m80, FXCH, FINCSTP, FDECSTP - and so define C1 as
+   clear and nothing else. */
+static void c1_clear(Cpu *c)
+{
+    c->fpu_sw &= ~SW_C1;
 }
 
 static void fpu_discard(Cpu *c)
@@ -372,6 +383,7 @@ int fpu_exec(Cpu *c, uint8_t op, uint8_t modrm, int is_reg,
                 uint8_t m[10];
                 fpu_mem_read(sel, off, m, 10);
                 x80_get(&a, m);
+                c1_clear(c);
                 fpu_push(c, &a);
                 return 1;
             }
@@ -380,6 +392,7 @@ int fpu_exec(Cpu *c, uint8_t op, uint8_t modrm, int is_reg,
                 st_get(c, 0, &a);
                 x80_put(m, &a);
                 fpu_mem_write(sel, off, m, 10);
+                c1_clear(c);
                 fpu_discard(c);
                 return 1;
             }
@@ -429,18 +442,20 @@ int fpu_exec(Cpu *c, uint8_t op, uint8_t modrm, int is_reg,
         return 1;
     case 0xD9:
         switch (reg) {
-        case 0: st_get(c, rm, &a); fpu_push(c, &a); return 1;        /* FLD ST(i) */
+        case 0: st_get(c, rm, &a); c1_clear(c);
+                fpu_push(c, &a); return 1;                            /* FLD ST(i) */
         case 1:                                                       /* FXCH      */
             st_get(c, 0, &a);
             st_get(c, rm, &b);
             st_set(c, 0, &b);
             st_set(c, rm, &a);
+            c1_clear(c);
             return 1;
         case 2: if (rm == 0) return 1; return 0;                      /* FNOP      */
         /* Copy then pop, which is what DD /3 below has always done.  This
            form only popped, so `fstp st(2)` discarded ST(0) and left ST(2)
            alone. */
-        case 3: st_get(c, 0, &a); st_set(c, rm, &a);
+        case 3: st_get(c, 0, &a); st_set(c, rm, &a); c1_clear(c);
                 fpu_discard(c); return 1;                             /* FSTP ST(i)*/
         case 5: {                                                     /* constants */
             /* FLD1 L2T L2E PI LG2 LN2 Z, in encoding order. */
@@ -452,8 +467,11 @@ int fpu_exec(Cpu *c, uint8_t op, uint8_t modrm, int is_reg,
             return 1;
         }
         case 6:
-            if (rm == 6) { c->fpu_top = (uint8_t)((c->fpu_top - 1) & 7); return 1; } /* FDECSTP */
-            if (rm == 7) { c->fpu_top = (uint8_t)((c->fpu_top + 1) & 7); return 1; } /* FINCSTP */
+            if (rm == 6 || rm == 7) {                                 /* FDECSTP, FINCSTP */
+                c->fpu_top = (uint8_t)((c->fpu_top + (rm == 6 ? 7 : 1)) & 7);
+                c1_clear(c);
+                return 1;
+            }
             return special(c, modrm);
         default:
             return special(c, modrm);
@@ -484,9 +502,12 @@ int fpu_exec(Cpu *c, uint8_t op, uint8_t modrm, int is_reg,
         return 1;
     case 0xDD:
         switch (reg) {
-        case 0: set_tag(c, phys(c, rm), TAG_EMPTY); return 1;          /* FFREE   */
-        case 2: st_get(c, 0, &a); st_set(c, rm, &a); return 1;         /* FST ST(i)*/
-        case 3: st_get(c, 0, &a); st_set(c, rm, &a);
+        case 0: set_tag(c, phys(c, rm), TAG_EMPTY);                    /* FFREE   */
+                c1_clear(c);        /* undefined in the manual; measured */
+                return 1;
+        case 2: st_get(c, 0, &a); st_set(c, rm, &a);
+                c1_clear(c); return 1;                                  /* FST ST(i)*/
+        case 3: st_get(c, 0, &a); st_set(c, rm, &a); c1_clear(c);
                 fpu_discard(c); return 1;                               /* FSTP    */
         case 4: case 5:                                                 /* FUCOM(P)*/
             st_get(c, 0, &a);

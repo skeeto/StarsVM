@@ -28,20 +28,22 @@
 _Static_assert(offsetof(X80, m) == 0 && offsetof(X80, se) == 8,
                "an X80 must begin with the ten-byte memory image");
 
-/* The host's status word after one operation, as x80.h's merge wants it: the
-   exception flags, SF, ES and B only ever set, so they accumulate in the
-   guest's as they would on an x87; the condition codes the host's. */
-static void took(X80Env *e, uint16_t sw)
-{
-    e->cc = 0x4700u;
-    e->sw = (uint16_t)(sw & 0xC7FFu);
-}
+/* The condition codes an instruction defines.  The rest it leaves alone -
+   the manual calls them undefined, and the silicon keeps them, which the
+   game depends on: eighteen of its compares are FCOM, FSTP, FNSTSW AX, SAHF,
+   with the FSTP in between.  The host's own C bits are nothing to do with
+   the guest's, so only the defined ones may be taken from it. */
+#define CC_C1   0x0200u                     /* rounding direction, or 0 */
+#define CC_C12  0x0600u                     /* and C2, incomplete reduction */
+#define CC_ALL  0x4700u                     /* compares, FXAM, FPREM */
 
-/* The same for an operation that defines no condition code. */
-static void raised(X80Env *e, uint16_t sw)
+/* The host's status word after one operation, as x80.h's merge wants it: the
+   exception flags, SF, ES and B only ever set, so that they accumulate in the
+   guest's as they would on an x87, and of the condition codes those in cc. */
+static void took(X80Env *e, uint16_t sw, uint16_t cc)
 {
-    e->cc = 0;
-    e->sw = (uint16_t)(sw & 0x80FFu);
+    e->cc = cc;
+    e->sw = (uint16_t)(sw & (0x80FFu | cc));
 }
 
 static uint16_t host_cw_saved;
@@ -78,7 +80,7 @@ void x87hw_arith(X80Env *e, int op, const X80 *a, const X80 *b, X80 *r)
     case X80_DIV:  ARITH("4", "3", "fdivp"); break;          /* a / b */
     default:       ARITH("3", "4", "fdivp"); break;          /* b / a */
     }
-    took(e, sw);
+    took(e, sw, CC_C1);
 }
 
 /* a against a float or double in memory, which is not the same as widening
@@ -103,7 +105,7 @@ void x87hw_arith_f32(X80Env *e, int op, const X80 *a, uint32_t m, X80 *r)
     case X80_DIV:  MEMOP("fdivs");  break;
     default:       MEMOP("fdivrs"); break;
     }
-    took(e, sw);
+    took(e, sw, CC_C1);
 }
 
 void x87hw_arith_f64(X80Env *e, int op, const X80 *a, uint64_t m, X80 *r)
@@ -118,7 +120,7 @@ void x87hw_arith_f64(X80Env *e, int op, const X80 *a, uint64_t m, X80 *r)
     case X80_DIV:  MEMOP("fdivl");  break;
     default:       MEMOP("fdivrl"); break;
     }
-    took(e, sw);
+    took(e, sw, CC_C1);
 }
 
 /* FCOM: C3, C2 and C0 say how a compares with b, and C1 comes back clear.
@@ -133,14 +135,14 @@ void x87hw_compare(X80Env *e, const X80 *a, const X80 *b)
 {
     uint16_t sw = 0, cw = e->cw;
     COMPARE("fcompp");
-    took(e, sw);
+    took(e, sw, CC_ALL);
 }
 
 void x87hw_ucompare(X80Env *e, const X80 *a, const X80 *b)
 {
     uint16_t sw = 0, cw = e->cw;
     COMPARE("fucompp");
-    took(e, sw);
+    took(e, sw, CC_ALL);
 }
 
 #define MEMCOMPARE(insn)                                                     \
@@ -152,31 +154,31 @@ void x87hw_compare_f32(X80Env *e, const X80 *a, uint32_t m)
 {
     uint16_t sw = 0, cw = e->cw;
     MEMCOMPARE("fcomps");
-    took(e, sw);
+    took(e, sw, CC_ALL);
 }
 
 void x87hw_compare_f64(X80Env *e, const X80 *a, uint64_t m)
 {
     uint16_t sw = 0, cw = e->cw;
     MEMCOMPARE("fcompl");
-    took(e, sw);
+    took(e, sw, CC_ALL);
 }
 
 /* One operand in, one result out, under the guest control word. */
-#define UNARY(insn)                                                          \
+#define UNARY(insn, cc)                                                      \
     uint16_t sw = 0, cw = e->cw;                                             \
     __asm__ volatile ("fldcw %2\n\tfnclex\n\tfldt %3\n\t" insn "\n\t"       \
                       "fnstsw %0\n\tfstpt %1"                                \
                       : "=&a"(sw), "=m"(*r) : "m"(cw), "m"(*a) : "st");      \
-    took(e, sw)
+    took(e, sw, cc)
 
-void x87hw_sqrt(X80Env *e, const X80 *a, X80 *r)   { UNARY("fsqrt"); }
-void x87hw_rndint(X80Env *e, const X80 *a, X80 *r) { UNARY("frndint"); }
-void x87hw_f2xm1(X80Env *e, const X80 *a, X80 *r)  { UNARY("f2xm1"); }
-void x87hw_sin(X80Env *e, const X80 *a, X80 *r)    { UNARY("fsin"); }
-void x87hw_cos(X80Env *e, const X80 *a, X80 *r)    { UNARY("fcos"); }
-void x87hw_abs(X80Env *e, const X80 *a, X80 *r)    { UNARY("fabs"); }
-void x87hw_chs(X80Env *e, const X80 *a, X80 *r)    { UNARY("fchs"); }
+void x87hw_sqrt(X80Env *e, const X80 *a, X80 *r)   { UNARY("fsqrt", CC_C1); }
+void x87hw_rndint(X80Env *e, const X80 *a, X80 *r) { UNARY("frndint", CC_C1); }
+void x87hw_f2xm1(X80Env *e, const X80 *a, X80 *r)  { UNARY("f2xm1", CC_C1); }
+void x87hw_sin(X80Env *e, const X80 *a, X80 *r)    { UNARY("fsin", CC_C12); }
+void x87hw_cos(X80Env *e, const X80 *a, X80 *r)    { UNARY("fcos", CC_C12); }
+void x87hw_abs(X80Env *e, const X80 *a, X80 *r)    { UNARY("fabs", CC_C1); }
+void x87hw_chs(X80Env *e, const X80 *a, X80 *r)    { UNARY("fchs", CC_C1); }
 
 /* One operand in and only the status word out. */
 #define EXAMINE(insn)                                                        \
@@ -184,7 +186,7 @@ void x87hw_chs(X80Env *e, const X80 *a, X80 *r)    { UNARY("fchs"); }
     __asm__ volatile ("fldcw %2\n\tfnclex\n\tfldt %1\n\t" insn "\n\t"       \
                       "fnstsw %0\n\tfstp %%st(0)"                            \
                       : "=&a"(sw) : "m"(*a), "m"(cw) : "st");                \
-    took(e, sw)
+    took(e, sw, CC_ALL)
 
 void x87hw_tst(X80Env *e, const X80 *a) { EXAMINE("ftst"); }
 void x87hw_xam(X80Env *e, const X80 *a) { EXAMINE("fxam"); }
@@ -202,35 +204,50 @@ int x87hw_ptan(X80Env *e, const X80 *a, X80 *r, X80 *one)
                       "fstpt %2\n\t1:\tfstpt %1"
                       : "=&a"(sw), "=m"(*r), "=m"(*one) : "m"(cw), "m"(*a)
                       : "st", "st(1)", "cc");
-    took(e, sw);
+    took(e, sw, CC_C12);
     return (sw & 0x0400u) == 0;
 }
 
 /* Two operands in, ST(1) loaded first, and one result out: the instruction
    pops one and FSTPT the other. */
-#define BINARY(insn)                                                         \
+#define BINARY(insn, cc)                                                     \
     uint16_t sw = 0, cw = e->cw;                                             \
     __asm__ volatile ("fldcw %2\n\tfnclex\n\tfldt %4\n\tfldt %3\n\t"        \
                       insn "\n\tfnstsw %0\n\tfstpt %1"                       \
                       : "=&a"(sw), "=m"(*r) : "m"(cw), "m"(*a), "m"(*b)      \
                       : "st", "st(1)");                                      \
-    took(e, sw)
+    took(e, sw, cc)
 
-void x87hw_patan(X80Env *e, const X80 *a, const X80 *b, X80 *r)  { BINARY("fpatan"); }
-void x87hw_yl2x(X80Env *e, const X80 *a, const X80 *b, X80 *r)   { BINARY("fyl2x"); }
-void x87hw_yl2xp1(X80Env *e, const X80 *a, const X80 *b, X80 *r) { BINARY("fyl2xp1"); }
+void x87hw_patan(X80Env *e, const X80 *a, const X80 *b, X80 *r)  { BINARY("fpatan", CC_C1); }
+void x87hw_yl2x(X80Env *e, const X80 *a, const X80 *b, X80 *r)   { BINARY("fyl2x", CC_C1); }
+void x87hw_yl2xp1(X80Env *e, const X80 *a, const X80 *b, X80 *r) { BINARY("fyl2xp1", CC_C1); }
 
 /* The same, for the two that leave ST(1) where it was: one more pop. */
-#define BINARY_KEEP(insn)                                                    \
+#define BINARY_KEEP(insn, cc)                                                \
     uint16_t sw = 0, cw = e->cw;                                             \
     __asm__ volatile ("fldcw %2\n\tfnclex\n\tfldt %4\n\tfldt %3\n\t"        \
                       insn "\n\tfnstsw %0\n\tfstpt %1\n\tfstp %%st(0)"       \
                       : "=&a"(sw), "=m"(*r) : "m"(cw), "m"(*a), "m"(*b)      \
                       : "st", "st(1)");                                      \
-    took(e, sw)
+    took(e, sw, cc)
 
-void x87hw_prem(X80Env *e, const X80 *a, const X80 *b, X80 *r)  { BINARY_KEEP("fprem"); }
-void x87hw_scale(X80Env *e, const X80 *a, const X80 *b, X80 *r) { BINARY_KEEP("fscale"); }
+void x87hw_scale(X80Env *e, const X80 *a, const X80 *b, X80 *r) { BINARY_KEEP("fscale", CC_C1); }
+
+/* FPREM's C0, C3 and C1 are the low three bits of the quotient, and C2 says
+   whether the reduction is incomplete - when there is a quotient.  When the
+   result is a NaN, from a NaN operand or an invalid one, there is none, and
+   the x87 clears C1 and C2 and leaves C0 and C3 as they were.  The manual
+   does not say; the fuzzer measured it. */
+void x87hw_prem(X80Env *e, const X80 *a, const X80 *b, X80 *r)
+{
+    uint16_t sw = 0, cw = e->cw;
+
+    __asm__ volatile ("fldcw %2\n\tfnclex\n\tfldt %4\n\tfldt %3\n\t"
+                      "fprem\n\tfnstsw %0\n\tfstpt %1\n\tfstp %%st(0)"
+                      : "=&a"(sw), "=m"(*r) : "m"(cw), "m"(*a), "m"(*b)
+                      : "st", "st(1)");
+    took(e, sw, (r->se & 0x7FFF) == 0x7FFF && r->m << 1 ? CC_C12 : CC_ALL);
+}
 
 void x87hw_xtract(X80Env *e, const X80 *a, X80 *exp, X80 *sig)
 {
@@ -240,18 +257,19 @@ void x87hw_xtract(X80Env *e, const X80 *a, X80 *exp, X80 *sig)
                       "fnstsw %0\n\tfstpt %1\n\tfstpt %2"
                       : "=&a"(sw), "=m"(*sig), "=m"(*exp) : "m"(cw), "m"(*a)
                       : "st", "st(1)");
-    took(e, sw);
+    took(e, sw, CC_C1);
 }
 
 /* The constants from the host's own instructions rather than from C literals.
    Two reasons, and the fuzzer found both at once: the exact 64-bit significands
    are the hardware's to define, and the hardware rounds them by the current
    rounding mode, which a literal written once cannot do.  Five of the seven
-   differed in the last byte.  None raises anything. */
+   differed in the last byte.  None raises anything, and C1 comes back clear. */
 void x87hw_constant(X80Env *e, int which, X80 *r)
 {
     uint16_t cw = e->cw;
 
+    took(e, 0, CC_C1);
     switch (which) {
     case X80_ONE: __asm__ volatile ("fldcw %1\n\tfld1\n\tfstpt %0"
                                     : "=m"(*r) : "m"(cw) : "st"); break;
@@ -273,7 +291,7 @@ void x87hw_constant(X80Env *e, int which, X80 *r)
 /* An integer converts exactly and raises nothing. */
 void x87hw_from_int(X80Env *e, int64_t v, X80 *r)
 {
-    (void)e;
+    took(e, 0, CC_C1);
     __asm__ volatile ("fildll %1\n\tfstpt %0" : "=m"(*r) : "m"(v) : "st");
 }
 
@@ -284,7 +302,7 @@ void x87hw_from_f32(X80Env *e, uint32_t bits, X80 *r)
     uint16_t sw = 0;
     __asm__ volatile ("fnclex\n\tflds %2\n\tfnstsw %0\n\tfstpt %1"
                       : "=&a"(sw), "=m"(*r) : "m"(bits) : "st");
-    raised(e, sw);
+    took(e, sw, CC_C1);
 }
 
 void x87hw_from_f64(X80Env *e, uint64_t bits, X80 *r)
@@ -292,7 +310,7 @@ void x87hw_from_f64(X80Env *e, uint64_t bits, X80 *r)
     uint16_t sw = 0;
     __asm__ volatile ("fnclex\n\tfldl %2\n\tfnstsw %0\n\tfstpt %1"
                       : "=&a"(sw), "=m"(*r) : "m"(bits) : "st");
-    raised(e, sw);
+    took(e, sw, CC_C1);
 }
 
 /* Narrowing a value to store it rounds, and rounding is something the status
@@ -304,7 +322,7 @@ uint32_t x87hw_to_f32(X80Env *e, const X80 *a)
 
     __asm__ volatile ("fldcw %3\n\tfnclex\n\tfldt %2\n\tfstps %1\n\tfnstsw %0"
                       : "=&a"(sw), "=m"(bits) : "m"(*a), "m"(cw) : "st");
-    took(e, sw);
+    took(e, sw, CC_C1);
     return bits;
 }
 
@@ -315,38 +333,35 @@ uint64_t x87hw_to_f64(X80Env *e, const X80 *a)
 
     __asm__ volatile ("fldcw %3\n\tfnclex\n\tfldt %2\n\tfstpl %1\n\tfnstsw %0"
                       : "=&a"(sw), "=m"(bits) : "m"(*a), "m"(cw) : "st");
-    took(e, sw);
+    took(e, sw, CC_C1);
     return bits;
 }
 
 /* The guest rounding mode in the control word decides how FIST rounds, which
-   is exactly what C code relies on after setting it for truncation. */
+   is exactly what C code relies on after setting it for truncation.  Each
+   width is its own instruction: out of range, the hardware writes that
+   width's integer indefinite and raises IE alone, without the PE and C1 a
+   64-bit conversion narrowed afterwards would have reported.  The result
+   comes back sign-extended. */
 int64_t x87hw_to_int(X80Env *e, const X80 *a, unsigned width)
 {
-    int64_t r;
     uint16_t sw, cw = e->cw;
+    int64_t r;
 
-    __asm__ volatile ("fldcw %3\n\tfnclex\n\tfldt %2\n\tfistpll %1\n\tfnstsw %0"
-                      : "=&a"(sw), "=m"(r) : "m"(*a), "m"(cw) : "st");
-    took(e, sw);
-
-    /* A value that does not fit the destination is not truncated to it: the
-       hardware writes the integer indefinite for that width and raises IE.
-       Casting the 64-bit result down wrote 0 instead, which is a plausible
-       number and therefore the worst kind of wrong.  A conversion that
-       already failed comes back as the 64-bit indefinite, which is out of
-       range for the narrower widths and so lands in the same place. */
-    if (width == 8) return r;
-    if (width == 4) {
-        if (r < -2147483647LL - 1 || r > 2147483647LL) {
-            e->sw |= 0x0001u;                              /* IE */
-            return (int64_t)(int32_t)0x80000000u;
-        }
-        return r;
+    if (width == 2) {
+        int16_t v;
+        __asm__ volatile ("fldcw %3\n\tfnclex\n\tfldt %2\n\tfistps %1\n\tfnstsw %0"
+                          : "=&a"(sw), "=m"(v) : "m"(*a), "m"(cw) : "st");
+        r = v;
+    } else if (width == 4) {
+        int32_t v;
+        __asm__ volatile ("fldcw %3\n\tfnclex\n\tfldt %2\n\tfistpl %1\n\tfnstsw %0"
+                          : "=&a"(sw), "=m"(v) : "m"(*a), "m"(cw) : "st");
+        r = v;
+    } else {
+        __asm__ volatile ("fldcw %3\n\tfnclex\n\tfldt %2\n\tfistpll %1\n\tfnstsw %0"
+                          : "=&a"(sw), "=m"(r) : "m"(*a), "m"(cw) : "st");
     }
-    if (r < -32768LL || r > 32767LL) {
-        e->sw |= 0x0001u;
-        return (int64_t)(int16_t)0x8000u;
-    }
+    took(e, sw, CC_C1);
     return r;
 }

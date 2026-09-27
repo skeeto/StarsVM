@@ -81,9 +81,12 @@
  * is the only way to set TOP and the tag word arbitrarily.
  *
  * The status word is compared whole but for TOP, which is compared as TOP.
- * The exception flags are seeded at random on both sides, since they are
- * sticky: an operation that clears one it should have left, or fails to
- * raise one it should, shows either way.
+ * The exception flags and the condition codes are seeded at random on both
+ * sides: the flags because they are sticky, so an operation that clears one
+ * it should have left, or fails to raise one it should, shows either way;
+ * the condition codes because most instructions define only some of them,
+ * and one that changes a code it should have left alone - which the game's
+ * FCOM, FSTP, FNSTSW sequences would notice - shows the same way.
  *
  * Two things are deliberately outside the comparison, because fpu.c does not
  * model them and a failure would say nothing new:
@@ -433,7 +436,7 @@ struct fpstate {
     uint8_t  tag[8];            /* ditto, TAG_* values       */
     unsigned top;
     uint16_t cw;
-    uint16_t sw;                /* the exception flags only  */
+    uint16_t sw;                /* exception flags and C0-C3 */
 };
 
 /* An interesting 80-bit value.  Extremes and special encodings far more often
@@ -485,8 +488,9 @@ static void fp_gen(struct fpstate *s)
        real host FPU, which then faults inside this process. */
     s->cw = (uint16_t)(0x007Fu | (rnd_below(4) << 8) | (rnd_below(4) << 10));
     /* Some sticky flags already up half the time, so that one an instruction
-       should have left alone is seen to be cleared. */
-    s->sw = rnd_below(2) ? (uint16_t)(rnd() & 0x3Fu) : 0;
+       should have left alone is seen to be cleared, and the condition codes
+       anything at all, for the same reason. */
+    s->sw = (uint16_t)((rnd_below(2) ? rnd() & 0x3Fu : 0) | (rnd() & 0x4700u));
     for (i = 0; i < 8; i++) {
         if (i < FZ_LIVE) {
             f80_make(s->st[i]);
@@ -507,7 +511,7 @@ static void fp_to_image(const struct fpstate *s, uint8_t *img)
     img[FPU_O_CW] = (uint8_t)s->cw;
     img[FPU_O_CW + 1] = (uint8_t)(s->cw >> 8);
     img[FPU_O_SW] = (uint8_t)s->sw;
-    img[FPU_O_SW + 1] = (uint8_t)(s->top << 3);        /* TOP is bits 11-13 */
+    img[FPU_O_SW + 1] = (uint8_t)((s->sw >> 8) | (s->top << 3)); /* TOP: 11-13 */
     {
         uint16_t tw = 0;
         for (i = 0; i < 8; i++)
@@ -1404,7 +1408,7 @@ static int fuzz_run(long rounds, unsigned seed)
                     log_msg(" ");
                     for (q = 9; q >= 0; q--) log_msg("%02X", fs.st[k][q]);
                 }
-                log_msg(" top %u cw %04X\n", fs.top, fs.cw);
+                log_msg(" top %u cw %04X sw %04X\n", fs.top, fs.cw, fs.sw);
             }
             log_msg("       seed 0x%08X%s bytes:", seed_here, x87_only ? " --x87" : "");
             for (k = 0; k < gl; k++) log_msg(" %02X", guest[k]);
