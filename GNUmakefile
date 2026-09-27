@@ -23,11 +23,30 @@ HOSTCC     := cc
 HOSTCFLAGS := -std=c99 -O2 -Wall -Wextra
 CFLAGS  := -std=c11 -O3 -g -Wall -Wextra -Wshadow -Wstrict-prototypes \
            -Wno-unused-parameter -MMD -MP -D__USE_MINGW_ANSI_STDIO=0
+
+# FPU picks how the guest's x87 is carried out: hw hands each instruction to
+# this machine's own x87.  Empty takes the default for the target.  XCFLAGS is
+# for experiments - a rebuild with, say, -falign-functions=64 to see how much
+# of a timing difference is only code layout - and keys the build directory
+# like everything else here, so it never borrows objects from a build without.
+FPU     :=
+XCFLAGS :=
+ifneq (,$(filter-out hw,$(FPU)))
+$(error FPU=$(FPU): the only backend so far is hw)
+endif
+CFLAGS  += $(if $(FPU),-DSTARSVM_FPU_$(shell echo $(FPU) | tr a-z A-Z)) $(XCFLAGS)
 LDFLAGS := -mwindows -s
 LDLIBS  := -luser32 -lgdi32 -lcomdlg32 -lwinmm -lshell32 -lshlwapi
 
+# What the compiler targets - i686-w64-mingw32, x86_64-w64-mingw32,
+# aarch64-linux-gnu - with the backend and any experimental flags after it.
+# Objects live under it, so two builds differing in any of these never share
+# one, and the names below follow it rather than the machine doing the building.
+TRIPLE  := $(shell $(CC) -dumpmachine)
+ARCH    := $(TRIPLE)$(if $(FPU),-fpu-$(FPU))$(if $(XCFLAGS),-x$(shell echo '$(XCFLAGS)' | cksum | cut -d' ' -f1))
+
 SRCDIR  := src
-OBJDIR  := build/$(if $(CROSS),32,64)
+OBJDIR  := build/$(ARCH)
 TARGET  := StarsVM.exe
 FUZZER  := StarsVM-fuzz.exe
 PACKER  := StarsVM-pack.exe
@@ -39,7 +58,7 @@ RES     := $(OBJDIR)/StarsVM.res.o
 
 # The library (src/stars.h) builds for whatever $(CC) targets, Windows or not,
 # so what its files are called follows the compiler rather than this machine.
-ifneq (,$(findstring mingw,$(shell $(CC) -dumpmachine)))
+ifneq (,$(findstring mingw,$(TRIPLE)))
 LIBSO   := stars.dll
 EXE     := .exe
 else
@@ -50,9 +69,10 @@ endif
 LIBA    := libstars.a
 LIBTEST := $(OBJDIR)/libtest$(EXE)
 
-# Both toolchains build the same file names out of different objects, so nothing
-# in the dependency graph tells one executable from the other: switching would
-# leave `make` with nothing to do and the wrong architecture sitting there.
+# Every build makes the same file names out of different objects, so nothing
+# in the dependency graph tells one executable from another: switching
+# compiler or backend would leave `make` with nothing to do and the wrong
+# build sitting there.
 #
 # A timestamp cannot settle this.  Making the link depend on a stamp rewritten
 # when the architecture changes looks right and mostly works, but `make` reads
@@ -63,9 +83,8 @@ LIBTEST := $(OBJDIR)/libtest$(EXE)
 #
 # Deleting the executables instead cannot be argued with: this runs while the
 # makefile is being read, and `make` stats its targets afterwards and finds them
-# missing.  Both go, not just the one asked for, because after a switch both are
-# the wrong architecture.
-ARCH     := $(if $(CROSS),32,64)
+# missing.  All of them go, not just the one asked for, because after a switch
+# all of them are the wrong build.
 ARCHFILE := build/arch
 $(shell mkdir -p build)
 ifneq ($(ARCH),$(shell cat $(ARCHFILE) 2>/dev/null))
