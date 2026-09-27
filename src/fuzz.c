@@ -34,7 +34,8 @@
  * Coverage is the ALU, shifts and rotates, inc/dec, mul/div, the bit
  * instructions, MOVZX/MOVSX, SETcc, SHLD/SHRD and the decimal adjusts, in
  * register and immediate forms - that is where flag bugs live - and the ALU
- * again against memory, and the string operations.
+ * again against memory, the string operations, and the x87 in register and
+ * memory forms.  --x87 narrows a run to the last of those.
  *
  * A string instruction carries no ModRM, so the oracle cannot have its
  * addressing rewritten the way a memory operand does.  It does not need it: the
@@ -68,8 +69,7 @@
  * choosing the wrong default segment.  Whatever either side wrote is compared
  * afterwards, so stores are covered as well as loads.
  *
- * The x87 register forms are covered too, and the oracle there is a different
- * shape.  fpu.c does not implement x87 arithmetic - it hands the operands to
+ * The x87 forms are covered too, and the oracle there is a different shape.  fpu.c does not implement x87 arithmetic - it hands the operands to
  * the host's real FPU and stores the result back - so comparing results is
  * nearly tautological, and that is the good news: both sides are the same
  * silicon, so rounding, precision and the transcendentals agree by
@@ -707,10 +707,14 @@ static void mem_quieten(uint8_t *p, unsigned n)
 /* modrm for "register, register", avoiding SP when the size is 16/32. */
 static uint8_t modrm_rr(int reg, int rm) { return (uint8_t)(0xC0 | (reg << 3) | rm); }
 
+/* --x87: every round an x87 form, register or memory. */
+static int x87_only;
+
 static void gen(struct form *f)
 {
     int size8 = (int)rnd_below(3) == 0;
     int reg, rm;
+    unsigned pick;
 
     memset(f, 0, sizeof *f);
     f->mask = CMP_FLAGS;
@@ -719,7 +723,9 @@ static void gen(struct form *f)
     reg = size8 ? (int)rnd_below(8) : rnd_reg();
     rm  = size8 ? (int)rnd_below(8) : rnd_reg();
 
-    switch (rnd_below(22)) {
+    pick = rnd_below(22);
+    if (x87_only) pick = (pick & 1) ? 17 : 19;
+    switch (pick) {
     case 0: {                                     /* ALU r/m,r and r,r/m */
         int aluop = (int)rnd_below(8);
         int dir = (int)rnd_below(2);
@@ -1198,7 +1204,7 @@ static const char *fname(uint32_t f)
    the same table shape for what this host could not be asked to run.  Bucketing
    is by pointer: every key is a string literal from gen(), so identity is the
    cheap and exact test. */
-#define MAX_FORMS 40
+#define MAX_FORMS 64
 static long form_count[MAX_FORMS];
 static const char *form_name[MAX_FORMS];
 static long skip_count[MAX_FORMS];
@@ -1238,7 +1244,8 @@ static int fuzz_run(long rounds, unsigned seed)
         return 1;
     }
 
-    log_msg("fuzz: %ld rounds, seed %08X\n", rounds, rng_state);
+    log_msg("fuzz: %ld rounds, seed 0x%08X%s\n", rounds, rng_state,
+            x87_only ? ", x87 forms only" : "");
 
     for (i = 0; i < rounds; i++) {
         struct form f;
@@ -1247,6 +1254,7 @@ static int fuzz_run(long rounds, unsigned seed)
         unsigned gl = 0, hl = 0, k;
         uint32_t seed_here = rng_state;
         uint32_t gflags, hflags, diff;
+        uint8_t operand_in[16];
         int bad = 0;
 
         /* Before gen(), because a memory form has to work out the
@@ -1324,6 +1332,8 @@ static int fuzz_run(long rounds, unsigned seed)
             }
             if (f.mem_float)
                 mem_quieten(fz.mem[f.mem_seg] + f.mem_off, f.mem_float);
+            if (f.mem_len)
+                memcpy(operand_in, fz.mem[f.mem_seg] + f.mem_off, f.mem_len);
             for (k = 0; k < MEM_WIN; k++) {
                 sel_wr8(ds_sel, (uint16_t)(MEM_AT + k), fz.mem[0][k]);
                 sel_wr8(ss_sel, (uint16_t)(MEM_AT + k), fz.mem[1][k]);
@@ -1350,7 +1360,7 @@ static int fuzz_run(long rounds, unsigned seed)
         gflags = c->eflags;
 
         if (c->state == CPU_BADOP) {
-            log_msg("fuzz: interpreter rejected %s (seed %08X):", f.what, seed_here);
+            log_msg("fuzz: interpreter rejected %s (seed 0x%08X):", f.what, seed_here);
             for (k = 0; k < gl; k++) log_msg(" %02X", guest[k]);
             log_msg("\n");
             failed++;
@@ -1359,7 +1369,7 @@ static int fuzz_run(long rounds, unsigned seed)
 
         /* Instruction length must agree, or the trace would desync. */
         if ((uint16_t)c->eip != gl) {
-            log_msg("fuzz: length mismatch on %s (seed %08X): consumed %u of %u\n",
+            log_msg("fuzz: length mismatch on %s (seed 0x%08X): consumed %u of %u\n",
                     f.what, seed_here, (unsigned)(uint16_t)c->eip, gl);
             bad = 1;
         }
@@ -1417,10 +1427,9 @@ static int fuzz_run(long rounds, unsigned seed)
         }
         if (bad) {
             if (f.mem_len) {
-                log_msg("       operand %s+%02X:", f.mem_seg ? "ss" : "ds",
+                log_msg("       operand %s+%02X in:", f.mem_seg ? "ss" : "ds",
                         f.mem_off);
-                for (k = 0; k < f.mem_len; k++)
-                    log_msg(" %02X", fz.mem[f.mem_seg][f.mem_off + k]);
+                for (k = 0; k < f.mem_len; k++) log_msg(" %02X", operand_in[k]);
                 log_msg("\n");
             }
             if (f.fpu) {
@@ -1432,7 +1441,7 @@ static int fuzz_run(long rounds, unsigned seed)
                 }
                 log_msg(" top %u cw %04X\n", fs.top, fs.cw);
             }
-            log_msg("       seed %08X bytes:", seed_here);
+            log_msg("       seed 0x%08X%s bytes:", seed_here, x87_only ? " --x87" : "");
             for (k = 0; k < gl; k++) log_msg(" %02X", guest[k]);
             if (f.alt_len) {                       /* the oracle ran other bytes */
                 log_msg("  oracle:");
@@ -1485,6 +1494,9 @@ static const char driver_usage[] =
     "  --rounds N   instructions to test (default 200000)\n"
     "  --seed N     start the generator here instead of at its fixed default,\n"
     "               which is what a seed printed by a failure is for\n"
+    "  --x87        generate only x87 instructions, register and memory\n"
+    "               forms, for about eleven times as many of them a second.\n"
+    "               A seed from such a run replays only with --x87 too\n"
     "  --log FILE   also write the report to FILE\n"
     "  --help       this text\n";
 
@@ -1510,8 +1522,10 @@ int main(int argc, char **argv)
             seed = (unsigned)strtoul(argv[++i], NULL, 0);
         } else if (!strcmp(a, "--log") && i + 1 < argc) {
             logfile = argv[++i];
+        } else if (!strcmp(a, "--x87")) {
+            x87_only = 1;
         } else if (!strcmp(a, "--help") || !strcmp(a, "-h")) {
-            printf("usage: %s [--rounds N] [--seed N] [--log FILE]\n", prog);
+            printf("usage: %s [--rounds N] [--seed N] [--x87] [--log FILE]\n", prog);
             fputs(driver_usage, stdout);
             return 0;
         } else {

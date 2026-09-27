@@ -4,8 +4,9 @@
  * file is why.  The fuzzer's oracle works by emitting machine code into a page
  * it allocates PAGE_EXECUTE_READWRITE and then calls, which is the shape a
  * static security scanner is built to notice - and a game has no business
- * asking for writable-executable memory.  Built this way, fuzz.c:145 is the
- * only PAGE_EXECUTE_* in the tree and it is not in the emulator: the selector
+ * asking for writable-executable memory.  Built this way, the VirtualAlloc in
+ * fuzz.c's tramp_build is the only PAGE_EXECUTE_* in the tree and it is not in
+ * the emulator: the selector
  * arena reserves PAGE_NOACCESS and commits PAGE_READWRITE, because guest code
  * is interpreted rather than run, so StarsVM.exe requests no executable memory
  * at all.
