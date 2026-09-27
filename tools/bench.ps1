@@ -26,11 +26,15 @@
 #   tools/bench.ps1 -Extra "--no-native"     extra emulator switches
 #   tools/bench.ps1 -Golden -Extra "--no-native"
 #                                            bless this run's output
+#   tools/bench.ps1 -Affinity 0x10           run on logical CPU 4 only, at
+#                                            high priority: for timing, and
+#                                            see tools/ab.ps1
 
 param(
     [int]$Turns = 10,
     [string]$Exe = ".\StarsVM.exe",
     [string]$Extra = "",
+    [string]$Affinity = "",
     [switch]$Golden
 )
 
@@ -62,9 +66,21 @@ $argv = @("--log", $log, "--fixed-clock")
 if ($Extra) { $argv += ($Extra -split " ") }
 $argv += @("--", "-g$Turns", "Game.hst")
 
+# Pinned through cmd's start rather than by setting the affinity of a running
+# process, so that the run is on that one CPU from its first instruction and
+# not only from whenever this script got round to moving it.  Timings from a
+# CPU shared with the scheduler's other ideas, or from an efficiency core on a
+# hybrid part, wander by more than the differences worth measuring.
 $sw = [System.Diagnostics.Stopwatch]::StartNew()
-$p = Start-Process -FilePath (Join-Path $run $exeName) -ArgumentList $argv `
-        -WorkingDirectory $run -Wait -PassThru -NoNewWindow
+if ($Affinity) {
+    $line = 'start "" /affinity {0} /high /wait "{1}" {2}' -f `
+            $Affinity, (Join-Path $run $exeName), ($argv -join " ")
+    $p = Start-Process -FilePath "cmd.exe" -ArgumentList "/c", $line `
+            -WorkingDirectory $run -Wait -PassThru -NoNewWindow
+} else {
+    $p = Start-Process -FilePath (Join-Path $run $exeName) -ArgumentList $argv `
+            -WorkingDirectory $run -Wait -PassThru -NoNewWindow
+}
 $sw.Stop()
 
 $stopped = Select-String -Path $log -Pattern "^Stopped:" | Select-Object -Last 1
