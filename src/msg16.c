@@ -370,11 +370,18 @@ static void marshal_in(HWND hwnd, uint16_t msg16, uint16_t wp, uint32_t lp,
     }
 }
 
+/* A list or combo box answers LB_ERR (CB_ERR is the same -1) when there is
+   no such item, or for LB_GETSELITEMS when it is not a multiple-selection
+   list, and writes nothing, so nothing is copied back: the guest's buffer
+   stays as it was, as USER32 leaves ours and Win16 left the guest's.
+   WM_GETTEXT, the other one copied out as a string, never answers -1.
+   LB_GETITEMRECT is not among them: for an item that is not there USER32
+   empties the rectangle, and the record's, zeroed, is copied back. */
 static uint32_t marshal_out(struct marshal *m, LRESULT r)
 {
     switch (m->out) {
     case OUT_STR:
-        g_puts(m->outp, m->buf, m->outmax);
+        if ((LONG)r != LB_ERR) g_puts(m->outp, m->buf, m->outmax);
         break;
     case OUT_LINE: {
         /* EM_GETLINE returns the character count and does not terminate. */
@@ -386,6 +393,7 @@ static uint32_t marshal_out(struct marshal *m, LRESULT r)
     case OUT_INTS: {
         /* The result is how many the control actually wrote. */
         unsigned n = (unsigned)r, i;
+        if ((LONG)r == LB_ERR) break;
         if (n > m->outmax) n = m->outmax;
         for (i = 0; i < n; i++)
             sel_wr16(SEGPTR_SEL(m->outp),
