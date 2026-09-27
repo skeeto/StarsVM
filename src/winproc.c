@@ -314,6 +314,17 @@ int winproc_original(HWND hwnd, UINT msg16, UINT *msg32, WPARAM *wp, LPARAM *lp)
  * identically in both worlds, and any message the guest merely forwards to
  * DefWindowProc is restored from the in-flight stack anyway.  What must be
  * handled here is every message the guest actually READS.
+ *
+ * Four messages carrying a string are left to arrive that way, with a host
+ * pointer for lParam, because nothing in the game reads one.  WM_SETTEXT and
+ * WM_GETTEXT come whenever it sets or reads the text of a window of its own,
+ * those calls going out through USER32, and WM_DEVMODECHANGE when a printer's
+ * settings are changed; every window procedure in the game passes all three
+ * to DefWindowProc or CallWindowProc, and every dialog procedure returns
+ * FALSE.  WM_WININICHANGE - WM_SETTINGCHANGE, which Windows broadcasts for as
+ * little as a switch between light and dark - the frame window does handle,
+ * but as it handles WM_SYSCOLORCHANGE: it remakes its brushes, and never looks
+ * at the section lParam names.
  */
 enum { BACK_NONE = 0, BACK_MEASUREITEM, BACK_MINMAX, BACK_WINDOWPOS, BACK_NCCALC };
 
@@ -473,6 +484,21 @@ static void msg_to_16(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp,
         *(uint16_t *)(p + 6) = HWND_16(di->hwndItem);
         *(uint32_t *)(p + 8) = (uint32_t)di->itemData;
         x->extralen = 12;
+        break;
+    }
+
+    case WM_COMPAREITEM: {
+        /* COMPAREITEMSTRUCT16, 18 bytes: Win16 had no dwLocaleId.  Nothing
+           flows back; the answer is the result. */
+        const COMPAREITEMSTRUCT *ci = (const COMPAREITEMSTRUCT *)lp;
+        *(uint16_t *)(p +  0) = (uint16_t)ci->CtlType;
+        *(uint16_t *)(p +  2) = (uint16_t)ci->CtlID;
+        *(uint16_t *)(p +  4) = HWND_16(ci->hwndItem);
+        *(uint16_t *)(p +  6) = (uint16_t)ci->itemID1;
+        *(uint32_t *)(p +  8) = (uint32_t)ci->itemData1;
+        *(uint16_t *)(p + 12) = (uint16_t)ci->itemID2;
+        *(uint32_t *)(p + 14) = (uint32_t)ci->itemData2;
+        x->extralen = 18;
         break;
     }
 
