@@ -390,6 +390,27 @@ static INT_PTR CALLBACK dlgproc_bridge(HWND hwnd, UINT msg,
 
 /* ---- the entry points ----------------------------------------------------- */
 
+/* A dialog is made with the A functions.  They take the same template as the
+   W ones, Unicode strings and all, but the dialog comes out an ANSI window,
+   and so does every control in it, as each of the guest's own windows is: the
+   DLGPROC is handed each message in its ANSI form, the only one Win16 had.
+   Made with the W functions, a character typed at a dialog reached the guest
+   in UTF-16, the euro sign as 0x20AC where Win16 gave 0x80.  TUTORDLG posts
+   whatever it is typed on to the frame, which a 32-bit PostMessageA then cut
+   to 0xAC.  USER32's own WM_CHARTOITEM and WM_MENUCHAR, from a dialog's list
+   box or a menu it owns, brought their character in UTF-16 too.  And the
+   guest's own sends of either to a dialog lost their high word, the caret's
+   index and the menu's flags: SendMessageA carries it to an ANSI window but
+   not to a Unicode one.  The dialog itself comes out the same: the A
+   functions turn each control's text back into the code page to create it,
+   and all 36 of the game's templates come out with the same font, dialog
+   units, layout and text either way.  A combo box's list stays Unicode, as
+   USER32 makes it for any combo box, CreateWindowA's included.  One thing the
+   user sees does change, to what Win16 showed: a character outside the code
+   page, typed into an edit of a modal dialog, shows as its substitute as it
+   is typed, where the Unicode edit showed it as typed and handed the game the
+   substitute anyway. */
+
 /* Look up the template the guest named and convert it.  A Win16 template name
    is a far pointer to a string, or MAKEINTRESOURCE. */
 static void *template_for(uint32_t namep, char *label, size_t labelsz)
@@ -427,8 +448,8 @@ static uint32_t d_DialogBox(Cpu *c, Args *a)
     dlg_pending_proc = proc;
     dlg_pending_inst = inst ? inst : task.hinstance;
     dlg_pending_modeless = 0;
-    r = DialogBoxIndirectParamW(GetModuleHandleA(NULL),
-                                (LPCDLGTEMPLATEW)tmpl, HWND_32(parent),
+    r = DialogBoxIndirectParamA(GetModuleHandleA(NULL),
+                                (LPCDLGTEMPLATEA)tmpl, HWND_32(parent),
                                 dlgproc_bridge, 0);
     dlg_pending_proc = 0;
     free(tmpl);
@@ -454,8 +475,8 @@ static uint32_t d_CreateDialog(Cpu *c, Args *a)
     dlg_pending_proc = proc;
     dlg_pending_inst = inst ? inst : task.hinstance;
     dlg_pending_modeless = 1;
-    h = CreateDialogIndirectParamW(GetModuleHandleA(NULL),
-                                   (LPCDLGTEMPLATEW)tmpl, HWND_32(parent),
+    h = CreateDialogIndirectParamA(GetModuleHandleA(NULL),
+                                   (LPCDLGTEMPLATEA)tmpl, HWND_32(parent),
                                    dlgproc_bridge, 0);
     dlg_pending_proc = 0;
     free(tmpl);

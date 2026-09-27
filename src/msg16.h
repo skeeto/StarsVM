@@ -20,10 +20,13 @@
  *    scroll is a second message posted after it.
  *  - PostMessageA converts a character message's wParam from the code page
  *    and keeps only the character: the high word WM_CHARTOITEM and
- *    WM_MENUCHAR carry, the caret's index and the menu's flags, is lost, and
- *    on a 32-bit build WM_CHAR and its kin keep only their low byte.
- *    SendMessageA does the same to a Unicode window, and the guest's
- *    dialogs are Unicode windows (dlg.c).
+ *    WM_MENUCHAR carry, the caret's index and the menu's flags, is lost.
+ *    PostMessageW is no way round it: GetMessageA puts that high word in
+ *    the character's second byte, MAKEWPARAM(0x20AC, 3) coming out 0x0380.
+ *    On a 32-bit build WM_CHAR and its kin keep only their low byte, which
+ *    for a character in the code page is all of it.  A send keeps the whole
+ *    wParam, from one ANSI window to another, and every window the guest
+ *    makes is one, its dialogs and their controls included (dlg.c).
  */
 #ifndef MSG16_H
 #define MSG16_H
