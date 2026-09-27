@@ -379,10 +379,13 @@ static INT_PTR CALLBACK dlgproc_bridge(HWND hwnd, UINT msg,
 
     /* A DLGPROC returns only a handled/not-handled flag - except for the
        messages whose result is the whole point, where DefDlgProc takes the
-       return value itself. */
+       return value itself.  A handle has to be mapped, and a number has to
+       keep its sign: the guest's BOOL is a 16-bit int, and WM_COMPAREITEM's
+       -1 widened to 65535 tells the list box the opposite of what was
+       meant. */
     if (ret_handle != H_NONE)
         return (INT_PTR)winproc_ret_handle(ret_handle, r);
-    return (INT_PTR)(uint16_t)r;
+    return (INT_PTR)(int16_t)r;
 }
 
 /* ---- the entry points ----------------------------------------------------- */
