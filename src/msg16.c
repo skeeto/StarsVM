@@ -40,7 +40,7 @@ UINT msg16_to_32_for(HWND hwnd, uint16_t msg16)
 /* ---- marshaling ----------------------------------------------------------- */
 
 /* What has to be moved back into guest memory once the real window has run. */
-enum { OUT_NONE = 0, OUT_STR, OUT_RECT, OUT_LINE, OUT_INTS };
+enum { OUT_NONE = 0, OUT_STR, OUT_RECT, OUT_LINE, OUT_INTS, OUT_DATA };
 
 #define BUFSZ 4096
 
@@ -59,17 +59,43 @@ struct marshal {
     INT      ints[256];
 };
 
-/* A message whose lParam is a string the guest is handing in. */
-static int lp_is_in_string(UINT msg)
+/* Whether a list or combo box keeps strings.  One that is owner-draw without
+   LBS_HASSTRINGS / CBS_HASSTRINGS keeps only a 32-bit value per item, and the
+   lParam of an add, insert, find or select is that value itself: the control
+   stores it, compares by it (through WM_COMPAREITEM if sorted), and hands it
+   back in WM_DRAWITEM, WM_DELETEITEM and LB_GETITEMDATA.  Copied as a string,
+   every item's data would be the address of our copy on the host stack - and
+   a value that is no far pointer would fault the guest on the way.  Wine asks
+   the same question, in WINPROC_TestLBForStr.  The two classes keep the flag
+   in different bits; the message has already been renumbered for the window's
+   class, so the caller knows which it is. */
+static int keeps_strings(HWND hwnd, int combo)
+{
+    DWORD style = (DWORD)GetWindowLongA(hwnd, GWL_STYLE);
+
+    if (combo)
+        return !(style & (CBS_OWNERDRAWFIXED | CBS_OWNERDRAWVARIABLE))
+            || (style & CBS_HASSTRINGS);
+    return !(style & (LBS_OWNERDRAWFIXED | LBS_OWNERDRAWVARIABLE))
+        || (style & LBS_HASSTRINGS);
+}
+
+/* A message whose lParam is a string the guest is handing in.  LB_DIR and
+   CB_DIR take a file spec whatever the style. */
+static int lp_is_in_string(HWND hwnd, UINT msg)
 {
     switch (msg) {
     case WM_SETTEXT:
     case EM_REPLACESEL:
-    case LB_ADDSTRING: case LB_INSERTSTRING: case LB_FINDSTRING:
-    case LB_SELECTSTRING: case LB_FINDSTRINGEXACT: case LB_DIR:
-    case CB_ADDSTRING: case CB_INSERTSTRING: case CB_FINDSTRING:
-    case CB_SELECTSTRING: case CB_FINDSTRINGEXACT: case CB_DIR:
+    case LB_DIR:
+    case CB_DIR:
         return 1;
+    case LB_ADDSTRING: case LB_INSERTSTRING: case LB_FINDSTRING:
+    case LB_SELECTSTRING: case LB_FINDSTRINGEXACT:
+        return keeps_strings(hwnd, 0);
+    case CB_ADDSTRING: case CB_INSERTSTRING: case CB_FINDSTRING:
+    case CB_SELECTSTRING: case CB_FINDSTRINGEXACT:
+        return keeps_strings(hwnd, 1);
     default:
         return 0;
     }
@@ -83,7 +109,7 @@ static void marshal_in(HWND hwnd, uint16_t msg16, uint16_t wp, uint32_t lp,
     m->wp  = wp;
     m->lp  = (LPARAM)lp;
 
-    if (lp_is_in_string(m->msg)) {
+    if (lp_is_in_string(hwnd, m->msg)) {
         g_str(lp, m->buf, sizeof m->buf);
         m->lp = (LPARAM)m->buf;
         return;
@@ -93,9 +119,17 @@ static void marshal_in(HWND hwnd, uint16_t msg16, uint16_t wp, uint32_t lp,
 
     /* ---- text coming back out --------------------------------------------- */
 
-    case WM_GETTEXT:
     case LB_GETTEXT:
     case CB_GETLBTEXT:
+        if (!keeps_strings(hwnd, m->msg == CB_GETLBTEXT)) {
+            /* No string to fetch: the control writes the item's data. */
+            m->out  = OUT_DATA;
+            m->outp = lp;
+            m->lp   = (LPARAM)m->buf;
+            break;
+        }
+        /* fall through */
+    case WM_GETTEXT:
         /* WM_GETTEXT is bounded by wParam; the listbox and combobox forms are
            not bounded at all, which is a hazard in Win16 just as much as here -
            the caller is expected to have asked for the length first. */
@@ -296,6 +330,15 @@ static uint32_t marshal_out(struct marshal *m, LRESULT r)
                      (uint16_t)m->ints[i]);
         break;
     }
+    case OUT_DATA:
+        /* Win16's item data is a DWORD.  An x64 USER32 writes a ULONG_PTR and
+           reports its size, 8, where Win16 reported 4; its low half is the
+           first four bytes either way. */
+        if ((LONG)r != LB_ERR) {
+            g_write(m->outp, m->buf, 4);
+            r = 4;
+        }
+        break;
     case OUT_RECT: {
         int16_t r16[4];
         r16[0] = (int16_t)m->rect.left;  r16[1] = (int16_t)m->rect.top;
@@ -337,7 +380,7 @@ uint32_t msg16_post(HWND hwnd, uint16_t msg16, uint16_t wp, uint32_t lp)
        buffer cannot go out this way - the buffer is gone before the message is
        read.  Send it instead; that changes the timing, which is the lesser of
        the two wrongs. */
-    if (m.refuse || m.out != OUT_NONE || lp_is_in_string(m.msg)) {
+    if (m.refuse || m.out != OUT_NONE || lp_is_in_string(hwnd, m.msg)) {
         log_msg("*** guest posted message %04X, which carries a pointer; "
                 "sending it instead so the data is still there\n", msg16);
         return msg16_send(hwnd, msg16, wp, lp);
