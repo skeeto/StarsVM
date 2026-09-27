@@ -84,16 +84,19 @@ static int lp_is_in_string(HWND hwnd, UINT msg)
    nothing, the selection stays where it was, the heights are the items'.  The
    finds only work because USER32 starts a search from an out-of-range index
    at the top.  This is the list Wine's user.exe16 sign-extends, in
-   listbox_proc16 and combo_proc16, but for LB_SETSEL, which is below.  It has
-   CB_SETITEMDATA but not LB_SETITEMDATA, a difference that makes none in Wine,
-   whose list box refuses -1 to either; USER32 takes -1 to either as every
-   item, so here a combo box gets that and a list box does not. */
+   listbox_proc16 and combo_proc16, less LB_SETSEL, which is below, and plus
+   LB_GETITEMDATA and LB_SETITEMDATA.  Wine has only their combo box
+   counterparts, two authors' habits that change nothing there, as Wine's list
+   box refuses -1 to either.  USER32 takes -1 to either SETITEMDATA as every
+   item - an unchecked LB_ERR passed on as the index included - and a combo
+   box only hands the message on to its list box, so the two have to agree. */
 static int wp_is_index(UINT msg)
 {
     switch (msg) {
     case LB_INSERTSTRING: case LB_FINDSTRING: case LB_FINDSTRINGEXACT:
     case LB_SELECTSTRING: case LB_SETCURSEL: case LB_GETSEL:
     case LB_SETANCHORINDEX: case LB_GETITEMRECT:
+    case LB_GETITEMDATA: case LB_SETITEMDATA:
     case CB_INSERTSTRING: case CB_FINDSTRING: case CB_FINDSTRINGEXACT:
     case CB_SELECTSTRING: case CB_SETCURSEL: case CB_GETLBTEXT:
     case CB_GETLBTEXTLEN: case CB_GETITEMDATA: case CB_SETITEMDATA:
