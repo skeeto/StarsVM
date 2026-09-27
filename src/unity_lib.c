@@ -40,8 +40,13 @@
 #include "sel.c"
 #include "task.c"
 #include "thunk.c"
-#if defined(STARSVM_FPU_DUAL)
+#include "fpusel.h"
+#ifdef FPU_USE_X80
 #include "x80.c"
+#endif
+#if defined(FPU_USE_X80) && defined(FPU_USE_X87HW)
 #include "x80dual.c"
 #endif
+#ifdef FPU_USE_X87HW
 #include "x87hw.c"
+#endif

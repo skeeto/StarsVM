@@ -25,16 +25,17 @@ CFLAGS  := -std=c11 -O3 -g -Wall -Wextra -Wshadow -Wstrict-prototypes \
            -Wno-unused-parameter -MMD -MP -D__USE_MINGW_ANSI_STDIO=0
 
 # FPU picks how the guest's x87 is carried out: hw hands each instruction to
-# this machine's own x87, and dual runs both that and src/x80.c's integer x87
-# and logs where they differ (see src/x80dual.c), which makes it a
-# development build.  Empty takes the default for the target.  XCFLAGS is
+# this machine's own x87, soft carries it out in integers (src/x80.c), which
+# works on any machine, and dual runs both and logs where they differ (see
+# src/x80dual.c), which makes it a development build.  Empty takes the
+# default for the target: hw on an x86, soft anywhere else.  XCFLAGS is
 # for experiments - a rebuild with, say, -falign-functions=64 to see how much
 # of a timing difference is only code layout - and keys the build directory
 # like everything else here, so it never borrows objects from a build without.
 FPU     :=
 XCFLAGS :=
-ifneq (,$(filter-out hw dual,$(FPU)))
-$(error FPU=$(FPU): the backends so far are hw and dual)
+ifneq (,$(filter-out hw soft dual,$(FPU)))
+$(error FPU=$(FPU): the backends are hw, soft and dual)
 endif
 CFLAGS  += $(if $(FPU),-DSTARSVM_FPU_$(shell echo $(FPU) | tr a-z A-Z)) $(XCFLAGS)
 LDFLAGS := -mwindows -s
@@ -116,7 +117,8 @@ SOBJ := $(OBJDIR)/unity_lib_shared.o
 DEP  := $(OBJ:.o=.d) $(FOBJ:.o=.d) $(POBJ:.o=.d) $(ROBJ:.o=.d) $(HOBJ:.o=.d) \
         $(LOBJ:.o=.d) $(SOBJ:.o=.d)
 
-.PHONY: all clean imports fuzz onefile prof harness bench lib libtest x80test
+.PHONY: all clean imports fuzz onefile prof harness bench lib libtest libbench x80test \
+        portcheck
 
 all: $(TARGET)
 
@@ -235,6 +237,16 @@ libtest: $(LIBTEST)
 $(LIBTEST): tests/libtest.c $(SRCDIR)/stars.h $(LIBA)
 	$(CC) $(CFLAGS) -o $@ tests/libtest.c $(LIBA) -lpthread
 
+# The library timed: TURNS turns (10 by default) five times over, each run
+# checked against bench/goldenTURNS.  Needs the game and the benchmark game.
+# See tests/libbench.c - it is the timing to take to a machine without Windows.
+LIBBENCH := $(OBJDIR)/libbench$(EXE)
+libbench: $(LIBBENCH)
+	./$(LIBBENCH) stars.exe bench $(TURNS)
+
+$(LIBBENCH): tests/libbench.c $(SRCDIR)/stars.h $(LIBA)
+	$(CC) $(CFLAGS) -o $@ tests/libbench.c $(LIBA) -lpthread
+
 # x80.c, the x87 in integers, against hashes of what an x87 did with the same
 # cases, recorded by the fuzzer (StarsVM-fuzz --x80 --emit).  It needs no x87
 # itself, which makes it the test for every other host.  X80TEST=--heavy runs
@@ -244,8 +256,32 @@ X80TESTX := $(OBJDIR)/x80test$(EXE)
 x80test: $(X80TESTX)
 	./$(X80TESTX) $(X80TEST) tests/x80vec.txt
 
-$(X80TESTX): tests/x80test.c $(SRCDIR)/x80.c $(SRCDIR)/x80.h $(SRCDIR)/x80gen.h              $(SRCDIR)/x80ops.h GNUmakefile | $(OBJDIR)
+$(X80TESTX): tests/x80test.c $(SRCDIR)/x80.c $(SRCDIR)/x80tx.c $(SRCDIR)/x80.h \
+             $(SRCDIR)/x80gen.h $(SRCDIR)/x80ops.h GNUmakefile | $(OBJDIR)
 	$(CC) $(CFLAGS) -o $@ tests/x80test.c
+
+# That the integer x87 is integer-only and gives the same answers however it
+# is compiled, as far as this machine can tell: no long double anywhere and
+# asm only where it belongs; no floating-point instruction or soft-float call
+# in x80.c's own code; and x80test passing without __int128 and with char
+# unsigned.  tools/portcheck.sh does the rest where a Linux is at hand:
+# clang, -m32, UBSan, and AArch64 under qemu.
+X80S := $(OBJDIR)/x80-scan.s
+portcheck: x80test
+	@if grep -n 'long double' $(SRC) $(SRCDIR)/*.h tests/*.c; then \
+	    echo "portcheck: long double, above"; exit 1; fi
+	@if grep -ln '__asm__\|cpuid\|x86intrin' $(SRC) $(SRCDIR)/*.h | \
+	    grep -v 'x87hw\.c\|prof\.c\|fuzz\.c'; then \
+	    echo "portcheck: asm outside x87hw.c, prof.c and fuzz.c, above"; exit 1; fi
+	$(CC) $(CFLAGS) -S -o $(X80S) $(SRCDIR)/x80.c
+	@if grep -nE '^[[:space:]]+(f[a-z0-9]+|[a-z]+s[sd]|cvt[a-z0-9]+|u?comis[sd])[[:space:]]' $(X80S) | \
+	    grep -vE '[[:space:]](movsd|cmpsd|stosd|lodsd|scasd)[[:space:]]'; then \
+	    echo "portcheck: floating point in x80.c, above"; exit 1; fi
+	@if grep -nE '__(add|sub|mul|div|neg)[sdtx]f3|__float|__fix|__extend|__trunc' $(X80S); then \
+	    echo "portcheck: soft-float call in x80.c, above"; exit 1; fi
+	$(MAKE) x80test XCFLAGS=-DX80_NO_INT128
+	$(MAKE) x80test XCFLAGS=-funsigned-char
+	@echo "portcheck: passed"
 
 clean:
 	rm -rf build $(TARGET) $(FUZZER) $(PACKER) $(PROF) $(ONEFILE) \

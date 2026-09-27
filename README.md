@@ -178,18 +178,28 @@ selector arena is reserved `PAGE_NOACCESS` and committed `PAGE_READWRITE`,
 because guest code is interpreted rather than run. `StarsVM.exe` never asks the
 system for a page it can both write and execute.
 
-The x87 is carried out by one of two backends, chosen when building. The
-default, `src/x87hw.c`, hands each operation to the host's own x87. The other,
-`src/x80.c`, does the x87's arithmetic in integers, rounding and status word
-included, so that it can run anywhere; so far it has the exact operations and
-not the transcendentals. `StarsVM-fuzz --x80` runs every operation of each
-against the other across all precision and rounding controls; `make x80test`
-checks `x80.c` against hashes of what the host's x87 produced for the same
-cases (`tests/x80vec.txt`), which needs no x87 and so runs on any host. And
-`make FPU=dual` builds an emulator that runs both backends side by side,
-counts every operation where they differ and logs the first twenty with where
-the guest was; `--x87-follow soft` lets the game continue on `x80.c`'s
-results.
+The x87 is carried out by one of two backends, chosen when building with
+`FPU=`. `hw`, `src/x87hw.c`, hands each operation to the host's own x87, and
+is the default on an x86. `soft`, `src/x80.c`, does the x87's arithmetic in
+integers, rounding and status word included, so that it runs anywhere, and is
+the default everywhere else. Its exact operations - the arithmetic, loads and
+stores, compares, square root and the rest - agree with the host's x87 in
+every bit: `StarsVM-fuzz --x80` runs each against `x87hw.c` across every
+precision and rounding control, and billions of cases have found no
+difference. Its transcendentals (`src/x80tx.c`) cannot promise that, since
+the x87 does not round those correctly in every case; they agree with this
+machine's to the bit 85-99.9% of the time, depending on the instruction, and
+otherwise by a unit in the last place, and the game's generated turns, new
+games and dumps come out byte-identical either way.
+
+`make x80test` checks `x80.c` against hashes of what the host's x87 produced
+for the same cases (`tests/x80vec.txt`), which needs no x87 and so runs on any
+host; `make portcheck` adds that `x80.c` is integer-only and compiles to the
+same answers however it is built, and `tools/portcheck.sh` does the same with
+clang, `-m32`, UBSan and on AArch64 under qemu. `make FPU=dual` builds an
+emulator that runs both backends side by side, counts every operation where
+they differ and logs the first twenty with where the guest was;
+`--x87-follow soft` lets the game continue on `x80.c`'s results.
 
 No filename in the tree contains a `!`. The project is called Stars!VM, but
 GitHub will not take the character in a repository, release or artifact name,
@@ -290,11 +300,13 @@ working password at all — and the caller's file is never touched.
 ```bash
 make lib        # libstars.a, and stars.dll or libstars.so
 make libtest    # the library against the emulator's output
+make libbench   # the library timed, generating the benchmark game's turns
 ```
 
-It builds with any GCC or Clang that targets x86 or x86-64, on Windows or
-anywhere else: the game's floating point runs on the host's own x87, which is
-the one reason it is not portable further. Under it is the same interpreter,
+It builds with any GCC or Clang for any little-endian machine, Windows or not:
+on an x86 it runs the game's floating point on the host's x87 by default, and
+anywhere else it carries it out in integers (`FPU=soft`, above), which is what
+`tools/portcheck.sh` runs on AArch64. Under it is the same interpreter,
 loader and KERNEL as the emulator's, with the Win32 halves swapped for an
 in-memory directory (`src/fs_mem.c`) and a window system that exists only as
 far as the game can tell (`src/headless.c`): windows and messages are real,

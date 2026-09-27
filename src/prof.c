@@ -15,6 +15,8 @@
 #include <windows.h>
 #include <x86intrin.h>
 
+#include "fpusel.h"
+
 ImpEntry *imp_slot(unsigned index);
 
 /* A 0x0F instruction counts at 256 + its second byte, so one array covers both
@@ -635,13 +637,15 @@ static void pf_report_x87(void)
                 pf_site(SEGPTR_SEL(at), SEGPTR_OFF(at)));
     }
 
-    /* The host's own status word, which nothing on the host ever clears: fpu.c
-       copies it into the guest's after most operations, so a flag set here at
-       any point was visible to every guest FNSTSW after it.  The one the
-       runtime acts on is OE (0x08), tested after every math call. */
+    /* The host's own status word, with the x87 backend: what the last
+       operation raised, now that each starts with FNCLEX. */
+#ifdef FPU_USE_X87HW
     __asm__ volatile ("fnstsw %0" : "=m"(sw));
-    log_msg("  host x87 status word at exit: %04X (exceptions %02X%s)\n", sw,
-            sw & 0x3F, (sw & 0x18) ? ", OVERFLOW OR UNDERFLOW SEEN" : "");
+    log_msg("  host x87 status word at exit: %04X (exceptions %02X)\n", sw,
+            sw & 0x3F);
+#else
+    (void)sw;
+#endif
 }
 
 static void pf_report_natives(void)

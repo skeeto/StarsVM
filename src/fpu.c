@@ -8,7 +8,8 @@
  * The arithmetic is not done here.  Each operation goes to a backend through
  * FX(), as X80s (x80.h) with the guest's control word, and comes back as a
  * result and an effect on the status word, which is committed by the rule
- * x80.h gives.  Which backend is decided when the emulator is built.
+ * x80.h gives.  Which backend is decided when the emulator is built; see
+ * fpusel.h.
  */
 
 #include "fpu.h"
@@ -17,16 +18,20 @@
 
 #include <string.h>
 
-/* The backend: x87hw.c hands each operation to this machine's own x87, and
-   x80dual.c (FPU=dual) runs both it and x80.c's integer x87 and compares.
-   NOTE tells the dual build where the operations come from. */
-#if defined(STARSVM_FPU_DUAL)
+/* The backend (fpusel.h): x87hw.c hands each operation to this machine's
+   own x87, x80.c carries it out in integers, and x80dual.c runs both and
+   compares.  NOTE tells the dual build where the operations come from. */
+#include "fpusel.h"
+#if defined(FPU_USE_X87HW) && defined(FPU_USE_X80)
 #  include "x80dual.h"
 #  define FX(name) dual_##name
 #  define NOTE(c)  x80dual_note((c)->seg[S_CS], (c)->eip)
-#else
+#elif defined(FPU_USE_X87HW)
 #  include "x87hw.h"
 #  define FX(name) x87hw_##name
+#  define NOTE(c)  ((void)(c))
+#else
+#  define FX(name) x80_##name
 #  define NOTE(c)  ((void)(c))
 #endif
 
@@ -42,12 +47,18 @@
 #define TAG_SPEC  2
 #define TAG_EMPTY 3
 
+#ifdef FPU_USE_X87HW
 void fpu_host_enter(void) { FX(host_enter)(); }
 void fpu_host_leave(void) { FX(host_leave)(); }
+#else
+/* x80.c touches nothing of the host's. */
+void fpu_host_enter(void) {}
+void fpu_host_leave(void) {}
+#endif
 
 int fpu_follow(const char *which)
 {
-#if defined(STARSVM_FPU_DUAL)
+#if defined(FPU_USE_X87HW) && defined(FPU_USE_X80)
     return x80dual_follow(which);
 #else
     (void)which;
@@ -57,7 +68,7 @@ int fpu_follow(const char *which)
 
 unsigned long long fpu_report(void)
 {
-#if defined(STARSVM_FPU_DUAL)
+#if defined(FPU_USE_X87HW) && defined(FPU_USE_X80)
     return x80dual_report();
 #else
     return 0;

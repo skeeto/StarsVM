@@ -6,8 +6,10 @@
  * byte it produces goes back to it, so it can sit inside a server, behind an
  * FFI, or in a command-line tool that does the reading and writing itself.
  *
- * It needs x86 or x86-64, since the game's floating point is run on the host's
- * own x87, and GCC or Clang to build.  The operating system does not matter.
+ * It needs GCC or Clang and a little-endian machine.  On an x86 the game's
+ * floating point runs on the host's own x87; anywhere else it is carried out
+ * in integers, which gives the same generated turns.  The operating system
+ * does not matter.
  *
  * Memory.  Everything the library allocates comes from an arena the caller
  * hands it, never from malloc:

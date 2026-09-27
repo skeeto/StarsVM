@@ -4,9 +4,9 @@
  * including the transcendentals the MS C library uses (F2XM1, FYL2X, FPTAN,
  * FPATAN, FPREM, FSQRT, FRNDINT, FSCALE).  fpu.c decodes them and keeps the
  * guest's registers, stack and status word; the arithmetic is a backend's,
- * through the interface in x80.h.  The one there is so far, x87hw.c, hands
- * each operation to the host's real x87 with the guest control word loaded,
- * which is bit-exact and small, and is why an x86 host is needed.
+ * through the interface in x80.h.  x87hw.c hands each operation to the
+ * host's real x87 with the guest control word loaded, which is bit-exact
+ * and needs an x86; x80.c does it all in integers, anywhere.  See fpusel.h.
  */
 #ifndef FPU_H
 #define FPU_H
