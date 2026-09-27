@@ -628,6 +628,13 @@ static void msg_to_16(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp,
         x->lp16 = (uint32_t)MAKELONG(HWND_16((HWND)lp), HIWORD(wp));
         break;
 
+    case LB_SETSEL:
+        /* The index back into lParam's low word, where msg16.c found it and
+           sign-extended it: MAKELPARAM(-1, 0) for every item, as Win16
+           code writes it, not Win32's -1. */
+        x->lp16 = LOWORD(lp);
+        break;
+
     case EM_LINESCROLL:
         /* Both counts back into the one lParam, lines in the low word and
            columns in the high, which is where msg16.c found them. */
