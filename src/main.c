@@ -90,6 +90,11 @@ static const char usage_text[] =
     "                  every Nth time a native routine runs, also run the\n"
     "                  guest code it replaced from the same state and stop\n"
     "                  on any difference\n"
+#ifdef STARSVM_FPU_DUAL
+    "  --x87-follow W  continue with the x87 results of W, hw or soft\n"
+    "                  (this is an FPU=dual build, which runs both and\n"
+    "                  compares them)\n"
+#endif
     "  --play-wave N   play \"WAVE\" resource N through the sound path\n"
     "                  and exit (the game has 2601 2602 2611 2612 2621 2631;\n"
     "                  N = 0 plays all six, overlapping)\n"
@@ -297,6 +302,12 @@ int main(int argc, char **argv)
             trace_paint = 1;
         } else if (!strcmp(a, "--survey")) {
             thunk_survey = 1;
+        } else if (!strcmp(a, "--x87-follow") && i + 1 < argc) {
+            if (!fpu_follow(argv[++i])) {
+                fprintf(stderr, "%s: --x87-follow wants hw or soft, in an "
+                                "FPU=dual build\n", me);
+                return 2;
+            }
         } else if (!strcmp(a, "--no-native")) {
             native_disable();
         } else if (!strcmp(a, "--verify-native") && i + 1 < argc) {
@@ -582,6 +593,7 @@ int main(int argc, char **argv)
                        (double)qfreq.QuadPart);
     }
     fpu_host_leave();
+    fpu_report();
     dos_shutdown();
     prof_report();
     audio_shutdown();

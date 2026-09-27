@@ -41,6 +41,36 @@ enum { X80_ADD, X80_MUL, X80_SUB = 4, X80_SUBR, X80_DIV, X80_DIVR };
 /* The constants D9 E8..EE load, by their low three bits. */
 enum { X80_ONE, X80_L2T, X80_L2E, X80_PI, X80_LG2, X80_LN2, X80_ZERO };
 
+/* The x87's exact operations in integers (x80.c), with the same signatures
+   as x87hw.h's, so that fpu.c can call either: `a` is ST(0) and `b` ST(1)
+   where there are two, `r` never aliases an operand, and the _f32 and _f64
+   forms take a memory operand as its bits.  Each sets env->cc to the
+   condition codes it defines and ORs into env->sw what it raises; env->sw
+   should start at zero. */
+void     x80_arith(X80Env *e, int op, const X80 *a, const X80 *b, X80 *r);
+void     x80_arith_f32(X80Env *e, int op, const X80 *a, uint32_t m, X80 *r);
+void     x80_arith_f64(X80Env *e, int op, const X80 *a, uint64_t m, X80 *r);
+void     x80_compare(X80Env *e, const X80 *a, const X80 *b);      /* FCOM  */
+void     x80_ucompare(X80Env *e, const X80 *a, const X80 *b);     /* FUCOM */
+void     x80_compare_f32(X80Env *e, const X80 *a, uint32_t m);
+void     x80_compare_f64(X80Env *e, const X80 *a, uint64_t m);
+void     x80_sqrt(X80Env *e, const X80 *a, X80 *r);
+void     x80_rndint(X80Env *e, const X80 *a, X80 *r);
+void     x80_abs(X80Env *e, const X80 *a, X80 *r);
+void     x80_chs(X80Env *e, const X80 *a, X80 *r);
+void     x80_tst(X80Env *e, const X80 *a);
+void     x80_xam(X80Env *e, const X80 *a);
+void     x80_prem(X80Env *e, const X80 *a, const X80 *b, X80 *r);
+void     x80_scale(X80Env *e, const X80 *a, const X80 *b, X80 *r);
+void     x80_xtract(X80Env *e, const X80 *a, X80 *exp, X80 *sig);
+void     x80_constant(X80Env *e, int which, X80 *r);
+void     x80_from_int(X80Env *e, int64_t v, X80 *r);
+void     x80_from_f32(X80Env *e, uint32_t bits, X80 *r);
+void     x80_from_f64(X80Env *e, uint64_t bits, X80 *r);
+uint32_t x80_to_f32(X80Env *e, const X80 *a);
+uint64_t x80_to_f64(X80Env *e, const X80 *a);
+int64_t  x80_to_int(X80Env *e, const X80 *a, unsigned width);
+
 static inline void x80_get(X80 *v, const uint8_t b[10])
 {
     v->m = (uint64_t)b[0]       | (uint64_t)b[1] << 8  |

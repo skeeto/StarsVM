@@ -106,7 +106,8 @@
 #include "cpu.h"
 #include "sel.h"
 #include "log.h"
-#include "x80gen.h"
+#include "x80ops.h"
+#include "x87hw.h"
 
 #include <cpuid.h>
 #include <stddef.h>
@@ -494,11 +495,13 @@ static void fp_gen(struct fpstate *s)
     /* Rounding and precision vary; the six exception masks never come off.
        An unmasked control word does not fail a round - fpu.c hands it to the
        real host FPU, which then faults inside this process. */
-    s->cw = (uint16_t)(0x007Fu | (rnd_below(4) << 8) | (rnd_below(4) << 10));
+    s->cw = (uint16_t)(0x007Fu | rnd_below(4) << 8);
+    s->cw |= (uint16_t)(rnd_below(4) << 10);
     /* Some sticky flags already up half the time, so that one an instruction
        should have left alone is seen to be cleared, and the condition codes
        anything at all, for the same reason. */
-    s->sw = (uint16_t)((rnd_below(2) ? rnd() & 0x3Fu : 0) | (rnd() & 0x4700u));
+    s->sw = (uint16_t)(rnd_below(2) ? rnd() & 0x3Fu : 0);
+    s->sw |= (uint16_t)(rnd() & 0x4700u);
     /* Each live register an interesting value (x80gen.h), or half the time
        one related to a register before it - equal, negated, a power of two
        or a few units away - since the operands that make exact cancellations,
@@ -1476,6 +1479,126 @@ static int fuzz_run(long rounds, unsigned seed)
    down. */
 static const char *prog = "fuzz";
 
+/* ---- --x80: the two backends against each other ---------------------------
+ *
+ * The rounds above test fpu.c against silicon through x87hw.c.  This tests
+ * x80.c against x87hw.c directly, one operation at a time with no guest
+ * machine in between, which is fast enough to cover the operand space an
+ * exact implementation has to get right: every precision and rounding
+ * control, with operands from x80gen.h and pairs related half the time (see
+ * x80ops.h for the cases).  Everything the operation reports is compared -
+ * the result's bits, the exception flags, and which condition codes it
+ * defines and their values.
+ *
+ * A difference prints the operation, the control word and the operands, and
+ * the case's own seed, which --case replays alone.  An operation stops being
+ * tried after ten differences, so one mistake does not bury the rest.
+ */
+
+static void xshow(const char *who, const struct x80out *o)
+{
+    log_msg("       %s: %04X:%016llX", who, o->r.se, (unsigned long long)o->r.m);
+    if (o->s.se || o->s.m)
+        log_msg(" %04X:%016llX", o->s.se, (unsigned long long)o->s.m);
+    if (o->v) log_msg(" v %016llX", (unsigned long long)o->v);
+    log_msg("  sw %04X cc %04X\n", o->env.sw, o->env.cc);
+}
+
+/* One case of operation k from its own seed; 1 if the backends differ. */
+static int xcase(unsigned k, uint64_t seed, int verbose)
+{
+    struct x80case c;
+    struct x80out h, s;
+    int kind = x80ops[k].kind;
+
+    x80case_gen(k, seed, &c);
+    X80OPS_RUN(x87hw_, k, &c, &h);
+    X80OPS_RUN(x80_, k, &c, &s);
+    if (x80out_same(&h, &s) && !verbose) return 0;
+
+    log_msg("fuzz: --x80 %s, cw %04X: a %04X:%016llX b %04X:%016llX",
+            x80ops[k].name, c.cw, c.a.se, (unsigned long long)c.a.m,
+            c.b.se, (unsigned long long)c.b.m);
+    if (c.m || kind == XO_FILD) log_msg(" m %016llX", (unsigned long long)c.m);
+    if (kind == XO_CONST) log_msg(" constant %d", c.which);
+    log_msg("\n");
+    xshow("x87hw", &h);
+    xshow("x80  ", &s);
+    log_msg("       case 0x%016llX\n", (unsigned long long)seed);
+    return !x80out_same(&h, &s);
+}
+
+static int fuzz_x80(long rounds, uint64_t seed, const char *only, int one)
+{
+    unsigned k;
+    unsigned long long total = 0;
+    long i;
+    int bad = 0;
+
+    if (one) {
+        for (k = 0; k < X80_NOPS; k++)
+            if (!strcmp(x80ops[k].name, only)) return xcase(k, seed, 1);
+        log_msg("fuzz: no operation %s\n", only);
+        return 2;
+    }
+    for (k = 0; k < X80_NOPS; k++) {
+        X80Rng g = x80ops_stream(seed, k);
+        long fails = 0;
+        if (only && strcmp(x80ops[k].name, only)) continue;
+        for (i = 0; i < rounds && fails < 10; i++)
+            fails += xcase(k, x80gen_u64(&g), 0);
+        log_msg("  %-8s %10ld tested, %ld different%s\n", x80ops[k].name, i,
+                fails, fails >= 10 ? " (stopped)" : "");
+        total += (unsigned long long)i;
+        if (fails) bad = 1;
+    }
+    log_msg("fuzz: --x80, %llu cases, %s\n", total, bad ? "DIFFERENCES" : "no differences");
+    return bad;
+}
+
+/* --emit: what x80test checks x80.c against, recorded from this machine's
+   x87.  For each operation, the hash of each of the first X80TEST_QUICK
+   blocks of its stream, and one hash over the blocks after those up to
+   X80TEST_HEAVY, which x80test --heavy checks. */
+static int x80_emit(const char *path)
+{
+    FILE *f = fopen(path, "w");
+    unsigned k, b, i;
+
+    if (!f) {
+        log_msg("fuzz: cannot write %s\n", path);
+        return 1;
+    }
+    fprintf(f, "# x80vec.txt - what x80.c must produce, recorded from an x87 by\n"
+               "# `StarsVM-fuzz --x80 --emit`: for each operation of src/x80ops.h,\n"
+               "# FNV-1a hashes of its outputs over blocks of %d cases drawn from\n"
+               "# its stream with seed 0x%llX.  Generated; regenerate rather than edit.\n"
+               "#\n# op  blocks  hash\n",
+            X80OPS_BLOCK, (unsigned long long)X80TEST_SEED);
+    for (k = 0; k < X80_NOPS; k++) {
+        X80Rng g = x80ops_stream(X80TEST_SEED, k);
+        uint64_t heavy = X80OUT_HASH0;
+        for (b = 0; b < X80TEST_HEAVY; b++) {
+            uint64_t h = X80OUT_HASH0;
+            for (i = 0; i < X80OPS_BLOCK; i++) {
+                struct x80case c;
+                struct x80out o;
+                x80case_gen(k, x80gen_u64(&g), &c);
+                X80OPS_RUN(x87hw_, k, &c, &o);
+                if (b < X80TEST_QUICK) h = x80out_hash(h, &o);
+                else                   heavy = x80out_hash(heavy, &o);
+            }
+            if (b < X80TEST_QUICK)
+                fprintf(f, "%s %u %016llX\n", x80ops[k].name, b, (unsigned long long)h);
+        }
+        fprintf(f, "%s %u-%u %016llX\n", x80ops[k].name, X80TEST_QUICK,
+                X80TEST_HEAVY - 1, (unsigned long long)heavy);
+    }
+    fclose(f);
+    log_msg("fuzz: wrote %s\n", path);
+    return 0;
+}
+
 static const char driver_usage[] =
     "\n"
     "Generates a random instruction and a random register state, runs each both\n"
@@ -1490,14 +1613,19 @@ static const char driver_usage[] =
     "               forms, for about eleven times as many of them a second.\n"
     "               A seed from such a run replays only with --x87 too\n"
     "  --log FILE   also write the report to FILE\n"
+    "  --x80 [OP]   instead, run x80.c's operations against x87hw.c's, OP only\n"
+    "               if given (add, sqrt, fist16, ...), --rounds cases each\n"
+    "  --case N     with --x80 OP, replay the one case a difference printed\n"
+    "  --emit FILE  with --x80, record what x80test expects (tests/x80vec.txt)\n"
     "  --help       this text\n";
 
 int main(int argc, char **argv)
 {
     long rounds = 200000;
     unsigned seed = 0;
-    const char *logfile = NULL;
-    int i, rc;
+    const char *logfile = NULL, *x80op = NULL, *emitfile = NULL;
+    uint64_t xcase_seed = 0;
+    int i, rc, x80 = 0, one = 0;
 
     if (argv[0] && argv[0][0]) {
         const char *p;
@@ -1516,8 +1644,18 @@ int main(int argc, char **argv)
             logfile = argv[++i];
         } else if (!strcmp(a, "--x87")) {
             x87_only = 1;
+        } else if (!strcmp(a, "--x80")) {
+            x80 = 1;
+            if (i + 1 < argc && argv[i + 1][0] != '-') x80op = argv[++i];
+        } else if (!strcmp(a, "--emit") && i + 1 < argc) {
+            emitfile = argv[++i];
+        } else if (!strcmp(a, "--case") && i + 1 < argc) {
+            xcase_seed = strtoull(argv[++i], NULL, 0);
+            one = 1;
         } else if (!strcmp(a, "--help") || !strcmp(a, "-h")) {
-            printf("usage: %s [--rounds N] [--seed N] [--x87] [--log FILE]\n", prog);
+            printf("usage: %s [--rounds N] [--seed N] [--x87] [--log FILE]\n"
+                   "       %s --x80 [OP] [--rounds N] [--seed N] [--case N]\n",
+                   prog, prog);
             fputs(driver_usage, stdout);
             return 0;
         } else {
@@ -1533,7 +1671,16 @@ int main(int argc, char **argv)
     log_open(logfile);
     if (!sel_init()) { log_close(); return 1; }
 
-    rc = fuzz_run(rounds, seed);
+    if (x80 && one && !x80op) {
+        fprintf(stderr, "%s: --case needs --x80 OP\n", prog);
+        rc = 2;
+    } else if (x80 && emitfile) {
+        rc = x80_emit(emitfile);
+    } else if (x80) {
+        rc = fuzz_x80(rounds, one ? xcase_seed : seed, x80op, one);
+    } else {
+        rc = fuzz_run(rounds, seed);
+    }
     log_close();
     return rc;
 }

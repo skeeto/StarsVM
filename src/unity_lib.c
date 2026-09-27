@@ -40,4 +40,8 @@
 #include "sel.c"
 #include "task.c"
 #include "thunk.c"
+#if defined(STARSVM_FPU_DUAL)
+#include "x80.c"
+#include "x80dual.c"
+#endif
 #include "x87hw.c"

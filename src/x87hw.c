@@ -365,3 +365,12 @@ int64_t x87hw_to_int(X80Env *e, const X80 *a, unsigned width)
     took(e, sw, CC_C1);
     return r;
 }
+
+#undef ARITH
+#undef MEMOP
+#undef COMPARE
+#undef MEMCOMPARE
+#undef UNARY
+#undef EXAMINE
+#undef BINARY
+#undef BINARY_KEEP

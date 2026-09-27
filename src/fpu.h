@@ -29,6 +29,13 @@ int  fpu_exec(Cpu *c, uint8_t op, uint8_t modrm, int is_reg,
 void fpu_host_enter(void);
 void fpu_host_leave(void);
 
+/* For an FPU=dual build, which runs both backends and compares them: whose
+   results the guest continues with, "hw" or "soft" (0 if that is not one,
+   or this is not such a build), and a summary for the log at exit, whose
+   value is how many operations differed. */
+int                fpu_follow(const char *which);
+unsigned long long fpu_report(void);
+
 /* Instructions, one call each, for a native routine (native.h) that stands
    in for guest code containing x87 instructions.  Each is the path fpu_exec
    takes for that instruction, so a routine built from them is bit-exact with

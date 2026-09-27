@@ -10,6 +10,9 @@
  * the same streams can be drawn on any host.
  *
  * The generator is splitmix64: one word of state, any value a valid seed.
+ * Every draw is sequenced on its own, never two in one expression or one
+ * call's arguments: C leaves the order of those unspecified, compilers do
+ * differ, and a stream has to be the same stream under every one of them.
  */
 #ifndef X80GEN_H
 #define X80GEN_H
@@ -214,13 +217,17 @@ static inline void x80gen_value(X80Rng *g, X80 *v)
         x80gen_normal(g, v, (r & 2 ? 0x3FBA : 0x3FFF + 63) +
                             (int)x80gen_below(g, 5) - 2, neg);
         break;
-    case 14:                                      /* invalid encodings */
-        x80gen_set(v, (uint16_t)(x80gen_u64(g) | (r & 2 ? 0x7FFF : 0)),
+    case 14: {                                    /* invalid encodings */
+        uint64_t se = x80gen_u64(g);
+        x80gen_set(v, (uint16_t)(se | (r & 2 ? 0x7FFF : 0)),
                    x80gen_u64(g) & 0x7FFFFFFFFFFFFFFFu);
         break;
-    default:                                      /* noise */
-        x80gen_set(v, (uint16_t)x80gen_u64(g), x80gen_u64(g));
+    }
+    default: {                                    /* noise */
+        uint64_t se = x80gen_u64(g);
+        x80gen_set(v, (uint16_t)se, x80gen_u64(g));
         break;
+    }
     }
 }
 

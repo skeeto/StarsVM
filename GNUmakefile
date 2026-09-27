@@ -25,14 +25,16 @@ CFLAGS  := -std=c11 -O3 -g -Wall -Wextra -Wshadow -Wstrict-prototypes \
            -Wno-unused-parameter -MMD -MP -D__USE_MINGW_ANSI_STDIO=0
 
 # FPU picks how the guest's x87 is carried out: hw hands each instruction to
-# this machine's own x87.  Empty takes the default for the target.  XCFLAGS is
+# this machine's own x87, and dual runs both that and src/x80.c's integer x87
+# and logs where they differ (see src/x80dual.c), which makes it a
+# development build.  Empty takes the default for the target.  XCFLAGS is
 # for experiments - a rebuild with, say, -falign-functions=64 to see how much
 # of a timing difference is only code layout - and keys the build directory
 # like everything else here, so it never borrows objects from a build without.
 FPU     :=
 XCFLAGS :=
-ifneq (,$(filter-out hw,$(FPU)))
-$(error FPU=$(FPU): the only backend so far is hw)
+ifneq (,$(filter-out hw dual,$(FPU)))
+$(error FPU=$(FPU): the backends so far are hw and dual)
 endif
 CFLAGS  += $(if $(FPU),-DSTARSVM_FPU_$(shell echo $(FPU) | tr a-z A-Z)) $(XCFLAGS)
 LDFLAGS := -mwindows -s
@@ -42,8 +44,11 @@ LDLIBS  := -luser32 -lgdi32 -lcomdlg32 -lwinmm -lshell32 -lshlwapi
 # aarch64-linux-gnu - with the backend and any experimental flags after it.
 # Objects live under it, so two builds differing in any of these never share
 # one, and the names below follow it rather than the machine doing the building.
+# A compiler other than the toolchain's own gcc is keyed too: `gcc -m32 -dumpmachine`
+# still says x86_64, so CC="gcc -m32" would otherwise find the 64-bit objects
+# up to date and quietly test those.
 TRIPLE  := $(shell $(CC) -dumpmachine)
-ARCH    := $(TRIPLE)$(if $(FPU),-fpu-$(FPU))$(if $(XCFLAGS),-x$(shell echo '$(XCFLAGS)' | cksum | cut -d' ' -f1))
+ARCH    := $(TRIPLE)$(if $(FPU),-fpu-$(FPU))$(if $(XCFLAGS),-x$(shell echo '$(XCFLAGS)' | cksum | cut -d' ' -f1))$(if $(filter-out $(CROSS)gcc,$(CC)),-cc$(shell echo '$(CC)' | cksum | cut -d' ' -f1))
 
 SRCDIR  := src
 OBJDIR  := build/$(ARCH)
@@ -92,12 +97,12 @@ $(shell rm -f $(TARGET) $(FUZZER) $(PACKER) $(PROF) $(HARNESS) $(ONEFILE) $(LIBA
 endif
 
 # A unity build: src/unity.c includes every other source, so the compiler sees
-# the whole program at once, and src/unity_fuzz.c does the same for the eight
+# the whole program at once, and src/unity_fuzz.c does the same for the nine
 # the fuzzer needs.  Both are filtered out of SRC so neither can include itself.
 #
 # SRC exists only to make the objects depend on every source.  That is
-# deliberately over-broad for the fuzzer, which uses eight of them: naming which
-# eight here would be a second list to keep in step with unity_fuzz.c, and
+# deliberately over-broad for the fuzzer, which uses nine of them: naming which
+# nine here would be a second list to keep in step with unity_fuzz.c, and
 # getting it wrong would mean a stale object rather than a rebuild nobody
 # noticed.
 SRC  := $(filter-out $(SRCDIR)/unity%.c,$(wildcard $(SRCDIR)/*.c))
@@ -111,7 +116,7 @@ SOBJ := $(OBJDIR)/unity_lib_shared.o
 DEP  := $(OBJ:.o=.d) $(FOBJ:.o=.d) $(POBJ:.o=.d) $(ROBJ:.o=.d) $(HOBJ:.o=.d) \
         $(LOBJ:.o=.d) $(SOBJ:.o=.d)
 
-.PHONY: all clean imports fuzz onefile prof harness bench lib libtest
+.PHONY: all clean imports fuzz onefile prof harness bench lib libtest x80test
 
 all: $(TARGET)
 
@@ -229,6 +234,18 @@ libtest: $(LIBTEST)
 
 $(LIBTEST): tests/libtest.c $(SRCDIR)/stars.h $(LIBA)
 	$(CC) $(CFLAGS) -o $@ tests/libtest.c $(LIBA) -lpthread
+
+# x80.c, the x87 in integers, against hashes of what an x87 did with the same
+# cases, recorded by the fuzzer (StarsVM-fuzz --x80 --emit).  It needs no x87
+# itself, which makes it the test for every other host.  X80TEST=--heavy runs
+# all the recorded blocks rather than the first few.  See tests/x80test.c.
+X80TEST :=
+X80TESTX := $(OBJDIR)/x80test$(EXE)
+x80test: $(X80TESTX)
+	./$(X80TESTX) $(X80TEST) tests/x80vec.txt
+
+$(X80TESTX): tests/x80test.c $(SRCDIR)/x80.c $(SRCDIR)/x80.h $(SRCDIR)/x80gen.h              $(SRCDIR)/x80ops.h GNUmakefile | $(OBJDIR)
+	$(CC) $(CFLAGS) -o $@ tests/x80test.c
 
 clean:
 	rm -rf build $(TARGET) $(FUZZER) $(PACKER) $(PROF) $(ONEFILE) \

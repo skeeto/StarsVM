@@ -17,9 +17,18 @@
 
 #include <string.h>
 
-/* The backend.  x87hw.c hands each operation to this machine's own x87. */
-#include "x87hw.h"
-#define FX(name) x87hw_##name
+/* The backend: x87hw.c hands each operation to this machine's own x87, and
+   x80dual.c (FPU=dual) runs both it and x80.c's integer x87 and compares.
+   NOTE tells the dual build where the operations come from. */
+#if defined(STARSVM_FPU_DUAL)
+#  include "x80dual.h"
+#  define FX(name) dual_##name
+#  define NOTE(c)  x80dual_note((c)->seg[S_CS], (c)->eip)
+#else
+#  include "x87hw.h"
+#  define FX(name) x87hw_##name
+#  define NOTE(c)  ((void)(c))
+#endif
 
 /* x87 status word condition-code bits. */
 #define SW_C0 0x0100u
@@ -35,6 +44,25 @@
 
 void fpu_host_enter(void) { FX(host_enter)(); }
 void fpu_host_leave(void) { FX(host_leave)(); }
+
+int fpu_follow(const char *which)
+{
+#if defined(STARSVM_FPU_DUAL)
+    return x80dual_follow(which);
+#else
+    (void)which;
+    return 0;
+#endif
+}
+
+unsigned long long fpu_report(void)
+{
+#if defined(STARSVM_FPU_DUAL)
+    return x80dual_report();
+#else
+    return 0;
+#endif
+}
 
 void fpu_reset(Cpu *c)
 {
@@ -336,6 +364,7 @@ int fpu_exec(Cpu *c, uint8_t op, uint8_t modrm, int is_reg,
     int rm  = modrm & 7;
     X80 a, b;
 
+    NOTE(c);
     if (!is_reg) {
         /* ---- memory forms ---- */
         switch (op) {
@@ -531,21 +560,28 @@ int fpu_exec(Cpu *c, uint8_t op, uint8_t modrm, int is_reg,
 /* ------------------------------------------------------- for native routines */
 
 /* See fpu.h.  Each is the path fpu_exec takes for the instruction it names. */
-void fpu_fild(Cpu *c, int32_t v) { fild(c, v); }
+void fpu_fild(Cpu *c, int32_t v) { NOTE(c); fild(c, v); }
 
 void fpu_arith_m64(Cpu *c, int op, uint16_t sel, uint16_t off)
 {
+    NOTE(c);
     arith_mem(c, 0xDC, op, sel, off);
 }
 
-void fpu_sqrt(Cpu *c) { special(c, 0xFA); }
-void fpu_xam(Cpu *c)  { special(c, 0xE5); }
+void fpu_sqrt(Cpu *c) { NOTE(c); special(c, 0xFA); }
+void fpu_xam(Cpu *c)  { NOTE(c); special(c, 0xE5); }
 
-void fpu_store_f64(Cpu *c, uint16_t sel, uint16_t off) { store_f64(c, sel, off); }
+void fpu_store_f64(Cpu *c, uint16_t sel, uint16_t off)
+{
+    NOTE(c);
+    store_f64(c, sel, off);
+}
 
 int64_t fpu_fistp64(Cpu *c)
 {
-    int64_t v = fist(c, 8);
+    int64_t v;
+    NOTE(c);
+    v = fist(c, 8);
     fpu_discard(c);
     return v;
 }

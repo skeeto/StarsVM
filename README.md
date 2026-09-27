@@ -159,9 +159,10 @@ is anywhere near the emulator; all it ships is the decoder. It decompresses its
 own output and compares it to the input before writing anything, so the two
 halves of the format cannot drift apart without the build failing.
 
-`make fuzz` builds a second, separate program, `StarsVM-fuzz.exe`, out of eight
-of the same sources — the interpreter, the FPU and its x87 backend, the selector
-arena, the log, and the thunk layer that `cpu_step` needs in order to link. It
+`make fuzz` builds a second, separate program, `StarsVM-fuzz.exe`, out of nine
+of the same sources — the interpreter, the FPU and both its backends, the
+selector arena, the log, and the thunk layer that `cpu_step` needs in order to
+link. It
 differentially tests the interpreter and the FPU against the host CPU — 200,000
 rounds by default, covering register, immediate, memory and string forms,
 integer and x87 alike. For x87 the oracle seeds and dumps the whole 80-bit
@@ -176,6 +177,19 @@ keeping it in its own program means the emulator makes none at all — the
 selector arena is reserved `PAGE_NOACCESS` and committed `PAGE_READWRITE`,
 because guest code is interpreted rather than run. `StarsVM.exe` never asks the
 system for a page it can both write and execute.
+
+The x87 is carried out by one of two backends, chosen when building. The
+default, `src/x87hw.c`, hands each operation to the host's own x87. The other,
+`src/x80.c`, does the x87's arithmetic in integers, rounding and status word
+included, so that it can run anywhere; so far it has the exact operations and
+not the transcendentals. `StarsVM-fuzz --x80` runs every operation of each
+against the other across all precision and rounding controls; `make x80test`
+checks `x80.c` against hashes of what the host's x87 produced for the same
+cases (`tests/x80vec.txt`), which needs no x87 and so runs on any host. And
+`make FPU=dual` builds an emulator that runs both backends side by side,
+counts every operation where they differ and logs the first twenty with where
+the guest was; `--x87-follow soft` lets the game continue on `x80.c`'s
+results.
 
 No filename in the tree contains a `!`. The project is called Stars!VM, but
 GitHub will not take the character in a repository, release or artifact name,
