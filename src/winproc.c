@@ -598,10 +598,14 @@ static void msg_to_16_values(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp,
     /* ---- messages that merely repack their two parameters ------------------ */
 
     case WM_COMMAND:
+    case WM_ACTIVATE:
         /* Win16 puts the control handle in lParam's LOW word and the notify
            code in its HIGH word; Win32 puts the notify code in wParam's high
            word and the handle in lParam.  This is how every menu pick and
-           every button click arrives. */
+           every button click arrives.  WM_ACTIVATE has the same shape: the
+           other window, the one losing activation or gaining it, where the
+           control would be, and in the high word whether this one is
+           minimized. */
         x->wp16 = LOWORD(wp);
         x->lp16 = (uint32_t)MAKELONG(HWND_16((HWND)lp), HIWORD(wp));
         break;
@@ -630,12 +634,6 @@ static void msg_to_16_values(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp,
     case WM_MENUCHAR:
         x->wp16 = LOWORD(wp);
         x->lp16 = (uint32_t)MAKELONG(HIWORD(wp), HMENU_16((HMENU)lp));
-        break;
-
-    case WM_ACTIVATE:
-        /* Unlike WM_COMMAND, the handle goes in the HIGH word here. */
-        x->wp16 = LOWORD(wp);
-        x->lp16 = (uint32_t)MAKELONG(HIWORD(wp) ? 1 : 0, HWND_16((HWND)lp));
         break;
 
     case WM_PARENTNOTIFY:

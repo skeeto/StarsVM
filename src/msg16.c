@@ -200,10 +200,13 @@ void msg16_unpack(HWND hwnd, uint16_t msg16, uint16_t wp, uint32_t lp,
     /* ---- the pairs whose two parameters swap round ------------------------- */
 
     case WM_COMMAND:
+    case WM_ACTIVATE:
     case WM_VKEYTOITEM:
     case WM_CHARTOITEM:
         /* The control in lParam's low word, and in the high word a notify
-           code, or for the list box's two the caret's index. */
+           code; for WM_ACTIVATE the other window and whether this one is
+           minimized, and for the list box's two the list box and the caret's
+           index. */
         m->wp = MAKEWPARAM(wp, HIWORD(lp));
         m->lp = (LPARAM)HWND_32(LOWORD(lp));
         break;
@@ -211,11 +214,6 @@ void msg16_unpack(HWND hwnd, uint16_t msg16, uint16_t wp, uint32_t lp,
     case WM_HSCROLL:
     case WM_VSCROLL:
         m->wp = MAKEWPARAM(wp, LOWORD(lp));
-        m->lp = (LPARAM)HWND_32(HIWORD(lp));
-        break;
-
-    case WM_ACTIVATE:
-        m->wp = MAKEWPARAM(wp, 0);
         m->lp = (LPARAM)HWND_32(HIWORD(lp));
         break;
 
