@@ -40,7 +40,8 @@ UINT msg16_to_32_for(HWND hwnd, uint16_t msg16)
 /* ---- marshaling ----------------------------------------------------------- */
 
 /* What has to be moved back into guest memory once the real window has run. */
-enum { OUT_NONE = 0, OUT_STR, OUT_RECT, OUT_LINE, OUT_INTS, OUT_DATA };
+enum { OUT_NONE = 0, OUT_STR, OUT_RECT, OUT_LINE, OUT_INTS, OUT_DATA,
+       OUT_DATALEN };
 
 #define BUFSZ 4096
 
@@ -53,6 +54,8 @@ struct marshal {
     unsigned outmax;            /* bytes available there */
     int      ret;               /* H_* when the result is a handle */
     int      refuse;            /* no honest translation exists */
+    int      local;             /* lp points into this record, and no out
+                                   path says so already */
     char     buf[BUFSZ];
     RECT     rect;
     INT      tabs[64];
@@ -112,12 +115,21 @@ static void marshal_in(HWND hwnd, uint16_t msg16, uint16_t wp, uint32_t lp,
     if (lp_is_in_string(hwnd, m->msg)) {
         g_str(lp, m->buf, sizeof m->buf);
         m->lp = (LPARAM)m->buf;
+        m->local = 1;
         return;
     }
 
     switch (m->msg) {
 
     /* ---- text coming back out --------------------------------------------- */
+
+    case LB_GETTEXTLEN:
+    case CB_GETLBTEXTLEN:
+        /* An item's "length" when it is item data is its size, which is the
+           4 of Win16's DWORD whatever a ULONG_PTR is here: see OUT_DATA. */
+        if (!keeps_strings(hwnd, m->msg == CB_GETLBTEXTLEN))
+            m->out = OUT_DATALEN;
+        break;
 
     case LB_GETTEXT:
     case CB_GETLBTEXT:
@@ -191,6 +203,7 @@ static void marshal_in(HWND hwnd, uint16_t msg16, uint16_t wp, uint32_t lp,
         m->rect.left = r16[0]; m->rect.top = r16[1];
         m->rect.right = r16[2]; m->rect.bottom = r16[3];
         m->lp = (LPARAM)&m->rect;
+        m->local = 1;
         break;
     }
 
@@ -214,6 +227,7 @@ static void marshal_in(HWND hwnd, uint16_t msg16, uint16_t wp, uint32_t lp,
                                            (uint16_t)(SEGPTR_OFF(lp) + i * 2));
         m->wp = n;
         m->lp = n ? (LPARAM)m->tabs : 0;
+        m->local = n != 0;
         break;
     }
 
@@ -339,6 +353,11 @@ static uint32_t marshal_out(struct marshal *m, LRESULT r)
             r = 4;
         }
         break;
+    case OUT_DATALEN:
+        /* And the length queries say 8 too - a combo box's does even on a
+           32-bit build - where Win16 said 4. */
+        if ((LONG)r != LB_ERR) r = 4;
+        break;
     case OUT_RECT: {
         int16_t r16[4];
         r16[0] = (int16_t)m->rect.left;  r16[1] = (int16_t)m->rect.top;
@@ -370,20 +389,49 @@ uint32_t msg16_send(HWND hwnd, uint16_t msg16, uint16_t wp, uint32_t lp)
     return marshal_out(&m, r);
 }
 
+/* The messages Win32 will not post whatever their lParam, where marshal_in
+   can leave one that is no pointer at all: item data for a list without
+   strings, or a count of 0 that resets the tab stops.  Win32 refuses them by
+   number (ERROR_MESSAGE_SYNC_ONLY); Win16 posted them.  It refuses more than
+   these.  Some carry a far pointer nothing here translates, which is better
+   refused than sent, since the window would read through it.  Others carry
+   none - WM_ERASEBKGND, WM_INITDIALOG, WM_PARENTNOTIFY, and queries such as
+   EM_GETSEL whose answer a post throws away - and are refused as they always
+   were; the game posts none of them. */
+static int post_refused(UINT msg)
+{
+    switch (msg) {
+    case LB_ADDSTRING: case LB_INSERTSTRING: case LB_FINDSTRING:
+    case LB_SELECTSTRING: case LB_FINDSTRINGEXACT:
+    case CB_ADDSTRING: case CB_INSERTSTRING: case CB_FINDSTRING:
+    case CB_SELECTSTRING: case CB_FINDSTRINGEXACT:
+    case LB_SETTABSTOPS: case EM_SETTABSTOPS:
+        return 1;
+    default:
+        return 0;
+    }
+}
+
 uint32_t msg16_post(HWND hwnd, uint16_t msg16, uint16_t wp, uint32_t lp)
 {
     struct marshal m;
 
     marshal_in(hwnd, msg16, wp, lp, &m);
+    if (m.refuse) return msg16_send(hwnd, msg16, wp, lp);  /* which says why */
 
     /* A post outlives this call, so anything that had to be copied into a local
        buffer cannot go out this way - the buffer is gone before the message is
        read.  Send it instead; that changes the timing, which is the lesser of
-       the two wrongs. */
-    if (m.refuse || m.out != OUT_NONE || lp_is_in_string(hwnd, m.msg)) {
-        log_msg("*** guest posted message %04X, which carries a pointer; "
-                "sending it instead so the data is still there\n", msg16);
-        return msg16_send(hwnd, msg16, wp, lp);
-    }
-    return (uint32_t)PostMessageA(hwnd, m.msg, m.wp, m.lp);
+       the two wrongs.  So too the messages Win32 will not post even when they
+       carry no pointer; see post_refused. */
+    if (m.out == OUT_NONE && !m.local && !post_refused(m.msg))
+        return (uint32_t)PostMessageA(hwnd, m.msg, m.wp, m.lp);
+
+    /* The guest asks whether the post went through, not for the result: an
+       index of 0 is no failure, and a window that is gone is one. */
+    if (!IsWindow(hwnd)) return 0;
+    log_msg("*** guest posted message %04X, which cannot go out as a post; "
+            "sending it instead\n", msg16);
+    msg16_send(hwnd, msg16, wp, lp);
+    return 1;
 }
