@@ -21,7 +21,12 @@ LRESULT winproc_default(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp);
    stock control's own class procedure, or as WM_VSCROLL or WM_HSCROLL. */
 LRESULT winproc_wheel(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp);
 
-/* Rebuild the guest's 16-bit copy of a struct DefWindowProc just wrote to. */
+/* Around a call that passes on a message whose lParam is a struct the guest
+   holds a 16-bit copy of, at guest_lp: widen what the guest wrote into its
+   copy into the 32-bit struct before the call, and rebuild the copy from the
+   struct after it. */
+void    winproc_widen_struct(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp,
+                             uint32_t guest_lp);
 void    winproc_refresh_struct(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp,
                                uint32_t guest_lp);
 

@@ -880,12 +880,10 @@ uint32_t winproc_call16(HWND hwnd, uint32_t proc16, uint16_t hinst,
                        x.extralen ? extra : NULL, x.extralen);
     if (pushed) inflight_pop();
 
-    /* Copy back only if the guest wrote something.  A window procedure that
-       simply forwards WM_NCCALCSIZE to DefWindowProc leaves its own copy
-       untouched, while USER32 has already adjusted the real struct through the
-       original pointer - copying the stale 16-bit copy over that undoes the
-       adjustment, and the window ends up with a client area covering its whole
-       frame, no caption and no menu bar. */
+    /* Copy back only if the guest wrote something: itself, or by passing the
+       message on, which rebuilds its copy from what DefWindowProc or the
+       control made of the struct (winproc_refresh_struct).  A copy it left
+       alone would only narrow the struct's values to 16 bits. */
     if (x.back != BACK_NONE && memcmp(before, extra, x.extralen) != 0)
         msg_copy_back(&x, extra, msg, wp, lp);
 
@@ -1094,13 +1092,39 @@ LRESULT winproc_default(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
     return DefWindowProcA(hwnd, msg, wp, lp);
 }
 
-/* The other half of that: DefWindowProc has just written its answer into the
-   32-bit struct through the original pointer, and the guest is holding a 16-bit
-   copy that is now out of date.  Guest code routinely reads the copy after
-   forwarding - "let DefWindowProc size the client area, then take another few
-   pixels off the top" is the standard shape of a WM_NCCALCSIZE handler - so
-   rebuild the copy in place.  `guest_lp` is the far pointer the guest passed
-   back to us, which is exactly where its copy lives. */
+/* A message whose lParam is a struct the guest was handed a 16-bit copy of
+   goes on, when the guest passes it to DefWindowProc or to a control's
+   procedure, with USER32's own 32-bit struct (msg16.c's pass_original).
+   Before that call, widen into the struct whatever the guest wrote into its
+   copy - PLANETWNDPROC and MESSAGEWNDPROC set ptMinTrackSize and then call
+   DefWindowProc - as winproc_call16 does when the guest returns.  A copy that
+   is still what the struct narrows to leaves it alone, so values wider than
+   16 bits go on as they came.  `guest_lp` is the far pointer the guest passed
+   on, which is exactly where its copy lives. */
+void winproc_widen_struct(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp,
+                          uint32_t guest_lp)
+{
+    uint8_t now[64], copy[64];
+    struct xlat x;
+
+    if (!guest_lp) return;
+    memset(now, 0, sizeof now);
+    msg_to_16(hwnd, msg, wp, lp, 0, now, &x);
+    if (x.back == BACK_NONE || !x.extralen) return;
+    g_read(guest_lp, copy, x.extralen);
+    if (memcmp(now, copy, x.extralen) != 0)
+        msg_copy_back(&x, copy, msg, wp, lp);
+}
+
+/* After the call, DefWindowProc or the control has written its answer into the
+   32-bit struct through the original pointer, and the guest is holding a
+   16-bit copy that is now out of date.  Guest code routinely reads the copy
+   after passing it on - "let the default size the client area, then take
+   another few pixels off the top" is the standard shape of a WM_NCCALCSIZE
+   handler - so rebuild the copy in place.  Left stale, the copy with the few
+   pixels off would go over the answer when the guest returns: a client area
+   covering the whole window less those pixels, with no room for its border,
+   caption, menu bar or scroll bar. */
 void winproc_refresh_struct(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp,
                             uint32_t guest_lp)
 {

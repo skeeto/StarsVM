@@ -575,26 +575,40 @@ uint32_t msg16_send(HWND hwnd, uint16_t msg16, uint16_t wp, uint32_t lp)
    message the guest makes up, and the one in flight when the guest has changed
    it before passing it on.  That is how an edit subclass that uppercases
    WM_CHAR's character, or narrows an EM_SETSEL or clears its scroll flag, gets
-   what it asked for, where the originals would undo it.  Two changes cannot be
-   honoured, and get the originals as before.  One is to a message whose
-   lParam is a struct copied onto the guest's stack, which nothing on this side
-   widens back.  The other is a new wParam with lParam as handed over, when
-   that lParam is a pointer: WM_GETTEXT with a smaller count, say.  The guest
-   was handed a host pointer there - WM_SETTEXT and WM_GETTEXT arrive that way,
-   and so does a buffer the guest sent a subclass of its own, once marshaled -
-   and read as a far pointer it names whatever selector its high half happens
-   to. */
+   what it asked for, where the originals would undo it.
+
+   A message whose lParam is a struct copied onto the guest's stack goes on
+   with the originals whatever the guest did to its parameters, since the call
+   needs USER32's own struct - but not without what the guest wrote into the
+   copy it passes on.  Where the struct carries an answer - WM_GETMINMAXINFO,
+   WM_WINDOWPOSCHANGING, WM_NCCALCSIZE, WM_MEASUREITEM - that is widened into
+   USER32's struct before the call, as it is when the guest returns, and the
+   copy is rebuilt from USER32's after, for the guest to read what
+   DefWindowProc or the control made of it (winproc_widen_struct,
+   winproc_refresh_struct).  That is how a minimum track size written before
+   DefWindowProc gets to it, and how a WM_NCCALCSIZE handler takes a few
+   pixels off the client area the control worked out.
+
+   One more change cannot be honoured, and gets the originals as before.  It is
+   a new wParam with lParam as handed over, when that lParam is a pointer:
+   WM_GETTEXT with a smaller count, say.  The guest was handed a host pointer
+   there - WM_SETTEXT and WM_GETTEXT arrive that way, and so does a buffer the
+   guest sent a subclass of its own, once marshaled - and read as a far
+   pointer it names whatever selector its high half happens to. */
 static uint32_t pass_original(int how, WNDPROC proc, const struct inflight *f,
                               uint16_t wp, uint32_t lp)
 {
     const struct inflight o = *f;      /* the call below can reenter */
-    LRESULT r = via(how, proc, o.hwnd, o.msg32, o.wp32, o.lp32);
     int type = winproc_ret_handle_type(o.msg32);
+    LRESULT r;
 
-    if (how == VIA_DEFAULT)
+    if (o.onstack)
+        winproc_widen_struct(o.hwnd, o.msg32, o.wp32, o.lp32, lp);
+    r = via(how, proc, o.hwnd, o.msg32, o.wp32, o.lp32);
+    if (o.onstack)
         winproc_refresh_struct(o.hwnd, o.msg32, o.wp32, o.lp32, lp);
-    else if (o.msg32 == EM_SETSEL && msg16_to_32(o.hwnd, o.msg16) == EM_SETSEL
-             && setsel_after(o.hwnd, wp))
+    if (how == VIA_PROC && o.msg32 == EM_SETSEL
+        && msg16_to_32(o.hwnd, o.msg16) == EM_SETSEL && setsel_after(o.hwnd, wp))
         via(how, proc, o.hwnd, EM_SCROLLCARET, 0, 0);
 
     /* DefWindowProc answers WM_CTLCOLOR* with a real HBRUSH.  Handed back raw,
