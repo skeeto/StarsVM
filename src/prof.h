@@ -46,8 +46,11 @@ void prof_rep(uint32_t elems, uint64_t ticks);
    prof_tick() - t0 folds away along with the hook it feeds. */
 uint64_t prof_tick(void);
 
-/* Ticks spent inside fpu_exec for one escape instruction. */
-void prof_fpu(uint64_t ticks);
+/* Ticks spent inside fpu_exec for one escape instruction, and which one it
+   was: the escape byte, its ModRM, and where it ran, so the report can say
+   which x87 forms a run really executed. */
+void prof_fpu(uint64_t ticks, uint16_t cs, uint16_t ip, uint8_t op,
+              uint8_t modrm);
 
 /* Exclusive time in one API handler: what the handler itself cost, less any
    guest code it called back into.  begin returns a token, end charges it. */
@@ -73,7 +76,9 @@ static inline void prof_op2(uint8_t op2) { (void)op2; }
 static inline void prof_rep(uint32_t elems, uint64_t ticks)
 { (void)elems; (void)ticks; }
 static inline uint64_t prof_tick(void) { return 0; }
-static inline void prof_fpu(uint64_t ticks) { (void)ticks; }
+static inline void prof_fpu(uint64_t ticks, uint16_t cs, uint16_t ip,
+                            uint8_t op, uint8_t modrm)
+{ (void)ticks; (void)cs; (void)ip; (void)op; (void)modrm; }
 static inline uint64_t prof_api_begin(void) { return 0; }
 static inline void prof_api_end(unsigned index, uint64_t token)
 { (void)index; (void)token; }

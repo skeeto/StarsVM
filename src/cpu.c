@@ -1376,7 +1376,7 @@ int cpu_step(Cpu *c)
         }
         t0 = prof_tick();
         ok = fpu_exec(c, op, modrm, ea.is_reg, ea.sel, ea.off);
-        prof_fpu(prof_tick() - t0);
+        prof_fpu(prof_tick() - t0, c->seg[S_CS], ip0, op, modrm);
         if (!ok) {
             c->state = CPU_BADOP;
             c->bad_op = op;

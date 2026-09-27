@@ -63,6 +63,84 @@ static int modrm(struct ds *d, char *out, size_t n, int size)
     return reg;
 }
 
+/* An x87 instruction in Intel's spelling.  `mem` is the operand as modrm()
+   wrote it, used only for the memory forms; the register forms are named by
+   the ModRM byte alone.  Operand-order mnemonics follow the SDM, where DC and
+   DE swap SUB with SUBR and DIV with DIVR relative to D8: DC E8+i is
+   FSUB ST(i),ST. */
+static void x87_name(uint8_t op, uint8_t m, const char *mem, char *out, size_t n)
+{
+    static const char *const arith[8] = {
+        "fadd","fmul","fcom","fcomp","fsub","fsubr","fdiv","fdivr" };
+    static const char *const iarith[8] = {
+        "fiadd","fimul","ficom","ficomp","fisub","fisubr","fidiv","fidivr" };
+    static const char *const d9mem[8] = {
+        "fld dword","?","fst dword","fstp dword","fldenv","fldcw","fnstenv","fnstcw" };
+    static const char *const dbmem[8] = {
+        "fild dword","fisttp dword","fist dword","fistp dword","?","fld tbyte","?",
+        "fstp tbyte" };
+    static const char *const ddmem[8] = {
+        "fld qword","fisttp qword","fst qword","fstp qword","frstor","?","fnsave",
+        "fnstsw" };
+    static const char *const dfmem[8] = {
+        "fild word","fisttp word","fist word","fistp word","fbld","fild qword",
+        "fbstp","fistp qword" };
+    static const char *const d9e0[32] = {
+        "fchs","fabs","?","?","ftst","fxam","?","?",
+        "fld1","fldl2t","fldl2e","fldpi","fldlg2","fldln2","fldz","?",
+        "f2xm1","fyl2x","fptan","fpatan","fxtract","fprem1","fdecstp","fincstp",
+        "fprem","fyl2xp1","fsqrt","fsincos","frndint","fscale","fsin","fcos" };
+    static const char *const dcreg[8] = {
+        "fadd","fmul","fcom2","fcomp3","fsubr","fsub","fdivr","fdiv" };
+    static const char *const dereg[8] = {
+        "faddp","fmulp","fcomp5","fcompp","fsubrp","fsubp","fdivrp","fdivp" };
+    unsigned reg = (m >> 3) & 7, i = m & 7;
+
+    if (m < 0xC0) {
+        switch (op) {
+        case 0xD8: snprintf(out, n, "%s dword %s", arith[reg], mem);  return;
+        case 0xDA: snprintf(out, n, "%s dword %s", iarith[reg], mem); return;
+        case 0xDC: snprintf(out, n, "%s qword %s", arith[reg], mem);  return;
+        case 0xDE: snprintf(out, n, "%s word %s", iarith[reg], mem);  return;
+        case 0xD9: snprintf(out, n, "%s %s", d9mem[reg], mem);        return;
+        case 0xDB: snprintf(out, n, "%s %s", dbmem[reg], mem);        return;
+        case 0xDD: snprintf(out, n, "%s %s", ddmem[reg], mem);        return;
+        default:   snprintf(out, n, "%s %s", dfmem[reg], mem);        return;
+        }
+    }
+    switch (op) {
+    case 0xD8: snprintf(out, n, "%s st,st(%u)", arith[reg], i); return;
+    case 0xDC: snprintf(out, n, "%s st(%u),st", dcreg[reg], i); return;
+    case 0xD9:
+        if (m >= 0xE0)      snprintf(out, n, "%s", d9e0[m - 0xE0]);
+        else if (reg == 0)  snprintf(out, n, "fld st(%u)", i);
+        else if (reg == 1)  snprintf(out, n, "fxch st(%u)", i);
+        else if (m == 0xD0) snprintf(out, n, "fnop");
+        else if (reg == 3)  snprintf(out, n, "fstp1 st(%u)", i);
+        else                snprintf(out, n, "? D9 %02X", m);
+        return;
+    case 0xDA:
+        snprintf(out, n, m == 0xE9 ? "fucompp" : "? DA %02X", m);
+        return;
+    case 0xDB:
+        snprintf(out, n, m == 0xE2 ? "fnclex" : m == 0xE3 ? "fninit" : "? DB %02X", m);
+        return;
+    case 0xDD: {
+        static const char *const r[8] = {
+            "ffree","fxch4","fst","fstp","fucom","fucomp","?","?" };
+        snprintf(out, n, "%s st(%u)", r[reg], i);
+        return;
+    }
+    case 0xDE:
+        if (m == 0xD9) snprintf(out, n, "fcompp");
+        else           snprintf(out, n, "%s st(%u),st", dereg[reg], i);
+        return;
+    default:
+        snprintf(out, n, m == 0xE0 ? "fnstsw ax" : "? DF %02X", m);
+        return;
+    }
+}
+
 int disasm(uint16_t sel, uint16_t off, char *out, int len)
 {
     struct ds d;
@@ -302,8 +380,9 @@ int disasm(uint16_t sel, uint16_t off, char *out, int len)
     case 0x9B: snprintf(txt, sizeof txt, "fwait"); break;
     case 0xD8: case 0xD9: case 0xDA: case 0xDB:
     case 0xDC: case 0xDD: case 0xDE: case 0xDF: {
+        uint8_t m = sel_rd8(d.sel, d.off);
         modrm(&d, rm, sizeof rm, 2);
-        snprintf(txt, sizeof txt, "esc %02X %s", op, rm);
+        x87_name(op, m, rm, txt, sizeof txt);
         break;
     }
     case 0x0F: {

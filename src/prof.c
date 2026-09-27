@@ -78,6 +78,14 @@ static uint64_t pf_acc[PF_DEPTH];
 static unsigned pf_depth;
 static uint64_t pf_api_ticks[PF_IMPORTS], pf_api_calls[PF_IMPORTS];
 static uint64_t pf_fpu_ticks, pf_fpu_n, pf_rep_ticks;
+
+/* x87 forms.  A memory form is its escape byte and ModRM reg field; a register
+   form is its escape byte and all six low ModRM bits, since those name the
+   instruction (D9 F0 is F2XM1) as well as the register.  128 slots an escape,
+   the first 8 for memory forms and the rest for register ones. */
+#define PF_X87 (8 * 128)
+static uint64_t pf_x87[PF_X87];
+static uint32_t pf_x87_first[PF_X87];                /* SEGPTR */
 static uint64_t pf_tsc0;
 static LARGE_INTEGER pf_qpc0;
 
@@ -219,7 +227,15 @@ void prof_rep(uint32_t elems, uint64_t ticks)
 
 uint64_t prof_tick(void) { return __rdtsc(); }
 
-void prof_fpu(uint64_t ticks) { pf_fpu_ticks += ticks; pf_fpu_n++; }
+void prof_fpu(uint64_t ticks, uint16_t cs, uint16_t ip, uint8_t op,
+              uint8_t modrm)
+{
+    unsigned k = (unsigned)(op - 0xD8) * 128 +
+                 ((modrm >> 6) == 3 ? 64u + (modrm & 0x3F) : (modrm >> 3) & 7u);
+    pf_fpu_ticks += ticks;
+    pf_fpu_n++;
+    if (!pf_x87[k]++) pf_x87_first[k] = SEGPTR(cs, ip);
+}
 
 uint64_t prof_api_begin(void)
 {
@@ -593,6 +609,41 @@ static void pf_report_time(void)
 
 const char *native_site_name(unsigned site);
 
+/* Every x87 form the run executed, most frequent first, each disassembled at
+   the first place it ran.  This is the dynamic counterpart of the static site
+   list in stars.exe: what a replacement FPU actually has to get right. */
+static void pf_report_x87(void)
+{
+    static unsigned idx[PF_X87];
+    unsigned a, b, n = 0;
+    uint16_t sw;
+
+    for (a = 0; a < PF_X87; a++) if (pf_x87[a]) idx[n++] = a;
+    for (a = 1; a < n; a++) {
+        unsigned v = idx[a];
+        for (b = a; b && pf_x87[idx[b - 1]] < pf_x87[v]; b--) idx[b] = idx[b - 1];
+        idx[b] = v;
+    }
+    log_msg("\n  x87 forms executed by fpu_exec (natives' own FP work not included)\n");
+    for (a = 0; a < n; a++) {
+        char line[160];
+        uint32_t at = pf_x87_first[idx[a]];
+        disasm(SEGPTR_SEL(at), SEGPTR_OFF(at), line, sizeof line);
+        log_msg("    %12llu  %-34s first at %s\n",
+                (unsigned long long)pf_x87[idx[a]],
+                strlen(line) > 27 ? line + 27 : line,
+                pf_site(SEGPTR_SEL(at), SEGPTR_OFF(at)));
+    }
+
+    /* The host's own status word, which nothing on the host ever clears: fpu.c
+       copies it into the guest's after most operations, so a flag set here at
+       any point was visible to every guest FNSTSW after it.  The one the
+       runtime acts on is OE (0x08), tested after every math call. */
+    __asm__ volatile ("fnstsw %0" : "=m"(sw));
+    log_msg("  host x87 status word at exit: %04X (exceptions %02X%s)\n", sw,
+            sw & 0x3F, (sw & 0x18) ? ", OVERFLOW OR UNDERFLOW SEEN" : "");
+}
+
 static void pf_report_natives(void)
 {
     unsigned k;
@@ -722,6 +773,7 @@ void prof_report(void)
     pf_report_blocks();
     pf_report_funcs();
     pf_report_natives();
+    pf_report_x87();
     pf_report_time();
 }
 
