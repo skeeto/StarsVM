@@ -71,6 +71,16 @@ uint32_t x80_to_f32(X80Env *e, const X80 *a);
 uint64_t x80_to_f64(X80Env *e, const X80 *a);
 int64_t  x80_to_int(X80Env *e, const X80 *a, unsigned width);
 
+/* The transcendentals (x80tx.c), which agree with an x87 in most cases
+   rather than all: see there. */
+void     x80_f2xm1(X80Env *e, const X80 *a, X80 *r);
+void     x80_sin(X80Env *e, const X80 *a, X80 *r);
+void     x80_cos(X80Env *e, const X80 *a, X80 *r);
+int      x80_ptan(X80Env *e, const X80 *a, X80 *r, X80 *one);   /* pushed? */
+void     x80_patan(X80Env *e, const X80 *a, const X80 *b, X80 *r);
+void     x80_yl2x(X80Env *e, const X80 *a, const X80 *b, X80 *r);
+void     x80_yl2xp1(X80Env *e, const X80 *a, const X80 *b, X80 *r);
+
 static inline void x80_get(X80 *v, const uint8_t b[10])
 {
     v->m = (uint64_t)b[0]       | (uint64_t)b[1] << 8  |

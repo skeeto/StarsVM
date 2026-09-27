@@ -4,12 +4,14 @@
  * exact operations must agree in every bit of the result and the status
  * word; the first twenty that do not are logged with the guest's CS:IP (just
  * past the instruction) and the operands, and all of them are counted, by
- * operation, in the summary at exit.  --x87-follow says whose result the
- * guest continues with: x87hw's by default, so that a difference does not
- * send the run somewhere the goldens have never been; x80.c's with "soft",
- * which is what an FPU=soft build will do and so what its goldens will be.
- *
- * x80.c has no transcendentals yet, so those are x87hw's alone, and counted.
+ * operation, in the summary at exit.  The transcendentals, which x80.c does
+ * not round as the x87 does in every case (see x80tx.c), are counted in
+ * three: the same, a unit apart with the same flags but C1, and different;
+ * only the last is a failure, and the first twenty of either kind of
+ * disagreement are logged.  --x87-follow says whose result the guest
+ * continues with: x87hw's by default, so that a difference does not send the
+ * run somewhere the goldens have never been; x80.c's with "soft", which is
+ * what an FPU=soft build will do and so what its goldens will be.
  */
 #include "x80dual.h"
 #include "x87hw.h"
@@ -20,17 +22,20 @@
 enum {
     D_ARITH, D_ARITH32, D_ARITH64, D_CMP, D_UCMP, D_CMP32, D_CMP64, D_SQRT,
     D_RNDINT, D_ABS, D_CHS, D_TST, D_XAM, D_PREM, D_SCALE, D_XTRACT, D_CONST,
-    D_FILD, D_FLD32, D_FLD64, D_FST32, D_FST64, D_FIST, D_N
+    D_FILD, D_FLD32, D_FLD64, D_FST32, D_FST64, D_FIST,
+    D_F2XM1, D_YL2X, D_YL2XP1, D_PATAN, D_SIN, D_COS, D_PTAN, D_N
 };
+#define D_TRANS D_F2XM1           /* the first of the transcendentals */
 
 static const char *const dname[D_N] = {
     "arith", "arith m32", "arith m64", "fcom", "fucom", "fcom m32",
     "fcom m64", "fsqrt", "frndint", "fabs", "fchs", "ftst", "fxam", "fprem",
     "fscale", "fxtract", "constant", "fild", "fld m32", "fld m64", "fst m32",
     "fst m64", "fist",
+    "f2xm1", "fyl2x", "fyl2xp1", "fpatan", "fsin", "fcos", "fptan",
 };
 
-static unsigned long long nops[D_N], ndiff[D_N], ntrans, nlogged;
+static unsigned long long nops[D_N], nnear[D_N], ndiff[D_N], nlogged;
 static int follow_soft;
 static uint16_t at_cs;
 static uint32_t at_ip;
@@ -65,16 +70,31 @@ static void dual_check(int d, uint16_t cw, const X80 *a, const X80 *b, uint64_t 
                   const X80Env *h, const X80Env *s, const X80 *rh,
                   const X80 *rs, int nr, uint64_t vh, uint64_t vs)
 {
-    int i, same = h->cc == s->cc && h->sw == s->sw && vh == vs;
+    int i, same = h->cc == s->cc && h->sw == s->sw && vh == vs, unit = 0;
 
     nops[d]++;
     for (i = 0; i < nr; i++)
         same &= rh[i].m == rs[i].m && rh[i].se == rs[i].se;
     if (same) return;
-    ndiff[d]++;
+    /* A transcendental a unit apart, or the same but for C1, with every
+       other flag the same. */
+    if (d >= D_TRANS && h->cc == s->cc && !((h->sw ^ s->sw) & ~0x0200u) &&
+        vh == vs && !((rh[0].se ^ rs[0].se) & 0x8000) &&
+        (nr < 2 || (rh[1].m == rs[1].m && rh[1].se == rs[1].se))) {
+        int eh = rh[0].se & 0x7FFF, es = rs[0].se & 0x7FFF;
+        if (eh == es && eh != 0x7FFF &&
+            (rh[0].m > rs[0].m ? rh[0].m - rs[0].m : rs[0].m - rh[0].m) <= 1)
+            unit = 1;                       /* C1 alone, or the last bit */
+        else if (eh + 1 == es && rh[0].m == ~0ull && rs[0].m == 1ull << 63)
+            unit = 1;
+        else if (es + 1 == eh && rs[0].m == ~0ull && rh[0].m == 1ull << 63)
+            unit = 1;
+    }
+    if (unit) nnear[d]++;
+    else      ndiff[d]++;
     if (nlogged++ >= 20) return;
-    log_msg("*** x87 backends differ: %s at %04X:%04X, cw %04X", dname[d],
-            at_cs, (unsigned)at_ip, cw);
+    log_msg("*** x87 backends %s: %s at %04X:%04X, cw %04X",
+            unit ? "a unit apart" : "differ", dname[d], at_cs, (unsigned)at_ip, cw);
     if (a) log_msg(", a %04X:%016llX", a->se, (unsigned long long)a->m);
     if (b) log_msg(", b %04X:%016llX", b->se, (unsigned long long)b->m);
     if (!b && m) log_msg(", m %016llX", (unsigned long long)m);
@@ -85,20 +105,21 @@ static void dual_check(int d, uint16_t cw, const X80 *a, const X80 *b, uint64_t 
 
 unsigned long long x80dual_report(void)
 {
-    unsigned long long n = 0, bad = 0;
+    unsigned long long n = 0, bad = 0, nt = 0, tnear = 0, tbad = 0;
     int d;
 
     for (d = 0; d < D_N; d++) {
-        n += nops[d];
-        bad += ndiff[d];
+        if (d < D_TRANS) { n += nops[d]; bad += ndiff[d]; }
+        else             { nt += nops[d]; tnear += nnear[d]; tbad += ndiff[d]; }
     }
     log_msg("x87: dual backends, following %s: %llu exact operations, "
-            "%llu differed; %llu transcendental, x87hw.c's only\n",
-            follow_soft ? "x80.c" : "x87hw.c", n, bad, ntrans);
+            "%llu differed; %llu transcendental, %llu a unit apart, %llu "
+            "differed\n", follow_soft ? "x80.c" : "x87hw.c", n, bad, nt, tnear, tbad);
     for (d = 0; d < D_N; d++)
-        if (ndiff[d])
-            log_msg("    %-10s %llu of %llu differed\n", dname[d], ndiff[d], nops[d]);
-    return bad;
+        if (ndiff[d] || nnear[d])
+            log_msg("    %-10s %llu of %llu differed, %llu a unit apart\n",
+                    dname[d], ndiff[d], nops[d], nnear[d]);
+    return bad + tbad;
 }
 
 /* Run an operation on both, check, and hand on the followed side's. */
@@ -279,34 +300,38 @@ int64_t dual_to_int(X80Env *e, const X80 *a, unsigned width)
     return (int64_t)(follow_soft ? vs : vh);
 }
 
-/* ------------------------------------------------ x87hw's alone, for now */
+/* ---------------------------------------------------- the transcendentals */
 
-void dual_f2xm1(X80Env *e, const X80 *a, X80 *r) { ntrans++; x87hw_f2xm1(e, a, r); }
-void dual_sin(X80Env *e, const X80 *a, X80 *r)   { ntrans++; x87hw_sin(e, a, r); }
-void dual_cos(X80Env *e, const X80 *a, X80 *r)   { ntrans++; x87hw_cos(e, a, r); }
+DUAL_UNARY(f2xm1, D_F2XM1)
+DUAL_UNARY(sin, D_SIN)
+DUAL_UNARY(cos, D_COS)
+
+/* ST(0) and ST(1) in, one result out. */
+#define DUAL_BINARY(fn, d)                                                   \
+    void dual_##fn(X80Env *e, const X80 *a, const X80 *b, X80 *r)            \
+    {                                                                        \
+        X80 rh[1], rs[1];                                                    \
+        uint64_t vh = 0, vs = 0;                                             \
+        DUAL_BOTH(d, a, b, 0, 1, x87hw_##fn(&h, a, b, rh),                   \
+                  x80_##fn(&s, a, b, rs));                                   \
+        *r = follow_soft ? rs[0] : rh[0];                                    \
+    }
+
+DUAL_BINARY(patan, D_PATAN)
+DUAL_BINARY(yl2x, D_YL2X)
+DUAL_BINARY(yl2xp1, D_YL2XP1)
 
 int dual_ptan(X80Env *e, const X80 *a, X80 *r, X80 *one)
 {
-    ntrans++;
-    return x87hw_ptan(e, a, r, one);
-}
-
-void dual_patan(X80Env *e, const X80 *a, const X80 *b, X80 *r)
-{
-    ntrans++;
-    x87hw_patan(e, a, b, r);
-}
-
-void dual_yl2x(X80Env *e, const X80 *a, const X80 *b, X80 *r)
-{
-    ntrans++;
-    x87hw_yl2x(e, a, b, r);
-}
-
-void dual_yl2xp1(X80Env *e, const X80 *a, const X80 *b, X80 *r)
-{
-    ntrans++;
-    x87hw_yl2xp1(e, a, b, r);
+    X80 rh[2], rs[2];
+    uint64_t vh, vs;
+    memset(rh, 0, sizeof rh);
+    memset(rs, 0, sizeof rs);
+    DUAL_BOTH(D_PTAN, a, NULL, 0, 2, vh = (uint64_t)x87hw_ptan(&h, a, &rh[0], &rh[1]),
+              vs = (uint64_t)x80_ptan(&s, a, &rs[0], &rs[1]));
+    *r = follow_soft ? rs[0] : rh[0];
+    *one = follow_soft ? rs[1] : rh[1];
+    return (int)(follow_soft ? vs : vh);
 }
 
 void dual_host_enter(void) { x87hw_host_enter(); }
@@ -314,3 +339,4 @@ void dual_host_leave(void) { x87hw_host_leave(); }
 
 #undef DUAL_BOTH
 #undef DUAL_UNARY
+#undef DUAL_BINARY

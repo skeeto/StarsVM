@@ -1010,3 +1010,6 @@ int64_t x80_to_int(X80Env *env, const X80 *a, unsigned width)
     if (up) env->sw |= C1;
     return u.neg ? -(int64_t)(kept - 1) - 1 : (int64_t)kept;
 }
+
+/* The transcendental instructions share everything above. */
+#include "x80tx.c"

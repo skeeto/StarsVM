@@ -45,7 +45,7 @@ uint32_t dual_to_f32(X80Env *e, const X80 *a);
 uint64_t dual_to_f64(X80Env *e, const X80 *a);
 int64_t  dual_to_int(X80Env *e, const X80 *a, unsigned width);
 
-/* The transcendentals, which x80.c does not have yet: x87hw's alone. */
+/* The transcendentals, compared approximately: see x80dual.c. */
 void     dual_f2xm1(X80Env *e, const X80 *a, X80 *r);
 void     dual_sin(X80Env *e, const X80 *a, X80 *r);
 void     dual_cos(X80Env *e, const X80 *a, X80 *r);

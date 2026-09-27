@@ -21,6 +21,9 @@ enum {
     XO_SQRT, XO_RNDINT, XO_ABS, XO_CHS, XO_TST, XO_XAM, XO_PREM, XO_SCALE,
     XO_XTRACT, XO_CONST, XO_FILD, XO_FLD32, XO_FLD64, XO_FST32, XO_FST64,
     XO_FIST,
+    /* The transcendentals, which the x87 does not round correctly and so
+       which agree with it approximately: see x80ops_approx. */
+    XO_F2XM1, XO_YL2X, XO_YL2XP1, XO_PATAN, XO_SIN, XO_COS, XO_PTAN,
 };
 
 static const struct x80op { const char *name; int kind, arg; } x80ops[] = {
@@ -44,6 +47,10 @@ static const struct x80op { const char *name; int kind, arg; } x80ops[] = {
     { "fld64",  XO_FLD64,   0 },        { "fst32",  XO_FST32,   0 },
     { "fst64",  XO_FST64,   0 },        { "fist16", XO_FIST,    2 },
     { "fist32", XO_FIST,    4 },        { "fist64", XO_FIST,    8 },
+    { "f2xm1",  XO_F2XM1,   0 },        { "yl2x",   XO_YL2X,    0 },
+    { "yl2xp1", XO_YL2XP1,  0 },        { "patan",  XO_PATAN,   0 },
+    { "sin",    XO_SIN,     0 },        { "cos",    XO_COS,     0 },
+    { "ptan",   XO_PTAN,    0 },
 };
 #define X80_NOPS (sizeof x80ops / sizeof *x80ops)
 
@@ -132,13 +139,48 @@ static inline void x80case_gen(unsigned k, uint64_t seed, struct x80case *c)
         case XO_FLD64:   P##from_f64(e_, (c)->m, &(o)->r); break;            \
         case XO_FST32:   (o)->v = P##to_f32(e_, &(c)->a); break;             \
         case XO_FST64:   (o)->v = P##to_f64(e_, &(c)->a); break;             \
-        default:         (o)->v = (uint64_t)P##to_int(e_, &(c)->a, (unsigned)arg_); \
+        case XO_F2XM1:   P##f2xm1(e_, &(c)->a, &(o)->r); break;              \
+        case XO_YL2X:    P##yl2x(e_, &(c)->a, &(c)->b, &(o)->r); break;      \
+        case XO_YL2XP1:  P##yl2xp1(e_, &(c)->a, &(c)->b, &(o)->r); break;    \
+        case XO_PATAN:   P##patan(e_, &(c)->a, &(c)->b, &(o)->r); break;     \
+        case XO_SIN:     P##sin(e_, &(c)->a, &(o)->r); break;                \
+        case XO_COS:     P##cos(e_, &(c)->a, &(o)->r); break;                \
+        case XO_PTAN:    (o)->v = (uint64_t)P##ptan(e_, &(c)->a, &(o)->r, &(o)->s); \
+                         break;                                              \
+        case XO_FIST:    (o)->v = (uint64_t)P##to_int(e_, &(c)->a, (unsigned)arg_); \
                          break;                                              \
         }                                                                    \
         /* Only what the operation defines: the rest of the status word is  \
            the exception flags. */                                           \
         e_->sw &= (uint16_t)(0x80FFu | e_->cc);                              \
     } while (0)
+
+static inline int x80ops_approx(unsigned k) { return x80ops[k].kind >= XO_F2XM1; }
+
+/* How far apart two register results are, in units in the last place,
+   capped: the difference of their encodings read as one number, exponent
+   above significand, which is continuous across the denormal boundary.
+   Only for finite values of the same sign within one exponent of each
+   other; anything else is the cap. */
+static inline uint64_t x80_ulps(const X80 *a, const X80 *b, uint64_t cap)
+{
+    int ea = a->se & 0x7FFF, eb = b->se & 0x7FFF, lo;
+    uint64_t ka, kb;
+
+    if ((a->se ^ b->se) & 0x8000 || ea == 0x7FFF || eb == 0x7FFF) return cap;
+    if (ea > eb + 1 || eb > ea + 1) return cap;
+    lo = ea < eb ? ea : eb;
+    /* Counted from the smaller exponent's start: the fraction, plus one
+       whole binade for the larger. */
+    ka = (a->m & 0x7FFFFFFFFFFFFFFFu) + (ea > lo ? 0x8000000000000000u : 0);
+    kb = (b->m & 0x7FFFFFFFFFFFFFFFu) + (eb > lo ? 0x8000000000000000u : 0);
+    if (lo == 0) {           /* a denormal and the least binade: m alone */
+        ka = a->m;
+        kb = b->m;
+    }
+    ka = ka > kb ? ka - kb : kb - ka;
+    return ka < cap ? ka : cap;
+}
 
 static inline int x80out_same(const struct x80out *h, const struct x80out *s)
 {
