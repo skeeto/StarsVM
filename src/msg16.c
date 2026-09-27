@@ -28,6 +28,7 @@ struct marshal {
     int      refuse;            /* no honest translation exists */
     int      local;             /* lp points into this record, and no out
                                    path says so already */
+    UINT     after;             /* a message without parameters to follow it */
     char     buf[BUFSZ];
     RECT     rect;
     INT      tabs[64];
@@ -180,6 +181,13 @@ static void marshal_in(HWND hwnd, uint16_t msg16, uint16_t wp, uint32_t lp,
             m->wp = (WPARAM)LOWORD(lp);
             m->lp = (LPARAM)(int16_t)HIWORD(lp);
         }
+        /* The scroll flag is a multiline control's: 0 scrolls the caret into
+           view and 1 does not (KB Q102641).  Win32's EM_SETSEL never
+           scrolls a multiline control, so 0 needs an EM_SCROLLCARET after
+           it.  A single-line control ignored the flag, and Win32's scrolls
+           one whatever it is told. */
+        if (!wp && (GetWindowLongA(hwnd, GWL_STYLE) & ES_MULTILINE))
+            m->after = EM_SCROLLCARET;
         break;
 
     case LB_GETSELITEMS: {
@@ -427,6 +435,7 @@ uint32_t msg16_send(HWND hwnd, uint16_t msg16, uint16_t wp, uint32_t lp)
         return 0;
     }
     r = SendMessageA(hwnd, m.msg, m.wp, m.lp);
+    if (m.after) SendMessageA(hwnd, m.after, 0, 0);
     return marshal_out(&m, r);
 }
 
@@ -465,8 +474,11 @@ uint32_t msg16_post(HWND hwnd, uint16_t msg16, uint16_t wp, uint32_t lp)
        read.  Send it instead; that changes the timing, which is the lesser of
        the two wrongs.  So too the messages Win32 will not post even when they
        carry no pointer; see post_refused. */
-    if (m.out == OUT_NONE && !m.local && !post_refused(m.msg))
-        return (uint32_t)PostMessageA(hwnd, m.msg, m.wp, m.lp);
+    if (m.out == OUT_NONE && !m.local && !post_refused(m.msg)) {
+        if (!PostMessageA(hwnd, m.msg, m.wp, m.lp)) return 0;
+        if (m.after) PostMessageA(hwnd, m.after, 0, 0);
+        return 1;
+    }
 
     /* The guest asks whether the post went through, not for the result: an
        index of 0 is no failure, and a window that is gone is one. */
