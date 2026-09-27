@@ -615,6 +615,13 @@ static void msg_to_16(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp,
         x->lp16 = (uint32_t)MAKELONG(HWND_16((HWND)lp), HIWORD(wp));
         break;
 
+    case EM_LINESCROLL:
+        /* Both counts back into the one lParam, lines in the low word and
+           columns in the high, which is where msg16.c found them. */
+        x->wp16 = 0;
+        x->lp16 = (uint32_t)MAKELONG(LOWORD(lp), LOWORD(wp));
+        break;
+
     case WM_ACTIVATEAPP:
         /* Win16 passes a task handle here; a thread id means nothing to the
            guest, so hand it zero rather than a plausible-looking lie. */

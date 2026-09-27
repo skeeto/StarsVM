@@ -313,6 +313,17 @@ static void marshal_in(HWND hwnd, uint16_t msg16, uint16_t wp, uint32_t lp,
         m->lp = (LPARAM)HMENU_32(LOWORD(lp));
         break;
 
+    case EM_LINESCROLL:
+        /* Win16 packs both counts into lParam, lines in the low word and
+           columns in the high, with wParam unused; Win32 moved the columns
+           to wParam.  Both are signed, and a negative count scrolls up or
+           left.  Passed through as it was, three lines up became 65533
+           down and every column 65536 lines.  Wine's edit_proc16 takes it
+           apart the same way. */
+        m->wp = (WPARAM)(int16_t)HIWORD(lp);
+        m->lp = (LPARAM)(int16_t)LOWORD(lp);
+        break;
+
     /* ---- one Win16 message fanning out into seven -------------------------- */
 
     case 0x0019: {                                  /* WM_CTLCOLOR */
