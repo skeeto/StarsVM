@@ -99,21 +99,49 @@ static inline uint64_t div128(uint64_t hi, uint64_t lo, uint64_t d, uint64_t *r)
 #endif
 }
 
-/* floor(sqrt(x)) for any 64-bit x, a bit at a time. */
+/* sqrt((k + 1/2) 2^24) for k = 64..255, rounded: a 16-bit root, good to
+   about eight bits, of a 32-bit number from its top byte. */
+static const uint16_t SQRT_SEED[192] = {
+    0x8080, 0x817E, 0x827A, 0x8374, 0x846C, 0x8563, 0x8658, 0x874B,
+    0x883C, 0x892C, 0x8A1A, 0x8B06, 0x8BF1, 0x8CDB, 0x8DC3, 0x8EA9,
+    0x8F8E, 0x9072, 0x9154, 0x9235, 0x9314, 0x93F2, 0x94CF, 0x95AB,
+    0x9685, 0x975E, 0x9836, 0x990D, 0x99E2, 0x9AB6, 0x9B8A, 0x9C5C,
+    0x9D2D, 0x9DFD, 0x9ECC, 0x9F99, 0xA066, 0xA132, 0xA1FD, 0xA2C7,
+    0xA38F, 0xA457, 0xA51E, 0xA5E4, 0xA6A9, 0xA76D, 0xA831, 0xA8F3,
+    0xA9B5, 0xAA75, 0xAB35, 0xABF4, 0xACB2, 0xAD70, 0xAE2C, 0xAEE8,
+    0xAFA3, 0xB05D, 0xB116, 0xB1CF, 0xB287, 0xB33E, 0xB3F5, 0xB4AA,
+    0xB55F, 0xB614, 0xB6C7, 0xB77A, 0xB82D, 0xB8DE, 0xB98F, 0xBA3F,
+    0xBAEF, 0xBB9E, 0xBC4C, 0xBCFA, 0xBDA7, 0xBE53, 0xBEFF, 0xBFAB,
+    0xC055, 0xC0FF, 0xC1A9, 0xC252, 0xC2FA, 0xC3A2, 0xC449, 0xC4F0,
+    0xC596, 0xC63B, 0xC6E0, 0xC785, 0xC829, 0xC8CC, 0xC96F, 0xCA12,
+    0xCAB4, 0xCB55, 0xCBF6, 0xCC96, 0xCD36, 0xCDD6, 0xCE75, 0xCF13,
+    0xCFB1, 0xD04F, 0xD0EC, 0xD188, 0xD225, 0xD2C0, 0xD35C, 0xD3F6,
+    0xD491, 0xD52B, 0xD5C4, 0xD65D, 0xD6F6, 0xD78E, 0xD826, 0xD8BD,
+    0xD954, 0xD9EB, 0xDA81, 0xDB17, 0xDBAC, 0xDC41, 0xDCD6, 0xDD6A,
+    0xDDFE, 0xDE91, 0xDF24, 0xDFB7, 0xE049, 0xE0DB, 0xE16D, 0xE1FE,
+    0xE28F, 0xE31F, 0xE3AF, 0xE43F, 0xE4CE, 0xE55D, 0xE5EC, 0xE67A,
+    0xE708, 0xE796, 0xE823, 0xE8B0, 0xE93D, 0xE9C9, 0xEA55, 0xEAE1,
+    0xEB6C, 0xEBF7, 0xEC82, 0xED0C, 0xED96, 0xEE20, 0xEEAA, 0xEF33,
+    0xEFBC, 0xF044, 0xF0CC, 0xF154, 0xF1DC, 0xF263, 0xF2EA, 0xF371,
+    0xF3F8, 0xF47E, 0xF504, 0xF589, 0xF60F, 0xF694, 0xF718, 0xF79D,
+    0xF821, 0xF8A5, 0xF929, 0xF9AC, 0xFA2F, 0xFAB2, 0xFB35, 0xFBB7,
+    0xFC39, 0xFCBB, 0xFD3C, 0xFDBD, 0xFE3E, 0xFEBF, 0xFF40, 0xFFC0,
+};
+
+/* floor(sqrt(x)) for x >= 2^62, which is 32 bits with the top one set: a
+   seed from the table, a Newton step at 32 bits and one at 64, each of
+   which doubles the good bits, and a unit or two put right at the end. */
 static uint32_t isqrt64(uint64_t x)
 {
-    uint64_t r = 0, bit = 1ull << 62;
+    uint32_t t = (uint32_t)(x >> 32), y = SQRT_SEED[(t >> 24) - 64];
+    uint64_t r;
 
-    while (bit > x) bit >>= 2;
-    while (bit) {
-        if (x >= r + bit) {
-            x -= r + bit;
-            r = (r >> 1) + bit;
-        } else {
-            r >>= 1;
-        }
-        bit >>= 2;
-    }
+    y = (y + t / y) >> 1;                       /* the root of t, 16 bits */
+    r = (uint64_t)y << 16;
+    r = (r + x / r) >> 1;                       /* the root of x, 32 bits */
+    if (r > 0xFFFFFFFFu) r = 0xFFFFFFFFu;
+    while (r * r > x) r--;
+    while (r < 0xFFFFFFFFu && (r + 1) * (r + 1) <= x) r++;
     return (uint32_t)r;
 }
 
@@ -127,14 +155,12 @@ static uint32_t isqrt64(uint64_t x)
    the remainder is zero are all the rounding needs. */
 static uint64_t isqrt128(uint64_t hi, uint64_t lo, int *guard, int *sticky)
 {
-    uint64_t r1 = isqrt64(hi), rem1 = hi - r1 * r1, q, qr, r, sh, sl, rh, rl;
+    uint64_t r1 = isqrt64(hi), rem1 = hi - r1 * r1, q, r, sh, sl, rh, rl;
 
-    /* (rem1 * 2^32 + lo / 2^32) / (2 r1): rem1 <= 2 r1 < 2^34, so the
-       dividend is at most 66 bits and its high word below the divisor.  The
-       quotient can come out a little over 32 bits; capped, the fix-up below
-       still reaches the root. */
-    q = div128(rem1 >> 32, rem1 << 32 | lo >> 32, r1 << 1, &qr);
-    (void)qr;
+    /* (rem1 2^32 + lo/2^32) / (2 r1), with both halved so that the dividend
+       fits in 64 bits (rem1 <= 2 r1 < 2^33): a 64-by-32-bit division.  The
+       bit lost in the halving is within what the fix-up puts right. */
+    q = (rem1 << 31 | lo >> 33) / r1;
     if (q > 0xFFFFFFFFu) q = 0xFFFFFFFFu;
     r = r1 << 32 | q;
 
